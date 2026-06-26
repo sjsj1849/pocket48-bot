@@ -3,6 +3,7 @@ config.json
 log/
 storage/
 sidecar/
+data/
 .DS_Store
 *.swp
 *.swo
