@@ -1,8 +1,8 @@
 # Pocket48 Bot
 
-基于 Go 语言的 **Pocket48 (口袋48)** 消息监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ) (OneBot v11) QQ 机器人框架。
+基于 Go 的 **口袋48** 消息监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ) (OneBot v11) QQ 机器人框架。
 
-实时监控小偶像的口袋房间和微博动态，将消息转发到 QQ 群。
+实时监控小偶像的口袋房间消息和微博动态，将消息转发到 QQ 群。
 
 ## 功能
 
@@ -13,60 +13,114 @@
 - 礼物消息（含年度青春盛典记分礼物）
 - 上麦提醒
 - **自适应轮询**：有消息 300ms 快速拉取，安静期 1s 保底
-- **媒体缓存**：图片/语音/视频预下载到本地，加快 NapCat 处理
+- **媒体缓存**：图片/语音/视频预下载到本地，加快 NapCat 发送
 
 ### 🐼 微博监控
-- 微博超话动态监控
-- 每日自动超话签到
-- 超话数据日统计推送
-- Cookie / App 抓包热更新
+- **主页微博**动态监控
+- **超话发帖**监控（指定 uid 在指定超话的发帖）
+- **超话签到**（手动/自动每日签到）
+- **超话签到人数**查询与日排行
+- **三套认证**同时维护：AppAuth / weibo.com Cookie / m.weibo.cn Cookie
+
+### 🖼️ 消息转发
+- 图片自动下载并转为 Base64 发送（兼容 NapCat）
+- 语音消息文件转发
+- 视频消息文件转发
+- 媒体缓存自动清理
 
 ### ⚙️ 系统特性
-- 多群分组订阅（不同群可以监控不同房间）
+- 多群分组订阅（不同群监控不同房间）
 - COS 归档存储（消息自动归档）
-- 优雅关闭通知
+- 自适应轮询间隔
 
 ## 快速开始
 
-### 1. 配置 NapCat
+### 1. 安装 NapCat
 
-确保 NapCat 已启动并开启 WebSocket（默认 `127.0.0.1:3001`）。
+参照 [NapCat 官方文档](https://napneko.github.io) 安装 NapCatQQ。
 
-### 2. 写配置文件
+> 推荐使用 Docker 或 Rootless 安装，无需 root 权限。
 
-在程序同目录创建 `config.json`：
+### 2. 配置 NapCat 反向 WebSocket
+
+NapCat 需要开启 **反向 WebSocket**（Reverse WebSocket），让机器人作为客户端主动连接 NapCat。
+
+**方法一：WebUI 配置**
+1. 启动 NapCat 后，浏览器打开 `http://<你的IP>:6099`
+2. 进入「网络配置」→「反向 WebSocket 客户端」
+3. 添加一个连接：
+   - **名称**：`pocket48-bot`
+   - **目标地址**：`ws://127.0.0.1:3001`
+   - **Access Token**：（留空，除非配置了 `NAPCAT_ACCESS_TOKEN`）
+4. 保存并重载
+
+**方法二：直接编辑配置文件**
+NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的 `config/` 中，`onebot11.json` 或 `napcat_config.json`，添加：
+
+```json
+{
+  "network": {
+    "reverseWs": [
+      {
+        "name": "pocket48-bot",
+        "url": "ws://127.0.0.1:3001",
+        "accessToken": ""
+      }
+    ]
+  }
+}
+```
+
+### 3. 写配置文件
+
+在程序同目录创建 `config.json`（最少配置）：
 
 ```json
 {
   "NAPCAT_WS_URL": "ws://127.0.0.1:3001",
-  "SUPER_ADMIN": 123456789,
-  "BOUND_GROUP_ID": 987654321,
-  "POLLING_INTERVAL": 1,
   "POCKET_USERNAME": "13800000000",
-  "POCKET_PASSWORD": "your_password"
+  "POCKET_PASSWORD": "your_password",
+  "SUPER_ADMIN": 123456789,
+  "BOUND_GROUP_ID": 987654321
 }
 ```
 
 | 字段 | 说明 |
 | :--- | :--- |
-| `NAPCAT_WS_URL` | NapCat WebSocket 地址（默认本机不用改） |
+| `NAPCAT_WS_URL` | NapCat 反向 WebSocket 地址（默认本机不用改） |
+| `NAPCAT_ACCESS_TOKEN` | NapCat 鉴权 Token（如果设置了就填） |
 | `SUPER_ADMIN` | **你的 QQ 号** |
-| `BOUND_GROUP_ID` | **消息要发到的 QQ 群号** |
+| `BOUND_GROUP_ID` | **消息发到的目标 QQ 群号** |
+| `COMMAND_PREFIX` | 命令前缀（默认 `bot`） |
 | `POCKET_USERNAME` | 口袋48手机号 |
 | `POCKET_PASSWORD` | 口袋48密码 |
+| `POCKET_TOKEN` | （可选）直接填 Token 跳过密码登录 |
 
-### 3. 运行
+其他配置项（全部可选，有默认值）：
+
+| 字段 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `COMMAND_PREFIX` | 命令前缀 | `"bot"` |
+| `LIVE_MONITORING` | 全局直播通知 | `false` |
+| `ADMIN_QQ` | 管理员 QQ 号列表 | `[]` |
+| `GROUP_SUBSCRIPTIONS` | 群→房间监控列表 | `{}` |
+| `WEIBO_COOKIE` | 微博认证（建议通过命令设置） | `""` |
+
+### 4. 运行
 
 ```bash
+# 编译
 go build -o pocket48-bot ./cmd/bot
+
+# 运行（会自动读取同目录下的 config.json）
 ./pocket48-bot
 ```
 
-启动后会自动登录口袋48并开始轮询。后续所有操作都通过 QQ 群内命令完成。
+启动后自动登录口袋48并开始轮询。
 
-### 4. 添加房间监控
+### 5. 添加房间监控
 
-在群里发：
+在绑定的 QQ 群里发（假设前缀为 `bot`）：
 
 ```
 bot search 王奕
@@ -78,86 +132,177 @@ bot search 王奕
 bot monitor 67248386
 ```
 
-其他命令见下方说明。
+### 6. 配置微博认证
+
+微博监控需要认证。推荐使用 App 抓包一键导入：
+
+```
+bot weibo cookie import <粘贴抓包文本>
+```
+
+支持从 curl 命令、请求头文本、Fiddler/Charles 导出文本中自动提取 AppAuth（Authorization/gsid）。也支持直接设置 Cookie：
+
+```
+bot weibo cookie set "SCF=xxx; SUB=xxx; ..."
+```
+
+认证状态检查：
+
+```
+bot weibo cookie check
+```
+
+---
 
 ## 命令
 
-所有命令默认前缀 `bot`（可在配置中修改）。
+所有命令默认前缀 `bot`（可在 `config.json` 中修改 `COMMAND_PREFIX`）。以下假设前缀为 `bot`。
 
-### 房间监控
+### 📱 口袋48 房间
 
-| 命令 | 说明 |
-| :--- | :--- |
-| `bot on` / `bot off` | 全局开启/停止消息转发 |
-| `bot search <名字>` | 搜索小偶像房间 |
-| `bot monitor <房间ID>` | 添加房间监控 |
-| `bot remove <房间ID>` | 移除房间监控 |
-| `bot list` | 查看监控列表 |
-
-### 微博
+#### 监控控制
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `bot weibo add <UID>` | 添加微博监控 |
-| `bot weibo del <UID>` | 删除微博监控 |
-| `bot weibo list` | 查看微博监控 |
-| `bot weibo cookie set <Cookie>` | 更新 Cookie |
-| `bot weibo cookie check` | 检查 Cookie 状态 |
-| `bot weibo super sign` | 手动超话签到 |
-| `bot weibo super auto on/off` | 自动签到开关 |
+| `bot on` | 开启口袋房间消息转发 |
+| `bot off` | 关闭口袋房间消息转发 |
 
-### 直播 & 礼物
+#### 房间管理
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `bot live on/off` | 全局直播通知开关 |
-| `bot gift on/off <房间ID>` | 指定房间礼物回复开关 |
-| `bot score on/off <房间ID>` | 年度青春盛典记分开关 |
+| `bot search <名字>` | 搜索小偶像的房间 |
+| `bot monitor <房间ID>` | 添加房间监控到本群 |
+| `bot remove <房间ID>` | 从本群移除该房间监控 |
+| `bot list [channels]` | 查看本群监控的房间列表（加 `channels` 显示频道名） |
 
-### 其他
+#### 功能开关
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `bot status` | 运行状态 |
-| `bot archive status` | 归档状态 |
-| `bot archive retry` | 重试归档队列 |
+| `bot live [on/off] [房间号]` | 直播通知开关。无参数→查看状态；只有 on/off→全局开关；有房间号→指定房间 |
+| `bot gift <on/off> <房间号>` | 指定房间的礼物消息回复开关 |
+| `bot score <on/off> <房间号>` | 指定房间的年度青春盛典记分监控开关 |
 
-## 配置项
+#### 账号管理
 
-| 字段 | 说明 | 默认值 |
-| :--- | :--- | :--- |
-| `NAPCAT_WS_URL` | NapCat WebSocket 地址 | `ws://127.0.0.1:3001` |
-| `NAPCAT_ACCESS_TOKEN` | NapCat 鉴权 Token | `""` |
-| `POCKET_USERNAME` | 口袋48手机号 | `""` |
-| `POCKET_PASSWORD` | 口袋48密码 | `""` |
-| `POCKET_TOKEN` | 口袋48 Token（登录后自动填充） | `""` |
-| `SUPER_ADMIN` | 超级管理员 QQ | `0` |
-| `BOUND_GROUP_ID` | 默认绑定的 QQ 群 | `0` |
-| `COMMAND_PREFIX` | 命令前缀 | `"bot"` |
-| `POLLING_INTERVAL` | 轮询间隔（秒） | `1` |
-| `LIVE_MONITORING` | 全局直播通知 | `false` |
-| `WEIBO_COOKIE` | 微博 Web Cookie | `""` |
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot login <token>` | 直接设置口袋48 Token |
+| `bot login sms <手机号>` | 发送短信验证码登录 |
+| `bot login pwd <密码>` | 密码登录 |
+| `bot code <验证码>` | 输入短信验证码完成登录 |
+| `bot whoami` | 查看当前口袋48账号和 Token 状态 |
+| `bot admin <add/remove> <QQ号>` | 管理管理员（仅超级管理员可用） |
+| `bot bind` | 在群里执行，将该群绑定为机器人目标群 |
+
+---
+
+### 🐼 微博
+
+#### 微博监控管理
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot weibo add <UID> [at_all]` | 添加微博监控。加 `at_all` 参数则新微博 @全体成员 |
+| `bot weibo del <UID>` | 删除指定 UID 的微博监控。省略 UID 则清空该群全部 |
+| `bot weibo list` | 查看本群监控的 UID 列表 |
+
+#### 微博认证
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot weibo cookie check` | 检查三套认证（AppAuth / weibo.com / m.weibo.cn）状态 |
+| `bot weibo cookie import <抓包文本>` | **推荐**：从 App 抓包（curl/请求头）一键导入认证，自动解析 AppAuth 和 Cookie |
+| `bot weibo cookie set <Cookie>` | 直接设置 weibo.com Cookie（不推荐，建议用 import） |
+
+> 认证优先级：AppAuth > m.weibo.cn Cookie > weibo.com Cookie。任意一个有效即可。
+
+#### 超话签到
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot weibo super list` | 查看已配置的超话列表 |
+| `bot weibo super add <oid> [名称]` | 添加超话（oid 是超话 ID，可指定中文名称便于识别） |
+| `bot weibo super del <名称或oid>` | 删除超话 |
+| `bot weibo super sign [all/名称]` | 手动签到。all→全部签到，指定名称→签到指定超话 |
+| `bot weibo super auto <on/off>` | 开启/关闭每日自动签到（每天 9:00 自动执行） |
+
+> 超话 oid 获取方式：在微博 App 打开超话页面，URL 中的数字即为 oid。
+
+#### 超话发帖监控
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot weibo superpost bind <uid> <oid> [名称]` | 监控指定 uid 在指定超话的发帖 |
+| `bot weibo superpost unbind <uid> <oid>` | 删除对应监控 |
+| `bot weibo superpost list` | 查看本群超话发帖监控列表 |
+| `bot weibo superpost test <uid> <oid>` | 测试是否能获取到该 uid 在超话的最新帖子 |
+
+#### 超话签到人数（日排行）
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot weibo super count` | 查询当前超话签到人数排行（显示涨跌） |
+| `bot weibo super count enable <on/off>` | 开启/关闭超话签到人数监控功能 |
+| `bot weibo super count list` | 查看已绑定的超话签到人数列表 |
+| `bot weibo super count bind <oid> [名称]` | 绑定一个超话来追踪签到人数 |
+| `bot weibo super count unbind <名称或oid>` | 解绑超话签到人数追踪 |
+| `bot weibo super count yesterday` | 查看昨日快照数据 |
+
+---
+
+### 🎤 直播 & 礼物
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot live <on/off> [房间号]` | 直播通知开关 |
+| `bot gift <on/off> <房间号>` | 礼物回复开关 |
+| `bot score <on/off> <房间号>` | 年度青春盛典记分监控开关 |
+
+### 📋 其他
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot status` | 运行状态、监控房间数、微博监控数 |
+| `bot help [命令名]` | 显示帮助。加命令名显示该命令的详细用法 |
+| `bot archive status` | 归档存储状态 |
+| `bot archive retry` | 重试归档队列中失败的任务 |
+| `bot test <live/weibo>` | 发送测试消息（直播通知/微博通知） |
+| `bot welcome <on/off> <群号>` | 群欢迎消息开关 |
+| `bot welcome add/del/list <群号> [内容]` | 管理欢迎消息内容 |
+
+### ❓ 获取帮助
+
+群内发送 `bot help` 查看分类命令列表。
+
+查看具体命令用法（如想看 `weibo` 命令的详细说明）：
+```
+bot help weibo
+```
+
+---
 
 ## 项目结构
 
 ```
-├── cmd/bot/main.go          # 入口
+├── cmd/bot/main.go           # 入口
 ├── internal/
-│   ├── config/              # 配置管理
-│   ├── logic/               # 核心逻辑
-│   │   ├── bot.go           # Bot 主循环
-│   │   ├── messages.go      # 消息轮询 & 转发
-│   │   ├── media.go         # 媒体下载 & 缓存清理
-│   │   ├── commands.go      # 命令处理
-│   │   ├── cmd_handlers.go  # 命令处理器
-│   │   ├── weibo.go         # 微博逻辑
-│   │   └── utils.go         # 工具函数
-│   ├── napcat/              # NapCat OneBot 客户端
-│   ├── pocket48/            # Pocket48 API 客户端
-│   ├── monitor/             # 微博监控
-│   └── storage/             # 消息归档（COS）
-├── storage/                 # 本地存储目录
-└── config.json              # 配置文件
+│   ├── config/               # 配置管理
+│   ├── logic/                # 核心逻辑
+│   │   ├── bot.go            # Bot 主循环
+│   │   ├── messages.go       # 消息轮询 & 转发
+│   │   ├── media.go          # 媒体下载 & 缓存清理
+│   │   ├── commands.go       # 命令分发
+│   │   ├── cmd_handlers.go   # 命令处理器
+│   │   ├── weibo.go          # 微博逻辑（认证/签到/超话）
+│   │   └── utils.go          # 工具函数
+│   ├── napcat/               # NapCat OneBot v11 客户端
+│   ├── pocket48/             # 口袋48 API 客户端
+│   ├── monitor/              # 微博监控轮询
+│   └── storage/              # 消息归档（COS）
+├── storage/                  # 本地存储目录
+└── config.json               # 配置文件
 ```
 
 ## License
