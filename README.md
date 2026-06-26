@@ -219,7 +219,7 @@ bot weibo cookie set "SCF=xxx; SUB=xxx; ..."
 bot weibo cookie check
 ```
 
-> ⚠️ **微博 Cookie 需要人工维护**：微博的 Cookie 和 AppAuth 都会不定期过期（通常几天到几周不等）。过期后 bot 会在群里发通知提醒。需要重新抓包导入：
+> ⚠️ **维护 AppAuth 一个就够了**：AppAuth 是所有功能的基础，只要 AppAuth 有效，Cookie 自动推导就够了。微博 Cookie（weibo.com / m.weibo.cn）基本不用管，bot 会从 AppAuth 的 gsid 自动推导。过期后 bot 会在群里发通知提醒，重新抓包导入即可：
 > ```
 > bot weibo cookie import <新的抓包文本>
 > ```
