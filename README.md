@@ -35,13 +35,50 @@
 
 ## 快速开始
 
-### 1. 安装 NapCat
+### 1. 下载或编译
 
-参照 [NapCat 官方文档](https://napneko.github.io) 安装 NapCatQQ。
+**方式一：下载 Release（推荐）**
+
+从 [Releases](https://github.com/sjsj1849/pocket48-bot/releases) 下载对应平台的压缩包：
+
+| 你的平台 | 下载哪个 |
+| :--- | :--- |
+| Linux 服务器 (x86_64) | `pocket48-bot-*-linux-amd64.gz` |
+| Linux 服务器 (ARM) | `pocket48-bot-*-linux-arm64.gz` |
+| Windows 电脑 | `pocket48-bot-*-windows-amd64.zip` |
+| macOS Intel | `pocket48-bot-*-darwin-amd64.gz` |
+| macOS M1/M2/M3 | `pocket48-bot-*-darwin-arm64.gz` |
+
+解压后得到一个可执行文件：
+
+```bash
+# Linux / macOS
+gunzip pocket48-bot-*.gz
+chmod +x pocket48-bot-*
+./pocket48-bot-*
+```
+
+```powershell
+# Windows — 解压 zip 后双击或命令行运行
+pocket48-bot-*.exe
+```
+
+**方式二：自行编译**
+
+需要安装 Go 1.21+：
+
+```bash
+git clone git@github.com:sjsj1849/pocket48-bot.git
+cd pocket48-bot
+go build -o pocket48-bot ./cmd/bot
+./pocket48-bot
+```
+
+### 2. 安装 NapCat
 
 > 推荐使用 Docker 或 Rootless 安装，无需 root 权限。
 
-### 2. 配置 NapCat 反向 WebSocket
+### 3. 配置 NapCat 反向 WebSocket
 
 NapCat 需要开启 **反向 WebSocket**（Reverse WebSocket），让机器人作为客户端主动连接 NapCat。
 
@@ -71,7 +108,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 }
 ```
 
-### 3. 写配置文件
+### 4. 写配置文件
 
 在程序同目录创建 `config.json`（最少配置）：
 
@@ -113,19 +150,19 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `GROUP_SUBSCRIPTIONS` | 群→房间监控列表 | `{}` |
 | `WEIBO_COOKIE` | 微博认证（建议通过命令设置） | `""` |
 
-### 4. 运行
+### 5. 运行
 
 ```bash
-# 编译
-go build -o pocket48-bot ./cmd/bot
+# 如果用 Release 下载的，直接运行：
+./pocket48-bot-*
 
-# 运行（会自动读取同目录下的 config.json）
+# 如果用源码编译的：
 ./pocket48-bot
 ```
 
-启动后自动登录口袋48并开始轮询。
+程序会自动读取同目录下的 `config.json`，启动后自动登录口袋48并开始轮询。
 
-### 5. 添加房间监控
+### 6. 添加房间监控
 
 在绑定的 QQ 群里发（假设前缀为 `bot`）：
 
@@ -139,7 +176,7 @@ bot search 王奕
 bot monitor 67248386
 ```
 
-### 6. 配置微博认证
+### 7. 配置微博认证
 
 微博监控需要认证。推荐使用 App 抓包一键导入：
 
