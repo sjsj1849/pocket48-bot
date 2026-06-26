@@ -81,8 +81,9 @@ type WeiboSuperPostConfig struct {
 }
 
 type WeiboSuperCountTopic struct {
-	OID  string `json:"oid"`
-	Name string `json:"name,omitempty"`
+	OID        string `json:"oid"`
+	Name       string `json:"name,omitempty"`
+	ReportSign int    `json:"report_sign,omitempty"` // 0=正常自动签到, 1=随日报签到拿精确排名, >1=连续精确天数
 }
 
 type WeiboSuperCountSnapshotItem struct {
