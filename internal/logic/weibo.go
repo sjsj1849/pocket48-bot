@@ -1442,48 +1442,123 @@ func (b *Bot) handleWeiboSuperCountGroupCommand(args []string) string {
 
 func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 	topics := b.getWeiboSuperCountTopics()
-	if len(args) == 3 {
-		if !b.cfg.WeiboSuperCountEnabled {
-			return "该功能已关闭，请先开启：weibo super count enable on"
+
+	// Usage: bot weibo super count [组名|list|yesterday|...]
+	// - no arg: show all groups in one message
+	// - 组名: filter by that group
+	// - list/yesterday/bind/etc: existing subcommands
+
+	if len(args) >= 4 {
+		sub := strings.ToLower(strings.TrimSpace(args[3]))
+		// Known subcommands — dispatch as before
+		switch sub {
+		case "group", "enable", "on", "off", "list", "yesterday", "bind", "unbind", "del", "delete":
+			return b.handleWeiboSuperCountSubcommand(args, topics, sub)
+		default:
+			// Not a known subcommand → treat as group name
 		}
-		if len(topics) == 0 {
-			return "暂无超话签到人数绑定，请先执行：weibo super count bind <oid> [名称]"
+	}
+
+	// Query: either just "bot weibo super count" or "bot weibo super count <组名>"
+	if !b.cfg.WeiboSuperCountEnabled {
+		return "该功能已关闭，请先开启：weibo super count enable on"
+	}
+	if len(topics) == 0 {
+		return "暂无超话签到人数绑定，请先执行：weibo super count bind <oid> [名称]"
+	}
+
+	results, failed := b.fetchWeiboSuperCountAll()
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	if loc == nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	now := time.Now().In(loc)
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+	var signBaseline map[string]int
+	var likeBaseline map[string]int
+	var yesterdayV2 map[string]*config.WeiboSuperCountSnapshotItem
+	if b.cfg.WeiboSuperCountDailySnapshotsV2 != nil {
+		yesterdayV2 = b.cfg.WeiboSuperCountDailySnapshotsV2[yesterday]
+		signBaseline = buildSignBaselineFromSnapshotV2(yesterdayV2)
+		likeBaseline = buildLikeBaselineFromSnapshotV2(yesterdayV2)
+	}
+	if signBaseline == nil && b.cfg.WeiboSuperCountDailySnapshots != nil {
+		signBaseline = b.cfg.WeiboSuperCountDailySnapshots[yesterday]
+	}
+	postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
+
+	// Check if a group name was provided as argument
+	queryGroup := ""
+	if len(args) >= 4 {
+		queryGroup = strings.TrimSpace(strings.Join(args[3:], " "))
+	}
+
+	if queryGroup != "" {
+		// Filter by group
+		groups := b.getWeiboSuperCountGroups()
+		resolvedGroup := queryGroup
+		for gid, ginfo := range groups {
+			if ginfo.Name == queryGroup || gid == queryGroup {
+				resolvedGroup = gid
+				break
+			}
 		}
-		results, failed := b.fetchWeiboSuperCountAll()
-		loc, _ := time.LoadLocation("Asia/Shanghai")
-		if loc == nil {
-			loc = time.FixedZone("CST", 8*3600)
+		filtered := b.filterResultsByGroup(results, resolvedGroup)
+		if len(filtered) == 0 {
+			return fmt.Sprintf("分组「%s」下没有数据或分组不存在", queryGroup)
 		}
-		now := time.Now().In(loc)
-		yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
-		var signBaseline map[string]int
-		var likeBaseline map[string]int
-		var yesterdayV2 map[string]*config.WeiboSuperCountSnapshotItem
-		if b.cfg.WeiboSuperCountDailySnapshotsV2 != nil {
-			yesterdayV2 = b.cfg.WeiboSuperCountDailySnapshotsV2[yesterday]
-			signBaseline = buildSignBaselineFromSnapshotV2(yesterdayV2)
-			likeBaseline = buildLikeBaselineFromSnapshotV2(yesterdayV2)
+		ginfo := groups[resolvedGroup]
+		title := "[超话签到人数查询]"
+		if ginfo != nil {
+			title = fmt.Sprintf("[超话签到人数查询 - %s]", ginfo.Name)
 		}
-		if signBaseline == nil && b.cfg.WeiboSuperCountDailySnapshots != nil {
-			signBaseline = b.cfg.WeiboSuperCountDailySnapshots[yesterday]
-		}
-		postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
+		return formatWeiboSuperCountDualRanking(filtered, failed, title, now, signBaseline, likeBaseline, postBaseline)
+	}
+
+	// No group specified → show all groups in one message
+	groups := b.getWeiboSuperCountGroups()
+	if len(groups) == 0 {
+		// No groups → flat output (backward compat)
 		return formatWeiboSuperCountDualRanking(results, failed, "[超话签到人数查询]", now, signBaseline, likeBaseline, postBaseline)
 	}
 
-	sub := strings.ToLower(strings.TrimSpace(args[3]))
+	// Build per-group sections
+	sortedGroupIDs := make([]string, 0, len(groups))
+	for gid := range groups {
+		sortedGroupIDs = append(sortedGroupIDs, gid)
+	}
+	sort.Strings(sortedGroupIDs)
+	var parts []string
+	for _, gid := range sortedGroupIDs {
+		ginfo := groups[gid]
+		groupResults := b.filterResultsByGroup(results, gid)
+		if len(groupResults) == 0 {
+			continue
+		}
+		title := fmt.Sprintf("[超话签到人数查询 - %s]", ginfo.Name)
+		section := formatWeiboSuperCountDualRanking(groupResults, nil, title, now, signBaseline, likeBaseline, postBaseline)
+		parts = append(parts, section)
+	}
+	if len(parts) == 0 {
+		return "暂无可用签到数据"
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// handleWeiboSuperCountSubcommand dispatches known subcommands (list, bind, yesterday, etc.)
+func (b *Bot) handleWeiboSuperCountSubcommand(args []string, topics map[string]*config.WeiboSuperCountTopic, sub string) string {
 	switch sub {
 	case "group":
 		return b.handleWeiboSuperCountGroupCommand(args)
 	case "enable":
-		if len(args) < 5 {
-			state := "off"
-			if b.cfg.WeiboSuperCountEnabled {
-				state = "on"
-			}
-			return fmt.Sprintf("当前 super count 功能: %s", state)
+	if len(args) < 5 {
+		state := "off"
+		if b.cfg.WeiboSuperCountEnabled {
+			state = "on"
 		}
-		toggle := strings.ToLower(strings.TrimSpace(args[4]))
+		return fmt.Sprintf("当前 super count 功能: %s", state)
+	}
+	toggle := strings.ToLower(strings.TrimSpace(args[4]))
 		if toggle != "on" && toggle != "off" {
 			return "格式错误: weibo super count enable <on/off>"
 		}
