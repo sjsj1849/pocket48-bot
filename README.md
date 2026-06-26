@@ -96,6 +96,13 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `POCKET_PASSWORD` | 口袋48密码 |
 | `POCKET_TOKEN` | （可选）直接填 Token 跳过密码登录 |
 
+> ⚠️ **口袋48密码登录已失效**：官方 API 不再支持密码直接登录。启动时如果 `POCKET_PASSWORD` 认证失败，会报 `password error`。请改用 SMS 短信登录：
+> ```
+> bot login sms <手机号>    # 发送验证码
+> bot code <验证码>          # 输入验证码完成登录
+> ```
+> 登录成功后的 Token 会自动保存到 `config.json`，后续重启不需要重新登录。
+
 其他配置项（全部可选，有默认值）：
 
 | 字段 | 说明 | 默认值 |
@@ -151,6 +158,12 @@ bot weibo cookie set "SCF=xxx; SUB=xxx; ..."
 ```
 bot weibo cookie check
 ```
+
+> ⚠️ **微博 Cookie 需要人工维护**：微博的 Cookie 和 AppAuth 都会不定期过期（通常几天到几周不等）。过期后 bot 会在群里发通知提醒。需要重新抓包导入：
+> ```
+> bot weibo cookie import <新的抓包文本>
+> ```
+> 建议在手机上用 Stream / HTTP Catcher 抓一次微博 App 请求，把请求头全文粘贴进来即可，不需要手动提取具体字段。
 
 ---
 
