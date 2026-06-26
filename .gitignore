@@ -12,3 +12,4 @@ data/
 pocket48-bot
 bot48
 dist/
+*.bak
