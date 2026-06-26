@@ -751,20 +751,7 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 	results := make([]monitor.WeiboSuperCountResult, 0, len(topics))
 	failed := make([]string, 0)
 
-	// 先统一签到获取精确排名（因为已跳过自动签到，此处为当日首次签到 → 一定有 rank）
-	signRanks := make(map[string]int, len(topics))
-	for oid := range topics {
-		res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
-		if err != nil {
-			log.Printf("[Weibo][Count] pre-sign failed oid=%s err=%v, will use rounded count", oid, err)
-			continue
-		}
-		if res.Rank > 0 {
-			log.Printf("[Weibo][Count] pre-sign rank oid=%s rank=%d", oid, res.Rank)
-			signRanks[oid] = res.Rank
-		}
-	}
-
+	// 第一轮：从 App/Web API 拿数据
 	for oid, topic := range topics {
 		nameHint := strings.TrimSpace(topic.Name)
 		res, err := b.weiboMonitor.FetchSuperCountByOID(oid, nameHint)
@@ -789,17 +776,19 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 		}
 		results = append(results, *res)
 	}
-	// 用签到 rank 覆盖 App/Web API 返回的近似值
-	if len(signRanks) > 0 {
-		for i, r := range results {
-			if !strings.Contains(r.SignText, "万") {
-				continue
-			}
-			if rank, ok := signRanks[normalizeWeiboSuperOID(r.OID)]; ok && rank > 0 && rank != r.SignCount {
-				log.Printf("[Weibo][Count] override rounded count oid=%s label=%d exact=%d", r.OID, r.SignCount, rank)
-				results[i].SignCount = rank
-				results[i].SignText = fmt.Sprintf("签到%d人", rank)
-			}
+	// 第二轮：对含"万"的近似值，签到获取精确排名
+	for i, r := range results {
+		if !strings.Contains(r.SignText, "万") {
+			continue
+		}
+		signRes, err := b.weiboMonitor.SignWeiboSuperTopic(r.OID)
+		if err != nil {
+			continue
+		}
+		if signRes.Rank > 0 && signRes.Rank != r.SignCount {
+			log.Printf("[Weibo][Count] override rounded count oid=%s label=%d exact=%d", r.OID, r.SignCount, signRes.Rank)
+			results[i].SignCount = signRes.Rank
+			results[i].SignText = fmt.Sprintf("签到%d人", signRes.Rank)
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
