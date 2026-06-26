@@ -1,0 +1,18 @@
+[Unit]
+Description=SNH48 Bot with COS Storage
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bot_48
+ExecStartPre=/root/bot_48/check_cos.sh
+ExecStart=/root/bot_48/bot_48
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/bot_48/bot.log
+StandardError=append:/root/bot_48/bot.log
+SyslogIdentifier=bot48
+
+[Install]
+WantedBy=multi-user.target
