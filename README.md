@@ -76,7 +76,30 @@ go build -o pocket48-bot ./cmd/bot
 
 ### 2. 安装 NapCat
 
-> 推荐使用 Docker 或 Rootless 安装，无需 root 权限。
+NapCat 是一个 QQ 机器人框架，负责接收和发送 QQ 消息。**装完必须配置反向 WebSocket 连接**，bot 才能通过 WebSocket 主动连上 NapCat。
+
+**安装方式（选一种）：**
+
+- **Linux 一键脚本**（推荐服务器用）：
+  ```bash
+  curl -o napcat.sh https://nclatest.znin.net/NapNeko/NapCat-Installer/raw/main/install.sh
+  bash napcat.sh
+  ```
+  安装后 NapCat 默认会在 `~/.local/share/QQ/` 下
+
+- **Docker 安装**：
+  ```bash
+  docker run -d \
+    --name napcat \
+    -p 6099:6099 \
+    -p 3001:3001 \
+    -v ~/.config/QQ:/app/.config/QQ \
+    --restart always \
+    mlikiowa/napcat-docker:latest
+  ```
+  端口说明：`6099`=WebUI管理面板，`3001`=反向WebSocket端口（给bot连接用）
+
+- **Windows 图形界面**：从 [NapCat Releases](https://github.com/NapNeko/NapCatQQ/releases) 下载安装包，解压运行即可
 
 ### 3. 配置 NapCat 反向 WebSocket
 
@@ -133,7 +156,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `POCKET_PASSWORD` | 口袋48密码 |
 | `POCKET_TOKEN` | （可选）直接填 Token 跳过密码登录 |
 
-> ⚠️ **口袋48密码登录已失效**：官方 API 不再支持密码直接登录。启动时如果 `POCKET_PASSWORD` 认证失败，会报 `password error`。请改用 SMS 短信登录：
+> ⚠️ **密码登录暂未实现**：口袋48 App 密码有加密/哈希方案，我们尚未破解，所以 `POCKET_PASSWORD` 直配方式暂时不可用。启动时如果密码认证失败会报 `password error`。请改用 SMS 短信登录：
 > ```
 > bot login sms <手机号>    # 发送验证码
 > bot code <验证码>          # 输入验证码完成登录
@@ -266,7 +289,12 @@ bot weibo cookie check
 | `bot weibo cookie import <抓包文本>` | **推荐**：从 App 抓包（curl/请求头）一键导入认证，自动解析 AppAuth 和 Cookie |
 | `bot weibo cookie set <Cookie>` | 直接设置 weibo.com Cookie（不推荐，建议用 import） |
 
-> 认证优先级：AppAuth > m.weibo.cn Cookie > weibo.com Cookie。任意一个有效即可。
+> 📌 **三种认证说明**：
+> - **AppAuth（最高优先级）**：微博 App 抓包获取的完整认证，所有功能可用（监控、签到、超话发帖监控等）
+> - **m.weibo.cn Cookie（次之）**：仅可用于基础功能（监控主页微博、超话签到、签到人数查询），超话发帖监控（superpost）等需要 AppAuth 的功能不可用
+> - **weibo.com Cookie（最低）**：同上，基础功能可用但有限制（部分接口可能返回不完整数据）
+>
+> 建议优先用 `bot weibo cookie import` 导入 App 抓包文本，一次获取三套认证。
 
 #### 超话签到
 
@@ -276,11 +304,13 @@ bot weibo cookie check
 | `bot weibo super add <oid> [名称]` | 添加超话（oid 是超话 ID，可指定中文名称便于识别） |
 | `bot weibo super del <名称或oid>` | 删除超话 |
 | `bot weibo super sign [all/名称]` | 手动签到。all→全部签到，指定名称→签到指定超话 |
-| `bot weibo super auto <on/off>` | 开启/关闭每日自动签到（每天 9:00 自动执行） |
+| `bot weibo super auto <on/off>` | 开启/关闭每日自动签到（每天首次运行，不固定时间点。bot 每 15 分钟检查一次，当日未签到则触发，约凌晨 00:00~00:15 执行） |
 
 > 超话 oid 获取方式：在微博 App 打开超话页面，URL 中的数字即为 oid。
 
 #### 超话发帖监控
+
+> ⚠️ **可用性未知**：该功能依赖 AppAuth 认证，尚未充分测试，暂不确定是否能正常工作。后续更新会完善。如你使用中发现任何问题，欢迎反馈。
 
 | 命令 | 说明 |
 | :--- | :--- |
@@ -295,10 +325,14 @@ bot weibo cookie check
 | :--- | :--- |
 | `bot weibo super count` | 查询当前超话签到人数排行（显示涨跌） |
 | `bot weibo super count enable <on/off>` | 开启/关闭超话签到人数监控功能 |
-| `bot weibo super count list` | 查看已绑定的超话签到人数列表 |
-| `bot weibo super count bind <oid> [名称]` | 绑定一个超话来追踪签到人数 |
+| `bot weibo super count list [-g 组名]` | 查看已绑定的超话签到人数列表（可选按分组筛选） |
+| `bot weibo super count bind <oid> [名称] [-g 分组名]` | 绑定一个超话来追踪签到人数，可用 -g 指定分组 |
 | `bot weibo super count unbind <名称或oid>` | 解绑超话签到人数追踪 |
 | `bot weibo super count yesterday` | 查看昨日快照数据 |
+| `bot weibo super count group list` | 列出所有分组 |
+| `bot weibo super count group create <名称>` | 创建新分组（日报会按分组分别出报告） |
+| `bot weibo super count group rename <旧名称> <新名称>` | 重命名分组（日报标题同步更新） |
+| `bot weibo super count group del <名称>` | 删除分组（其下超话回到未分组，不影响数据） |
 
 ---
 

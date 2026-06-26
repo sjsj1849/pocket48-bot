@@ -11,3 +11,4 @@ data/
 *.html
 pocket48-bot
 bot48
+dist/

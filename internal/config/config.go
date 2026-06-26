@@ -44,6 +44,7 @@ type Config struct {
 	WeiboSuperLastRunDate             string                                             `json:"WEIBO_SUPER_LAST_RUN_DATE"`                   // YYYY-MM-DD
 	WeiboSuperCountEnabled            bool                                               `json:"WEIBO_SUPER_COUNT_ENABLED"`                   // Enable weibo super count feature
 	WeiboSuperCountTopics             map[string]*WeiboSuperCountTopic                   `json:"WEIBO_SUPER_COUNT_TOPICS"`                    // OID -> Topic for count feature
+	WeiboSuperCountGroups             map[string]*WeiboSuperCountGroupInfo               `json:"WEIBO_SUPER_COUNT_GROUPS"`                    // group_id -> group info
 	WeiboSuperCountLastPushDate       string                                             `json:"WEIBO_SUPER_COUNT_LAST_PUSH_DATE"`            // YYYY-MM-DD (Asia/Shanghai)
 	WeiboSuperCountDailySnapshots     map[string]map[string]int                          `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS"`           // YYYY-MM-DD -> OID -> SignCount
 	WeiboSuperCountDailySnapshotsV2   map[string]map[string]*WeiboSuperCountSnapshotItem `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"`        // YYYY-MM-DD -> OID -> SnapshotItem
@@ -80,10 +81,15 @@ type WeiboSuperPostConfig struct {
 	LastPostID string `json:"last_post_id,omitempty"`
 }
 
+type WeiboSuperCountGroupInfo struct {
+	Name string `json:"name"` // Display name for the group
+}
+
 type WeiboSuperCountTopic struct {
 	OID        string `json:"oid"`
 	Name       string `json:"name,omitempty"`
 	ReportSign int    `json:"report_sign,omitempty"` // 0=正常自动签到, 1=随日报签到拿精确排名, >1=连续精确天数
+	GroupName  string `json:"group_name,omitempty"`  // which group this topic belongs to
 }
 
 type WeiboSuperCountSnapshotItem struct {
@@ -175,6 +181,25 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if _, ok := raw["WEIBO_SUPER_COUNT_TOPICS"]; !ok || cfg.WeiboSuperCountTopics == nil {
 		cfg.WeiboSuperCountTopics = make(map[string]*WeiboSuperCountTopic)
+	}
+	// Migration: if topics exist but no groups defined, create a default group
+	if _, ok := raw["WEIBO_SUPER_COUNT_GROUPS"]; !ok || cfg.WeiboSuperCountGroups == nil {
+		cfg.WeiboSuperCountGroups = make(map[string]*WeiboSuperCountGroupInfo)
+	}
+	if len(cfg.WeiboSuperCountTopics) > 0 && len(cfg.WeiboSuperCountGroups) == 0 {
+		hasGroup := false
+		for _, t := range cfg.WeiboSuperCountTopics {
+			if t.GroupName != "" {
+				hasGroup = true
+				break
+			}
+		}
+		if !hasGroup {
+			cfg.WeiboSuperCountGroups["default"] = &WeiboSuperCountGroupInfo{Name: "默认分组"}
+			for _, t := range cfg.WeiboSuperCountTopics {
+				t.GroupName = "default"
+			}
+		}
 	}
 	if _, ok := raw["WEIBO_SUPER_COUNT_LAST_PUSH_DATE"]; !ok {
 		cfg.WeiboSuperCountLastPushDate = ""

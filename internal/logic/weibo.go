@@ -637,6 +637,31 @@ func normalizeWeiboSuperOID(oid string) string {
 	return "1022:" + oid
 }
 
+func (b *Bot) getWeiboSuperCountGroups() map[string]*config.WeiboSuperCountGroupInfo {
+	if b.cfg.WeiboSuperCountGroups == nil {
+		b.cfg.WeiboSuperCountGroups = make(map[string]*config.WeiboSuperCountGroupInfo)
+	}
+	return b.cfg.WeiboSuperCountGroups
+}
+
+func (b *Bot) filterResultsByGroup(results []monitor.WeiboSuperCountResult, groupName string) []monitor.WeiboSuperCountResult {
+	topics := b.getWeiboSuperCountTopics()
+	filtered := make([]monitor.WeiboSuperCountResult, 0, len(results))
+	for _, r := range results {
+		oid := normalizeWeiboSuperOID(r.OID)
+		if t, ok := topics[oid]; ok && t.GroupName == groupName {
+			filtered = append(filtered, r)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].SignCount != filtered[j].SignCount {
+			return filtered[i].SignCount > filtered[j].SignCount
+		}
+		return strings.ToLower(filtered[i].Name) < strings.ToLower(filtered[j].Name)
+	})
+	return filtered
+}
+
 func (b *Bot) getWeiboSuperCountTopics() map[string]*config.WeiboSuperCountTopic {
 	if b.cfg.WeiboSuperCountTopics == nil {
 		b.cfg.WeiboSuperCountTopics = make(map[string]*config.WeiboSuperCountTopic)
@@ -1258,8 +1283,38 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			signBaseline = b.cfg.WeiboSuperCountDailySnapshots[yesterday]
 		}
 		postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
-		report := formatWeiboSuperCountDualRanking(results, failed, "[超话签到人数日报]", now, signBaseline, likeBaseline, postBaseline)
-		b.notifyAdmins(report)
+
+		groups := b.getWeiboSuperCountGroups()
+		if len(groups) == 0 {
+			// Fallback: single global report
+			report := formatWeiboSuperCountDualRanking(results, failed, "[超话签到人数日报]", now, signBaseline, likeBaseline, postBaseline)
+			b.notifyAdmins(report)
+		} else {
+			// Per-group report (groups in map iteration order)
+			sortedGroupIDs := make([]string, 0, len(groups))
+			for gid := range groups {
+				sortedGroupIDs = append(sortedGroupIDs, gid)
+			}
+			sort.Strings(sortedGroupIDs)
+			for _, gid := range sortedGroupIDs {
+				ginfo := groups[gid]
+				groupResults := b.filterResultsByGroup(results, gid)
+				if len(groupResults) == 0 {
+					continue
+				}
+				title := fmt.Sprintf("[超话签到人数日报 - %s]", ginfo.Name)
+				groupFailed := make([]string, 0)
+				for _, f := range failed {
+					// include all failed topics (can't easily filter by group, just show in each)
+					groupFailed = append(groupFailed, f)
+				}
+				if len(groupFailed) == 0 {
+					groupFailed = nil
+				}
+				report := formatWeiboSuperCountDualRanking(groupResults, groupFailed, title, now, signBaseline, likeBaseline, postBaseline)
+				b.notifyAdmins(report)
+			}
+		}
 
 		if b.cfg.WeiboSuperCountDailySnapshots == nil {
 			b.cfg.WeiboSuperCountDailySnapshots = make(map[string]map[string]int)
@@ -1273,6 +1328,115 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		if err := b.cfg.Save(); err != nil {
 			log.Printf("[WeiboSuperCount] save last push date failed: %v", err)
 		}
+	}
+}
+
+func (b *Bot) handleWeiboSuperCountGroupCommand(args []string) string {
+	if len(args) < 5 {
+		return "用法: weibo super count group <create|list|rename|del> [参数]"
+	}
+	action := strings.ToLower(strings.TrimSpace(args[4]))
+	groups := b.getWeiboSuperCountGroups()
+	topics := b.getWeiboSuperCountTopics()
+
+	switch action {
+	case "list":
+		if len(groups) == 0 {
+			return "暂无分组，请先执行：weibo super count group create <名称>"
+		}
+		var lines []string
+		sortedIDs := make([]string, 0, len(groups))
+		for gid := range groups {
+			sortedIDs = append(sortedIDs, gid)
+		}
+		sort.Strings(sortedIDs)
+		for _, gid := range sortedIDs {
+			ginfo := groups[gid]
+			count := 0
+			for _, t := range topics {
+				if t.GroupName == gid {
+					count++
+				}
+			}
+			lines = append(lines, fmt.Sprintf("- %s (%d个超话)  ID=%s", ginfo.Name, count, gid))
+		}
+		return "分组列表:\n" + strings.Join(lines, "\n")
+
+	case "create":
+		if len(args) < 6 {
+			return "格式错误: weibo super count group create <名称>"
+		}
+		displayName := strings.TrimSpace(strings.Join(args[5:], " "))
+		if displayName == "" {
+			return "格式错误: 名称不能为空"
+		}
+		// Generate a stable group ID from name (lowercase, no spaces)
+		gid := strings.ToLower(strings.ReplaceAll(displayName, " ", "_"))
+		if _, exists := groups[gid]; exists {
+			return fmt.Sprintf("分组已存在: %s (名称=%s)", gid, displayName)
+		}
+		groups[gid] = &config.WeiboSuperCountGroupInfo{Name: displayName}
+		if err := b.cfg.Save(); err != nil {
+			return fmt.Sprintf("保存失败: %v", err)
+		}
+		return fmt.Sprintf("[OK] 已创建分组「%s」(ID=%s)", displayName, gid)
+
+	case "rename":
+		if len(args) < 7 {
+			return "格式错误: weibo super count group rename <旧名称> <新名称>"
+		}
+		oldName := strings.TrimSpace(args[5])
+		newName := strings.TrimSpace(strings.Join(args[6:], " "))
+		if newName == "" {
+			return "格式错误: 新名称不能为空"
+		}
+		// Try to find by display name first, then by ID
+		var foundGID string
+		for gid, ginfo := range groups {
+			if ginfo.Name == oldName || gid == oldName {
+				foundGID = gid
+				break
+			}
+		}
+		if foundGID == "" {
+			return fmt.Sprintf("未找到分组: %s", oldName)
+		}
+		groups[foundGID].Name = newName
+		if err := b.cfg.Save(); err != nil {
+			return fmt.Sprintf("保存失败: %v", err)
+		}
+		return fmt.Sprintf("[OK] 分组已重命名为「%s」", newName)
+
+	case "del", "delete":
+		if len(args) < 6 {
+			return "格式错误: weibo super count group del <名称>"
+		}
+		targetName := strings.TrimSpace(strings.Join(args[5:], " "))
+		var foundGID string
+		for gid, ginfo := range groups {
+			if ginfo.Name == targetName || gid == targetName {
+				foundGID = gid
+				break
+			}
+		}
+		if foundGID == "" {
+			return fmt.Sprintf("未找到分组: %s", targetName)
+		}
+		displayName := groups[foundGID].Name
+		// Move topics in this group to ungrouped
+		for _, t := range topics {
+			if t.GroupName == foundGID {
+				t.GroupName = ""
+			}
+		}
+		delete(groups, foundGID)
+		if err := b.cfg.Save(); err != nil {
+			return fmt.Sprintf("保存失败: %v", err)
+		}
+		return fmt.Sprintf("[OK] 已删除分组「%s」，其下超话已取消分组", displayName)
+
+	default:
+		return "用法: weibo super count group <create|list|rename|del> [参数]"
 	}
 }
 
@@ -1309,6 +1473,8 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 
 	sub := strings.ToLower(strings.TrimSpace(args[3]))
 	switch sub {
+	case "group":
+		return b.handleWeiboSuperCountGroupCommand(args)
 	case "enable":
 		if len(args) < 5 {
 			state := "off"
@@ -1342,13 +1508,72 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 		if len(topics) == 0 {
 			return "暂无超话签到人数绑定"
 		}
-		lines := []string{"超话签到人数绑定列表:"}
-		for oid, t := range topics {
-			name := strings.TrimSpace(t.Name)
-			if name == "" {
-				name = oid
+		// Check for -g flag
+		listGroup := ""
+		cleanArgs := make([]string, 0)
+		for i := 4; i < len(args); i++ {
+			if args[i] == "-g" && i+1 < len(args) {
+				listGroup = strings.TrimSpace(args[i+1])
+				i++ // skip group name
+			} else {
+				cleanArgs = append(cleanArgs, args[i])
 			}
-			lines = append(lines, fmt.Sprintf("- %s (oid=%s)", name, oid))
+		}
+		if listGroup != "" {
+			lines := []string{fmt.Sprintf("分组「%s」的超话签到人数绑定:", listGroup)}
+			count := 0
+			for oid, t := range topics {
+				if t.GroupName == listGroup {
+					name := strings.TrimSpace(t.Name)
+					if name == "" {
+						name = oid
+					}
+					lines = append(lines, fmt.Sprintf("- %s (oid=%s)", name, oid))
+					count++
+				}
+			}
+			if count == 0 {
+				return fmt.Sprintf("分组「%s」下没有超话绑定", listGroup)
+			}
+			return strings.Join(lines, "\n")
+		}
+		// Group by group name
+		groups := b.getWeiboSuperCountGroups()
+		if len(groups) == 0 {
+			// Fallback: flat list
+			lines := []string{"超话签到人数绑定列表:"}
+			for oid, t := range topics {
+				name := strings.TrimSpace(t.Name)
+				if name == "" {
+					name = oid
+				}
+				lines = append(lines, fmt.Sprintf("- %s (oid=%s)", name, oid))
+			}
+			return strings.Join(lines, "\n")
+		}
+		sortedGroupIDs := make([]string, 0, len(groups))
+		for gid := range groups {
+			sortedGroupIDs = append(sortedGroupIDs, gid)
+		}
+		sort.Strings(sortedGroupIDs)
+		lines := []string{"超话签到人数绑定列表（按分组）:"}
+		for _, gid := range sortedGroupIDs {
+			ginfo := groups[gid]
+			lines = append(lines, "", fmt.Sprintf("▎ %s:", ginfo.Name))
+			groupCount := 0
+			for oid, t := range topics {
+				if t.GroupName == gid {
+					name := strings.TrimSpace(t.Name)
+					if name == "" {
+						name = oid
+					}
+					lines = append(lines, fmt.Sprintf("  - %s (oid=%s)", name, oid))
+					groupCount++
+				}
+			}
+			if groupCount == 0 {
+				lines = append(lines, "  (空)")
+			}
 		}
 		return strings.Join(lines, "\n")
 	case "yesterday":
@@ -1400,24 +1625,56 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 		return formatWeiboSuperCountDualRanking(results, nil, "[超话签到人数昨日补查]", now, signBaseline, likeBaseline, nil)
 	case "bind":
 		if len(args) < 5 {
-			return "格式错误: weibo super count bind <oid> [名称]"
+			return "格式错误: weibo super count bind <oid> [名称] [-g 分组名]"
 		}
 		oid := normalizeWeiboSuperOID(strings.TrimSpace(args[4]))
 		if oid == "" {
 			return "格式错误: oid 不能为空"
 		}
 		name := ""
-		if len(args) >= 6 {
-			name = strings.TrimSpace(strings.Join(args[5:], " "))
+		bindGroup := ""
+		nameParts := make([]string, 0)
+		for i := 5; i < len(args); i++ {
+			if args[i] == "-g" && i+1 < len(args) {
+				bindGroup = strings.TrimSpace(args[i+1])
+				i++ // skip group name
+			} else {
+				nameParts = append(nameParts, args[i])
+			}
 		}
-		topics[oid] = &config.WeiboSuperCountTopic{OID: oid, Name: name}
+		if len(nameParts) > 0 {
+			name = strings.TrimSpace(strings.Join(nameParts, " "))
+		}
+		// If group not specified, use the first existing group as default
+		if bindGroup == "" {
+			groups := b.getWeiboSuperCountGroups()
+			for gid := range groups {
+				bindGroup = gid
+				break
+			}
+		}
+		topic := &config.WeiboSuperCountTopic{OID: oid, Name: name}
+		if bindGroup != "" {
+			topic.GroupName = bindGroup
+		}
+		topics[oid] = topic
 		if err := b.cfg.Save(); err != nil {
 			return fmt.Sprintf("保存失败: %v", err)
 		}
-		if name == "" {
-			return fmt.Sprintf("[OK] 已绑定超话签到人数 oid=%s", oid)
+		msg := ""
+		if bindGroup == "" {
+			msg = "未指定分组"
+		} else {
+			if ginfo, ok := b.getWeiboSuperCountGroups()[bindGroup]; ok {
+				msg = fmt.Sprintf("分组「%s」", ginfo.Name)
+			} else {
+				msg = fmt.Sprintf("分组「%s」", bindGroup)
+			}
 		}
-		return fmt.Sprintf("[OK] 已绑定超话签到人数 %s (oid=%s)", name, oid)
+		if name == "" {
+			return fmt.Sprintf("[OK] 已绑定超话签到人数 oid=%s (%s)", oid, msg)
+		}
+		return fmt.Sprintf("[OK] 已绑定超话签到人数 %s (oid=%s, %s)", name, oid, msg)
 	case "unbind", "del", "delete":
 		if len(args) < 5 {
 			return "格式错误: weibo super count unbind <oid|名称>"
