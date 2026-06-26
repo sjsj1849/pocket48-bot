@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"pocket48-bot/internal/addrgen"
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/monitor"
 	"pocket48-bot/internal/napcat"
@@ -157,6 +158,13 @@ func init() {
 			Category:  "其他",
 			AdminOnly: true,
 			Usage:     "welcome <on/off/add/del/list> <群号> [参数]",
+		},
+		"addr": {
+			Handler:   cmdAddr,
+			Help:      "随机生成真实地址（含姓名/街道/邮编/电话）",
+			Category:  "其他",
+			AdminOnly: true,
+			Usage:     "addr gen <国家代码>  支持: US GB CA AU DE FR JP CN",
 		},
 	}
 }
@@ -820,6 +828,22 @@ func cmdTest(b *Bot, event *napcat.Event, args []string) {
 	default:
 		b.reply(event, "用法: test <live/weibo>")
 	}
+}
+
+// cmdAddr 随机生成真实地址
+func cmdAddr(b *Bot, event *napcat.Event, args []string) {
+	if len(args) < 3 || strings.ToLower(args[1]) != "gen" {
+		b.reply(event, "📖 用法: addr gen <国家代码>\n支持的国家: US(美国), GB(英国), CA(加拿大), AU(澳大利亚), DE(德国), FR(法国), JP(日本), CN(中国)")
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(args[2]))
+	gen := addrgen.New()
+	addr, err := gen.Generate(code)
+	if err != nil {
+		b.reply(event, "❌ "+err.Error())
+		return
+	}
+	b.reply(event, "📍 随机生成地址:\n\n"+addr.Full)
 }
 
 func cmdWelcome(b *Bot, event *napcat.Event, args []string) {
