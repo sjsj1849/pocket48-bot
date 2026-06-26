@@ -69,6 +69,7 @@ type WeiboSuperTopic struct {
 	Name           string `json:"name,omitempty"`
 	LastSignDate   string `json:"last_sign_date,omitempty"`
 	LastSignStatus string `json:"last_sign_status,omitempty"`
+	LastSignRank   int    `json:"last_sign_rank,omitempty"` // 签到排名 = 今日总签到数
 }
 
 type WeiboSuperPostConfig struct {
