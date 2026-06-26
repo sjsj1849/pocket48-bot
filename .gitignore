@@ -1,0 +1,9 @@
+config.json
+*.log
+log/
+storage/
+sidecar/
+.DS_Store
+*.swp
+*.swo
+/tmp/bot48/
