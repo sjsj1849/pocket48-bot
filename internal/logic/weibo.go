@@ -703,12 +703,17 @@ func (b *Bot) signAllWeiboSuperTopics() string {
 	if len(topics) == 0 {
 		return ""
 	}
-	// 跳过同时在签到人数监控列表中的超话——它们由日报统一签到拿精确排名
 	countTopics := b.getWeiboSuperCountTopics()
 	var lines []string
 	for oid, topic := range topics {
-		if _, inCount := countTopics[oid]; inCount {
-			log.Printf("[WeiboSuper] skip auto sign for count-monitored topic oid=%s name=%s", oid, topic.Name)
+		// 如果该超话标注了随日报签到，自动签到跳过
+		if ct, inCount := countTopics[oid]; inCount && ct.ReportSign == 1 {
+			log.Printf("[WeiboSuper] skip auto sign for report-sign topic oid=%s name=%s", oid, topic.Name)
+			name := strings.TrimSpace(topic.Name)
+			if name == "" {
+				name = oid
+			}
+			lines = append(lines, fmt.Sprintf("[%s] 跳过（走日报签到流）", name))
 			continue
 		}
 		res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
@@ -776,9 +781,39 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 		}
 		results = append(results, *res)
 	}
-	// 第二轮：对含"万"的近似值，签到获取精确排名
+	// 第二轮：含"万"的走签到回退，并自适应标记
+	countTopicsMod := b.getWeiboSuperCountTopics()
+	autoTopics := b.getGlobalWeiboSuperTopics()
+	needSave := false
 	for i, r := range results {
-		if !strings.Contains(r.SignText, "万") {
+		isRounded := strings.Contains(r.SignText, "万")
+		oidNorm := normalizeWeiboSuperOID(r.OID)
+
+		// 如果在自动签到列表里
+		if _, inAuto := autoTopics[oidNorm]; inAuto {
+			ct, inCount := countTopicsMod[oidNorm]
+			if isRounded {
+				// 标记为日报签到，重置精确计数
+				if ct == nil {
+					ct = &config.WeiboSuperCountTopic{OID: oidNorm, Name: r.Name}
+				}
+				ct.ReportSign = 1
+				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
+				needSave = true
+			} else if inCount && ct.ReportSign > 0 {
+				// 连续拿到精确数据，计数递增；满5天恢复自动签到
+				ct.ReportSign++
+				if ct.ReportSign >= 6 { // 1(标记) + 5(连续精确) = 6
+					ct.ReportSign = 0
+					log.Printf("[Weibo][Count] auto-recover topic oid=%s name=%s back to normal sign", oidNorm, r.Name)
+				}
+				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
+				needSave = true
+			}
+		}
+
+		// 签到回退：含"万"的拿精确排名
+		if !isRounded {
 			continue
 		}
 		signRes, err := b.weiboMonitor.SignWeiboSuperTopic(r.OID)
@@ -790,6 +825,9 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 			results[i].SignCount = signRes.Rank
 			results[i].SignText = fmt.Sprintf("签到%d人", signRes.Rank)
 		}
+	}
+	if needSave {
+		b.cfg.Save()
 	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].SignCount != results[j].SignCount {
