@@ -8,3 +8,6 @@ data/
 *.swp
 *.swo
 /tmp/bot48/
+*.html
+pocket48-bot
+bot48
