@@ -703,8 +703,14 @@ func (b *Bot) signAllWeiboSuperTopics() string {
 	if len(topics) == 0 {
 		return ""
 	}
+	// 跳过同时在签到人数监控列表中的超话——它们由日报统一签到拿精确排名
+	countTopics := b.getWeiboSuperCountTopics()
 	var lines []string
 	for oid, topic := range topics {
+		if _, inCount := countTopics[oid]; inCount {
+			log.Printf("[WeiboSuper] skip auto sign for count-monitored topic oid=%s name=%s", oid, topic.Name)
+			continue
+		}
 		res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
 		name := strings.TrimSpace(topic.Name)
 		if name == "" {
@@ -744,6 +750,21 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 	topics := b.getWeiboSuperCountTopics()
 	results := make([]monitor.WeiboSuperCountResult, 0, len(topics))
 	failed := make([]string, 0)
+
+	// 先统一签到获取精确排名（因为已跳过自动签到，此处为当日首次签到 → 一定有 rank）
+	signRanks := make(map[string]int, len(topics))
+	for oid := range topics {
+		res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
+		if err != nil {
+			log.Printf("[Weibo][Count] pre-sign failed oid=%s err=%v, will use rounded count", oid, err)
+			continue
+		}
+		if res.Rank > 0 {
+			log.Printf("[Weibo][Count] pre-sign rank oid=%s rank=%d", oid, res.Rank)
+			signRanks[oid] = res.Rank
+		}
+	}
+
 	for oid, topic := range topics {
 		nameHint := strings.TrimSpace(topic.Name)
 		res, err := b.weiboMonitor.FetchSuperCountByOID(oid, nameHint)
@@ -767,6 +788,19 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 			}
 		}
 		results = append(results, *res)
+	}
+	// 用签到 rank 覆盖 App/Web API 返回的近似值
+	if len(signRanks) > 0 {
+		for i, r := range results {
+			if !strings.Contains(r.SignText, "万") {
+				continue
+			}
+			if rank, ok := signRanks[normalizeWeiboSuperOID(r.OID)]; ok && rank > 0 && rank != r.SignCount {
+				log.Printf("[Weibo][Count] override rounded count oid=%s label=%d exact=%d", r.OID, r.SignCount, rank)
+				results[i].SignCount = rank
+				results[i].SignText = fmt.Sprintf("签到%d人", rank)
+			}
+		}
 	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].SignCount != results[j].SignCount {
