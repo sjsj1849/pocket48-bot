@@ -28,45 +28,57 @@
 
 ## 快速开始
 
-### 前置条件
+### 1. 配置 NapCat
 
-1. 已部署 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 并开启 WebSocket 服务（默认 `ws://127.0.0.1:3001`）
-2. 一个口袋48账号（用于拉取房间消息）
+确保 NapCat 已启动并开启 WebSocket（默认 `127.0.0.1:3001`）。
 
-### 配置
+### 2. 写配置文件
 
-创建 `config.json`：
+在程序同目录创建 `config.json`：
 
 ```json
 {
   "NAPCAT_WS_URL": "ws://127.0.0.1:3001",
-  "NAPCAT_ACCESS_TOKEN": "",
-  "POCKET_USERNAME": "13800000000",
-  "POCKET_PASSWORD": "your_password",
-  "POCKET_TOKEN": "",
   "SUPER_ADMIN": 123456789,
-  "ADMIN_QQ": [],
   "BOUND_GROUP_ID": 987654321,
-  "COMMAND_PREFIX": "bot",
   "POLLING_INTERVAL": 1,
-  "GROUP_SUBSCRIPTIONS": {
-    "987654321": [67248386]
-  },
-  "LIVE_MONITORING": true,
-  "WEIBO_COOKIE": "",
-  "WEIBO_SUBSCRIPTIONS": {}
+  "POCKET_USERNAME": "13800000000",
+  "POCKET_PASSWORD": "your_password"
 }
 ```
 
-### 运行
+| 字段 | 说明 |
+| :--- | :--- |
+| `NAPCAT_WS_URL` | NapCat WebSocket 地址（默认本机不用改） |
+| `SUPER_ADMIN` | **你的 QQ 号** |
+| `BOUND_GROUP_ID` | **消息要发到的 QQ 群号** |
+| `POCKET_USERNAME` | 口袋48手机号 |
+| `POCKET_PASSWORD` | 口袋48密码 |
+
+### 3. 运行
 
 ```bash
-# 编译
 go build -o pocket48-bot ./cmd/bot
-
-# 运行
 ./pocket48-bot
 ```
+
+启动后会自动登录口袋48并开始轮询。后续所有操作都通过 QQ 群内命令完成。
+
+### 4. 添加房间监控
+
+在群里发：
+
+```
+bot search 王奕
+```
+
+找到房间 ID 后：
+
+```
+bot monitor 67248386
+```
+
+其他命令见下方说明。
 
 ## 命令
 
