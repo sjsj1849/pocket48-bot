@@ -1058,7 +1058,6 @@ func formatWeiboSuperCountRanking(results []monitor.WeiboSuperCountResult, faile
 }
 
 func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, failed []string, title string, now time.Time, signBaseline map[string]int, likeBaseline map[string]int, postBaseline map[string]int) string {
-	_ = likeBaseline
 	lines := []string{title, now.Format("2006-01-02 15:04:05")}
 
 	if len(results) == 0 {
@@ -1080,15 +1079,22 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 				name = item.OID
 			}
 			line := fmt.Sprintf("%d) %s - 签到%d人", i+1, name, item.SignCount)
+			oid := normalizeWeiboSuperOID(strings.TrimSpace(item.OID))
+			likePart := ""
 			if item.SuperLikeCount > 0 {
-				line += fmt.Sprintf(" | 超LIKE%d人", item.SuperLikeCount)
+				likePart = fmt.Sprintf("%d", item.SuperLikeCount)
+				if likeBaseline != nil {
+					if prev, ok := likeBaseline[oid]; ok {
+						likePart += fmt.Sprintf(" (%s)", formatSignedDelta(item.SuperLikeCount-prev))
+					}
+				}
+				line += fmt.Sprintf(" | 超LIKE%s人", likePart)
 			}
 			fans := strings.TrimSpace(item.FansCount)
 			if fans != "" {
 				line += fmt.Sprintf(" | 粉丝%s", fans)
 			}
 			posts := strings.TrimSpace(item.PostCount)
-			oid := normalizeWeiboSuperOID(strings.TrimSpace(item.OID))
 			if posts != "" {
 				postPart := fmt.Sprintf(" | 帖子%s", posts)
 				if postBaseline != nil {
