@@ -2,7 +2,7 @@
 
 基于 Go 语言的 **Pocket48 (口袋48)** 消息监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ) (OneBot v11) QQ 机器人框架。
 
-实时监控小偶像的口袋房间、微博动态、B站直播，将消息转发到 QQ 群。
+实时监控小偶像的口袋房间和微博动态，将消息转发到 QQ 群。
 
 ## 功能
 
