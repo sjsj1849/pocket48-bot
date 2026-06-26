@@ -2114,26 +2114,42 @@ func (m *WeiboMonitor) SignWeiboSuperTopic(oid string) (*WeiboSuperSignResult, e
 	errMsg := ""
 	out := &WeiboSuperSignResult{OID: oid, Code: code, Message: strings.TrimSpace(result.Msg)}
 	if len(result.Data) > 0 {
-		trimmed := strings.TrimSpace(string(result.Data))
-		if strings.HasPrefix(trimmed, "{") {
-			var dataObj struct {
-				ErrNo       interface{} `json:"errno"`
-				ErrMsg      string      `json:"errmsg"`
-				ErrCode     interface{} `json:"errcode"`
-				MemberRank  int         `json:"member_rank"`
-				Rank        int         `json:"rank"`
-				OrderNum    int         `json:"order_num"`
-				Num         int         `json:"num"`
-				TotalSign   int         `json:"total_sign"`
-				CheckinRank int         `json:"checkin_rank"`
+	trimmed := strings.TrimSpace(string(result.Data))
+	if strings.HasPrefix(trimmed, "{") {
+		var dataObj struct {
+			ErrNo       interface{} `json:"errno"`
+			ErrMsg      string      `json:"errmsg"`
+			ErrCode     interface{} `json:"errcode"`
+			MemberRank  int         `json:"member_rank"`
+			Rank        int         `json:"rank"`
+			OrderNum    int         `json:"order_num"`
+			Num         int         `json:"num"`
+			TotalSign   int         `json:"total_sign"`
+			CheckinRank int         `json:"checkin_rank"`
+		}
+		if err := json.Unmarshal(result.Data, &dataObj); err == nil {
+			errNo = parseWeiboCode(dataObj.ErrNo)
+			errCode = parseWeiboCode(dataObj.ErrCode)
+			errMsg = strings.TrimSpace(dataObj.ErrMsg)
+			out.Rank = firstNonZero(dataObj.MemberRank, dataObj.Rank, dataObj.OrderNum, dataObj.Num, dataObj.TotalSign, dataObj.CheckinRank)
+		}
+		// 如果上面没命中，从 alert_title / tipMessage 解析 "第X名"
+		if out.Rank <= 0 {
+			var fallback struct {
+				AlertTitle  string `json:"alert_title"`
+				TipMessage  string `json:"tipMessage"`
+				AlertSub    string `json:"alert_subtitle"`
 			}
-			if err := json.Unmarshal(result.Data, &dataObj); err == nil {
-				errNo = parseWeiboCode(dataObj.ErrNo)
-				errCode = parseWeiboCode(dataObj.ErrCode)
-				errMsg = strings.TrimSpace(dataObj.ErrMsg)
-				out.Rank = firstNonZero(dataObj.MemberRank, dataObj.Rank, dataObj.OrderNum, dataObj.Num, dataObj.TotalSign, dataObj.CheckinRank)
+			if err := json.Unmarshal(result.Data, &fallback); err == nil {
+				for _, text := range []string{fallback.AlertTitle, fallback.TipMessage, fallback.AlertSub} {
+					if n, ok := parseRankFromText(text); ok && n > 0 {
+						out.Rank = n
+						break
+					}
+				}
 			}
 		}
+	}
 	}
 	// 如果 data 未命中，尝试从 msg 解析 "第X名" 或 "第X位"
 	if out.Rank <= 0 && strings.TrimSpace(result.Msg) != "" {
