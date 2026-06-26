@@ -1,0 +1,13 @@
+{
+    "NAPCAT_WS_URL": "ws://127.0.0.1:3001",
+    "NAPCAT_ACCESS_TOKEN": "",
+    "COMMAND_PREFIX": "bot",
+    "SUPER_ADMIN": 0,
+    "BOUND_GROUP_ID": 0,
+    "ADMIN_QQ": [],
+    "POCKET_USERNAME": "",
+    "POCKET_PASSWORD": "",
+    "POCKET_TOKEN": "",
+    "LIVE_MONITORING": false,
+    "POLLING_INTERVAL": 1
+}

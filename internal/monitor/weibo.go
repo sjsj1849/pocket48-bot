@@ -1928,6 +1928,7 @@ type WeiboSuperSignResult struct {
 	Message     string
 	Success     bool
 	AlreadyDone bool
+	Rank        int // 今日签到排名，若已签到可能为0
 }
 
 type WeiboSuperCountResult struct {
@@ -2105,25 +2106,41 @@ func (m *WeiboMonitor) SignWeiboSuperTopic(oid string) (*WeiboSuperSignResult, e
 	}
 
 	code := parseWeiboCode(result.Code)
+	if code == 382004 || code == 100001 || code == 100000 {
+		log.Printf("[Weibo][Sign] raw response oid=%s code=%d msg=%q data=%s", oid, code, strings.TrimSpace(result.Msg), string(result.Data))
+	}
 	errNo := 0
 	errCode := 0
 	errMsg := ""
+	out := &WeiboSuperSignResult{OID: oid, Code: code, Message: strings.TrimSpace(result.Msg)}
 	if len(result.Data) > 0 {
 		trimmed := strings.TrimSpace(string(result.Data))
 		if strings.HasPrefix(trimmed, "{") {
 			var dataObj struct {
-				ErrNo   interface{} `json:"errno"`
-				ErrMsg  string      `json:"errmsg"`
-				ErrCode interface{} `json:"errcode"`
+				ErrNo       interface{} `json:"errno"`
+				ErrMsg      string      `json:"errmsg"`
+				ErrCode     interface{} `json:"errcode"`
+				MemberRank  int         `json:"member_rank"`
+				Rank        int         `json:"rank"`
+				OrderNum    int         `json:"order_num"`
+				Num         int         `json:"num"`
+				TotalSign   int         `json:"total_sign"`
+				CheckinRank int         `json:"checkin_rank"`
 			}
 			if err := json.Unmarshal(result.Data, &dataObj); err == nil {
 				errNo = parseWeiboCode(dataObj.ErrNo)
 				errCode = parseWeiboCode(dataObj.ErrCode)
 				errMsg = strings.TrimSpace(dataObj.ErrMsg)
+				out.Rank = firstNonZero(dataObj.MemberRank, dataObj.Rank, dataObj.OrderNum, dataObj.Num, dataObj.TotalSign, dataObj.CheckinRank)
 			}
 		}
 	}
-	out := &WeiboSuperSignResult{OID: oid, Code: code, Message: strings.TrimSpace(result.Msg)}
+	// 如果 data 未命中，尝试从 msg 解析 "第X名" 或 "第X位"
+	if out.Rank <= 0 && strings.TrimSpace(result.Msg) != "" {
+		if n, ok := parseRankFromText(result.Msg); ok {
+			out.Rank = n
+		}
+	}
 
 	switch code {
 	case 100000:
@@ -2194,6 +2211,30 @@ func parseWeiboCode(v interface{}) int {
 	return 0
 }
 
+// firstNonZero 返回第一个非零值，全零则返回0
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+// parseRankFromText 从文本中解析 "第X名" 或 "第X位" 的数字
+func parseRankFromText(text string) (int, bool) {
+	re := regexp.MustCompile(`第\s*([0-9,]+)\s*[名位]`)
+	m := re.FindStringSubmatch(strings.TrimSpace(text))
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 func extractOIDFromScheme(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -2227,9 +2268,35 @@ func (m *WeiboMonitor) FetchSuperCountByOID(oid string, nameHint string) (*Weibo
 		return nil, fmt.Errorf("oid 不能为空")
 	}
 	if res, err := m.fetchSuperCountByOIDViaApp(oid, nameHint); err == nil {
-		return res, nil
+		return m.augmentSignCountWithRank(res), nil
 	}
-	return m.fetchSuperCountByOIDViaWeb(oid, nameHint)
+	res, err := m.fetchSuperCountByOIDViaWeb(oid, nameHint)
+	if err != nil {
+		return nil, err
+	}
+	return m.augmentSignCountWithRank(res), nil
+}
+
+// augmentSignCountWithRank 当签到人数来自 "1.2万" 这种近似值时，尝试通过签到获取精确排名
+func (m *WeiboMonitor) augmentSignCountWithRank(res *WeiboSuperCountResult) *WeiboSuperCountResult {
+	if res == nil || res.SignCount <= 0 {
+		return res
+	}
+	// 只有文本含 "万" 才说明是近似值，需要精确排名
+	if !strings.Contains(res.SignText, "万") {
+		return res
+	}
+	signRes, err := m.SignWeiboSuperTopic(res.OID)
+	if err != nil {
+		log.Printf("[Weibo][Count] sign-in fallback failed oid=%s err=%v", res.OID, err)
+		return res
+	}
+	if signRes.Rank > 0 && signRes.Rank != res.SignCount {
+		log.Printf("[Weibo][Count] sign-in rank fallback oid=%s label=%d exact=%d", res.OID, res.SignCount, signRes.Rank)
+		res.SignCount = signRes.Rank
+		res.SignText = fmt.Sprintf("签到%d人", signRes.Rank)
+	}
+	return res
 }
 
 func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (*WeiboSuperCountResult, error) {

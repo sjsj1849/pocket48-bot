@@ -718,6 +718,9 @@ func (b *Bot) signAllWeiboSuperTopics() string {
 		res.Name = name
 		topic.LastSignDate = time.Now().Format("2006-01-02")
 		topic.LastSignStatus = fmt.Sprintf("code=%d %s", res.Code, strings.TrimSpace(res.Message))
+		if res.Rank > 0 {
+			topic.LastSignRank = res.Rank
+		}
 		if res.Success {
 			if res.AlreadyDone {
 				lines = append(lines, fmt.Sprintf("[%s] 今日已签到", name))
