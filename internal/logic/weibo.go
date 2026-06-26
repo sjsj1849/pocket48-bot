@@ -1180,15 +1180,36 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
+	// 估算每处理一个超话需要的时间（签到+App API抓取+处理）
+	const timePerTopic = 3 * time.Second
+	const safetyBuffer = 10 * time.Second
+
 	for range ticker.C {
 		if !b.cfg.WeiboSuperCountEnabled {
 			continue
 		}
-		if len(b.getWeiboSuperCountTopics()) == 0 {
+		numTopics := len(b.getWeiboSuperCountTopics())
+		if numTopics == 0 {
 			continue
 		}
 		now := time.Now().In(loc)
-		if now.Hour() != 23 || now.Minute() != 59 || now.Second() != 30 {
+		// 动态计算开始时间：越接近午夜数据越准确，但要保证所有请求完成
+		neededDuration := time.Duration(numTopics)*timePerTopic + safetyBuffer
+		// 最早不过 23:50:00，最晚不过 23:59:40（留 20s 给报告生成和快照保存）
+		maxStart := 23*3600 + 59*60 + 40
+		minStart := 23*3600 + 50*60 + 0
+		startSecond := maxStart - int(neededDuration.Seconds())
+		if startSecond < minStart {
+			startSecond = minStart
+		}
+		if startSecond > maxStart {
+			startSecond = maxStart
+		}
+		startHour := startSecond / 3600
+		startMin := (startSecond % 3600) / 60
+		startSec := startSecond % 60
+
+		if now.Hour() != startHour || now.Minute() != startMin || now.Second() != startSec {
 			continue
 		}
 		today := now.Format("2006-01-02")
