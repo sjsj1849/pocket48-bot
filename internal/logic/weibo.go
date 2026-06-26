@@ -1180,9 +1180,9 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	// 估算每处理一个超话需要的时间（签到+App API抓取+处理）
-	const timePerTopic = 3 * time.Second
-	const safetyBuffer = 10 * time.Second
+	// 实测：签到 ~0.4s/个，App API 拿数据 ~0.4s/个，合计约 1s/个
+	const timePerTopic = 1 * time.Second
+	const safetyBuffer = 5 * time.Second
 
 	for range ticker.C {
 		if !b.cfg.WeiboSuperCountEnabled {
@@ -1193,11 +1193,11 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			continue
 		}
 		now := time.Now().In(loc)
-		// 动态计算开始时间：越接近午夜数据越准确，但要保证所有请求完成
+		// 动态计算开始时间
 		neededDuration := time.Duration(numTopics)*timePerTopic + safetyBuffer
-		// 最早不过 23:50:00，最晚不过 23:59:40（留 20s 给报告生成和快照保存）
-		maxStart := 23*3600 + 59*60 + 40
-		minStart := 23*3600 + 50*60 + 0
+		// 最早 23:55:00，最晚 23:59:50（留 10s 给报告生成和快照保存）
+		maxStart := 23*3600 + 59*60 + 50
+		minStart := 23*3600 + 55*60 + 0
 		startSecond := maxStart - int(neededDuration.Seconds())
 		if startSecond < minStart {
 			startSecond = minStart
