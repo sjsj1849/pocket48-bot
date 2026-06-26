@@ -21,14 +21,10 @@
 - 超话数据日统计推送
 - Cookie / App 抓包热更新
 
-### 📺 B站直播监控
-- 直播间开播通知
-
 ### ⚙️ 系统特性
 - 多群分组订阅（不同群可以监控不同房间）
 - COS 归档存储（消息自动归档）
 - 优雅关闭通知
-- Systemd 自启动
 
 ## 快速开始
 
@@ -70,16 +66,6 @@ go build -o pocket48-bot ./cmd/bot
 
 # 运行
 ./pocket48-bot
-```
-
-**推荐用 Systemd 管理：**
-
-```bash
-cp bot48.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable pocket48-bot
-systemctl start pocket48-bot
-journalctl -u pocket48-bot -fv  # 看日志
 ```
 
 ## 命令
@@ -156,7 +142,7 @@ journalctl -u pocket48-bot -fv  # 看日志
 │   │   └── utils.go         # 工具函数
 │   ├── napcat/              # NapCat OneBot 客户端
 │   ├── pocket48/            # Pocket48 API 客户端
-│   ├── monitor/             # 微博/B站监控
+│   ├── monitor/             # 微博监控
 │   └── storage/             # 消息归档（COS）
 ├── storage/                 # 本地存储目录
 └── config.json              # 配置文件
