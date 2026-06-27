@@ -307,7 +307,14 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		if nickName == "" {
 			nickName = room.OwnerName
 		}
+	} else if msg.StarName != "" {
+		// Message already has starName from API (works for cross-room posts)
+		realName = msg.StarName
+		if nickName == "" {
+			nickName = msg.StarName
+		}
 	} else if senderUserID != 0 {
+		// Fallback: try API for user details
 		if detailInfo, err := b.getCachedUserDetail(senderUserID); err == nil && detailInfo != nil && detailInfo.IsStar {
 			if detailInfo.StarName != "" {
 				realName = detailInfo.StarName
