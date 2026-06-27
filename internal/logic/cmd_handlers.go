@@ -833,10 +833,14 @@ func cmdTest(b *Bot, event *napcat.Event, args []string) {
 // cmdAddr 随机生成真实地址
 func cmdAddr(b *Bot, event *napcat.Event, args []string) {
 	if len(args) < 3 || strings.ToLower(args[1]) != "gen" {
-		b.reply(event, "📖 用法: addr gen <国家代码>\n支持的国家: US(美国), GB(英国), CA(加拿大), AU(澳大利亚), DE(德国), FR(法国), JP(日本), CN(中国)")
+		b.reply(event, "📖 用法: addr gen <国家>\n支持: US/美国, GB/英国, CA/加拿大, AU/澳大利亚, DE/德国, FR/法国, JP/日本, CN/中国")
 		return
 	}
-	code := strings.ToUpper(strings.TrimSpace(args[2]))
+	code := resolveCountryCode(args[2])
+	if code == "" {
+		b.reply(event, "❌ 不支持的国家，可用: US/美国, GB/英国, CA/加拿大, AU/澳大利亚, DE/德国, FR/法国, JP/日本, CN/中国")
+		return
+	}
 	gen := addrgen.New()
 	addr, err := gen.Generate(code)
 	if err != nil {
@@ -844,6 +848,31 @@ func cmdAddr(b *Bot, event *napcat.Event, args []string) {
 		return
 	}
 	b.reply(event, "📍 随机生成地址:\n\n"+addr.Full)
+}
+
+// countryNameMap maps Chinese names and common variants to ISO codes.
+var countryNameMap = map[string]string{
+	"us": "US", "美国": "US",
+	"gb": "GB", "uk": "GB", "英国": "GB",
+	"ca": "CA", "加拿大": "CA",
+	"au": "AU", "澳大利亚": "AU",
+	"de": "DE", "德国": "DE",
+	"fr": "FR", "法国": "FR",
+	"jp": "JP", "日本": "JP",
+	"cn": "CN", "中国": "CN",
+}
+
+func resolveCountryCode(s string) string {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if code, ok := countryNameMap[lower]; ok {
+		return code
+	}
+	// Try as raw ISO code
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	if _, ok := countryNameMap[strings.ToLower(upper)]; ok {
+		return upper
+	}
+	return ""
 }
 
 func cmdWelcome(b *Bot, event *napcat.Event, args []string) {

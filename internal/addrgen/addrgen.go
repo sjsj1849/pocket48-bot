@@ -1,5 +1,6 @@
 // Package addrgen generates realistic random addresses for multiple countries.
 // City data sourced from GeoNames (cities5000, CC-BY 4.0).
+// Real addresses sourced from OpenStreetMap building data.
 // Names and street names from public demographic data.
 package addrgen
 
@@ -9,28 +10,48 @@ import (
 	"strings"
 )
 
+// RealAddress represents a real existing building address from OpenStreetMap.
+type RealAddress struct {
+	HouseNumber string `json:"h"`
+	Street      string `json:"s"`
+	Postcode    string `json:"p"`
+	CityName    string `json:"c"`
+}
+
+// cityRealAddrs holds real addresses for a city.
+type cityRealAddrs struct {
+	City  string
+	State string
+	Addrs []RealAddress
+}
+
+// realAddresses maps country code -> cities with real address data.
+// Populated by generated real_addresses.go (from OSM data).
+// This empty declaration is replaced when real_addresses.go is generated.
+var realAddresses = map[string][]cityRealAddrs{}
+
 // Address represents a complete random identity with address.
 type Address struct {
 	FirstName   string `json:"first_name"`
 	LastName    string `json:"last_name"`
 	FullName    string `json:"full_name"`
-	Street      string `json:"street"`
-	StreetLine2 string `json:"street_line2"`
+	Street      string `json:"street"`       // full street line: "123 Main St"
+	StreetLine2 string `json:"street_line2"` // optional: "Apt 4B"
 	City        string `json:"city"`
 	State       string `json:"state"`
 	Postcode    string `json:"postcode"`
 	Country     string `json:"country"`
 	CountryCode string `json:"country_code"`
 	Phone       string `json:"phone"`
-	Full        string `json:"full"`
+	Full        string `json:"full"` // formatted box output
 }
 
-// CountryDef holds address format data for one country.
+// CountryDef holds address format data for one country (fallback + names).
 type CountryDef struct {
 	Name        string
 	Code        string
-	Cities      []CityDef
-	Streets     []string
+	Cities      []CityDef   // fallback cities (used when no real addresses)
+	Streets     []string    // fallback country-wide streets
 	FirstNames  []string
 	LastNames   []string
 	PostFmt     string
@@ -66,6 +87,7 @@ func (g *Generator) Countries() []string {
 }
 
 // Generate creates a random address for the given ISO country code.
+// Uses real OSM addresses when available; falls back to random generation.
 func (g *Generator) Generate(countryCode string) (*Address, error) {
 	code := strings.ToUpper(strings.TrimSpace(countryCode))
 	def, ok := g.countries[code]
@@ -78,7 +100,7 @@ func (g *Generator) Generate(countryCode string) (*Address, error) {
 		CountryCode: def.Code,
 	}
 
-	// Real first + last name
+	// ---- Name (always real from curated pools) ----
 	if len(def.FirstNames) > 0 {
 		addr.FirstName = def.FirstNames[rand.Intn(len(def.FirstNames))]
 	}
@@ -93,130 +115,134 @@ func (g *Generator) Generate(countryCode string) (*Address, error) {
 		}
 	}
 
-	// Real street name + random number
-	if len(def.Streets) > 0 {
-		st := def.Streets[rand.Intn(len(def.Streets))]
-		num := rand.Intn(9999) + 1
-		addr.Street = fmt.Sprintf("%d %s", num, st)
-	}
-
-	// ~40% chance of secondary address line (Apt / Unit / Suite)
-	if rand.Intn(100) < 40 {
-		aptNum := rand.Intn(999) + 1
-		suffixes := []string{"Apt", "Unit", "Suite"}
-		if code == "JP" || code == "CN" || code == "FR" {
-			suffixes = []string{"Apt", "Room"}
+	// ---- Address: try real OSM data first ----
+	if usedRealAddr := tryRealAddress(code, addr); !usedRealAddr {
+		// Fallback: random combination
+		if len(def.Streets) > 0 {
+			st := def.Streets[rand.Intn(len(def.Streets))]
+			num := rand.Intn(9999) + 1
+			addr.Street = fmt.Sprintf("%d %s", num, st)
 		}
-		suf := suffixes[rand.Intn(len(suffixes))]
-		addr.StreetLine2 = fmt.Sprintf("%s %d", suf, aptNum)
+		if len(def.Cities) > 0 {
+			city := def.Cities[rand.Intn(len(def.Cities))]
+			addr.City = city.Name
+			addr.State = city.Admin1
+		}
+		addr.Postcode = genPostcode(def.PostFmt)
 	}
 
-	// Real city + state/province
-	if len(def.Cities) > 0 {
-		city := def.Cities[rand.Intn(len(def.Cities))]
-		addr.City = city.Name
-		addr.State = city.Admin1
-	}
+	// ---- Address line only (no fake second line) ----
 
-	// Realistic postcode based on country format
-	addr.Postcode = genPostcode(def.PostFmt)
-
-	// Phone with country code
+	// ---- Phone ----
 	if def.PhonePrefix != "" {
-		phone := "+" + def.PhonePrefix
-		d := def.PhoneDigits
-		switch code {
-		case "US", "CA":
-			// (XXX) XXX-XXXX format
-			area := 0
-			for i := 0; i < 3; i++ {
-				area = area*10 + rand.Intn(10)
-			}
-			mid := 0
-			for i := 0; i < 3; i++ {
-				mid = mid*10 + rand.Intn(10)
-			}
-			last := 0
-			for i := 0; i < 4; i++ {
-				last = last*10 + rand.Intn(10)
-			}
-			phone = fmt.Sprintf("+%s (%03d) %03d-%04d", def.PhonePrefix, area, mid, last)
-		case "JP":
-			// 0X-XXXX-XXXX
-			phone = "+" + def.PhonePrefix + " "
-			for i := 0; i < d; i++ {
-				if i == 1 {
-					phone += "-"
-				} else if i == 5 {
-					phone += "-"
-				}
-				phone += string(rune('0' + rand.Intn(10)))
-			}
-		case "CN":
-			// 1XX XXXX XXXX
-			mobile := "1"
-			mobile += string(rune('3' + rand.Intn(7))) // 13-19
-			for i := 0; i < 9; i++ {
-				mobile += string(rune('0' + rand.Intn(10)))
-			}
-			phone = fmt.Sprintf("+86 %s %s %s", mobile[:3], mobile[3:7], mobile[7:])
-		case "GB":
-			// 07XXX XXXXXX
-			phone = "+44 07"
-			for i := 0; i < 9; i++ {
-				phone += string(rune('0' + rand.Intn(10)))
-			}
-		case "FR":
-			// 06 XX XX XX XX
-			phone = "+33 6"
-			for i := 0; i < 8; i++ {
-				if i%2 == 0 {
-					phone += " "
-				}
-				phone += string(rune('0' + rand.Intn(10)))
-			}
-		default:
-			for i := 0; i < d; i++ {
-				if i > 0 && i%3 == 0 {
-					phone += " "
-				}
-				phone += string(rune('0' + rand.Intn(10)))
-			}
-		}
-		addr.Phone = phone
+		addr.Phone = genPhone(code, def.PhonePrefix, def.PhoneDigits)
 	}
 
-	// Format
+	// ---- Format ----
 	addr.Full = formatAddr(addr)
 	return addr, nil
+}
+
+// tryRealAddress attempts to fill address fields from real OSM data.
+// Returns true if a real address was used.
+func tryRealAddress(code string, addr *Address) bool {
+	cities, ok := realAddresses[code]
+	if !ok || len(cities) == 0 {
+		return false
+	}
+
+	// Collect cities that have real addresses
+	var eligible []cityRealAddrs
+	for _, c := range cities {
+		if len(c.Addrs) > 0 {
+			eligible = append(eligible, c)
+		}
+	}
+	if len(eligible) == 0 {
+		return false
+	}
+
+	// Pick random city from eligible, then random address
+	chosen := eligible[rand.Intn(len(eligible))]
+	ra := chosen.Addrs[rand.Intn(len(chosen.Addrs))]
+
+	addr.City = chosen.City
+	addr.State = chosen.State
+	addr.Street = fmt.Sprintf("%s %s", ra.HouseNumber, ra.Street)
+	addr.Postcode = ra.Postcode
+
+	return true
+}
+
+func genPhone(code, prefix string, digits int) string {
+	phone := "+" + prefix
+	switch code {
+	case "US", "CA":
+		area := rand.Intn(1000)
+		mid := rand.Intn(1000)
+		last := rand.Intn(10000)
+		return fmt.Sprintf("+%s (%03d) %03d-%04d", prefix, area, mid, last)
+	case "JP":
+		phone += " "
+		for i := 0; i < digits; i++ {
+			if i == 1 || i == 5 {
+				phone += "-"
+			}
+			phone += string(rune('0' + rand.Intn(10)))
+		}
+		return phone
+	case "CN":
+		mobile := "1" + string(rune('3'+rand.Intn(7)))
+		for i := 0; i < 9; i++ {
+			mobile += string(rune('0' + rand.Intn(10)))
+		}
+		return fmt.Sprintf("+86 %s %s %s", mobile[:3], mobile[3:7], mobile[7:])
+	case "GB":
+		phone += " 07"
+		for i := 0; i < 9; i++ {
+			phone += string(rune('0' + rand.Intn(10)))
+		}
+		return phone
+	case "FR":
+		phone += " 6"
+		for i := 0; i < 8; i++ {
+			if i%2 == 0 {
+				phone += " "
+			}
+			phone += string(rune('0' + rand.Intn(10)))
+		}
+		return phone
+	default:
+		for i := 0; i < digits; i++ {
+			if i > 0 && i%3 == 0 {
+				phone += " "
+			}
+			phone += string(rune('0' + rand.Intn(10)))
+		}
+		return phone
+	}
 }
 
 func formatAddr(a *Address) string {
 	var lines []string
 
-	lines = append(lines, "┌─ Address ─────────────────────────────┐")
-	lines = append(lines, fmt.Sprintf("  First Name: %-20s  Last Name: %s", a.FirstName, a.LastName))
-	lines = append(lines, fmt.Sprintf("  Country:    %s", a.Country))
+	lines = append(lines, "📍 随机地址生成")
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("  姓名:       %s", a.FullName))
+	lines = append(lines, fmt.Sprintf("  国家:       %s", a.Country))
 
-	if a.State != "" {
-		if a.City != "" {
-			lines = append(lines, fmt.Sprintf("  State/Prov: %-19s  City:       %s", a.State, a.City))
-		} else {
-			lines = append(lines, fmt.Sprintf("  State/Prov: %s", a.State))
-		}
+	if a.State != "" && a.City != "" {
+		lines = append(lines, fmt.Sprintf("  州省:       %s", a.State))
+		lines = append(lines, fmt.Sprintf("  城市:       %s", a.City))
 	} else if a.City != "" {
-		lines = append(lines, fmt.Sprintf("  City:       %s", a.City))
+		lines = append(lines, fmt.Sprintf("  城市:       %s", a.City))
 	}
 
-	lines = append(lines, fmt.Sprintf("  Address:    %s", a.Street))
-	if a.StreetLine2 != "" {
-		lines = append(lines, fmt.Sprintf("  Address 2:  %s", a.StreetLine2))
-	}
-	lines = append(lines, fmt.Sprintf("  Post Code:  %s", a.Postcode))
+	lines = append(lines, fmt.Sprintf("  地址:       %s", a.Street))
+	lines = append(lines, fmt.Sprintf("  邮编:       %s", a.Postcode))
 	if a.Phone != "" {
-		lines = append(lines, fmt.Sprintf("  Phone:      %s", a.Phone))
+		lines = append(lines, fmt.Sprintf("  电话:       %s", a.Phone))
 	}
-	lines = append(lines, "└────────────────────────────────────────┘")
 
 	return strings.Join(lines, "\n")
 }
