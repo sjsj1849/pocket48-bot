@@ -2311,6 +2311,8 @@ func (m *WeiboMonitor) augmentSignCountWithRank(res *WeiboSuperCountResult) *Wei
 		log.Printf("[Weibo][Count] sign-in rank fallback oid=%s label=%d exact=%d", res.OID, res.SignCount, signRes.Rank)
 		res.SignCount = signRes.Rank
 		res.SignText = fmt.Sprintf("签到%d人", signRes.Rank)
+	} else if signRes.Rank <= 0 {
+		log.Printf("[Weibo][Count] sign-in rank zero oid=%s label=%d code=%d msg=%q", res.OID, res.SignCount, signRes.Code, signRes.Message)
 	}
 	return res
 }

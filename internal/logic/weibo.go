@@ -97,7 +97,7 @@ func extractCookieFromCaptureText(text string) (string, bool) {
 			k := strings.TrimSpace(kv[:eqIdx])
 			v := strings.TrimSpace(kv[eqIdx+1:])
 			if k != "" && v != "" {
-				cookieMap[k] = v
+				cookieMap[k] = sanitizeCookieValue(v)
 			}
 		}
 	}
@@ -114,12 +114,12 @@ func extractCookieFromCaptureText(text string) (string, bool) {
 		end := start
 		for end < len(src) {
 			ch := src[end]
-			if ch == ';' || ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t' {
+			if ch == ';' || ch == '\n' || ch == '\r' || ch == '	' || ch == '\'' {
 				break
 			}
 			end++
 		}
-		return strings.TrimSpace(src[start:end])
+		return sanitizeCookieValue(strings.TrimSpace(src[start:end]))
 	}
 
 	for _, key := range []string{"SCF", "SUB", "SUBP", "WBPSESS", "ALF", "SSOLoginState"} {
@@ -329,6 +329,118 @@ func maskWeiboAppAuth(cfg *config.WeiboAppConfig) string {
 	return strings.Join(parts, ", ")
 }
 
+// detectWeiboSuperCookieText 判断文本是否看起来像 weibo.com 完整 Cookie
+// （而不是 AppAuth 抓包）。判断依据：包含 SCF/SUBP/ALF 等浏览器特有字段，
+// 且不包含 api.weibo.cn / Authorization 等 AppAuth 特征。
+func detectWeiboSuperCookieText(text string) bool {
+	lower := strings.ToLower(text)
+	// 明确是 AppAuth 抓包
+	if strings.Contains(lower, "api.weibo.cn") || strings.Contains(lower, "wb-sut") {
+		return false
+	}
+	// 没有 = 号或分号，不可能是完整 cookie
+	if !strings.Contains(text, "=") || !strings.Contains(text, ";") {
+		return false
+	}
+	// 有 SCF、SUBP、ALF 等浏览器特有字段之一，基本可确认是完整 cookie
+	markers := []string{"SCF=", "SUBP=", "ALF=", "WBPSESS=", "SSOLoginState=", "XSRF-TOKEN=", "MLOGIN=", "WEIBOCN_FROM="}
+	for _, m := range markers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeCookieValue 清除 curl 抓包残留的 ' -H 'xxx' 等杂质
+func sanitizeCookieValue(v string) string {
+	v = strings.TrimSpace(v)
+	// 去掉末尾的 '  -H '...(单引号+空格+-H+空格+单引号)
+	if idx := strings.Index(v, "'  -H '"); idx >= 0 {
+		v = strings.TrimSpace(v[:idx])
+	}
+	// 去掉末尾单引号（curl 值包裹）
+	v = strings.Trim(v, "'")
+	// 去掉 "Connection: keep-alive" 之类的 HTTP 头残留
+	v = strings.TrimSpace(v)
+	for _, suffix := range []string{"Connection:", "keep-alive", "Connection: keep-alive"} {
+		if strings.HasSuffix(strings.ToLower(v), strings.ToLower(suffix)) {
+			v = strings.TrimSpace(v[:len(v)-len(suffix)])
+		}
+	}
+	return strings.TrimSpace(v)
+}
+// 保留已有 cookie 中除了 SUB 以外的所有字段，仅替换 SUB=gsid。
+// 如果已有 cookie 为空或只有 SUB 字段，尝试从 fallbackCookie 中提取其他字段作为补充。
+func mergeWeiboCookieWithGSID(existingCookie string, newGSID string, fallbackCookie string) string {
+	newGSID = strings.TrimSpace(newGSID)
+	if newGSID == "" {
+		return existingCookie
+	}
+
+	// 解析已有 cookie 的字段
+	kvMap := make(map[string]string)
+	parseCookieIntoMap := func(c string) {
+		for _, part := range strings.Split(c, ";") {
+			part = strings.TrimSpace(part)
+			if part == "" || !strings.Contains(part, "=") {
+				continue
+			}
+			eqIdx := strings.Index(part, "=")
+			if eqIdx <= 0 {
+				continue
+			}
+			k := strings.TrimSpace(part[:eqIdx])
+			v := strings.TrimSpace(part[eqIdx+1:])
+			if k != "" && v != "" {
+				if _, exists := kvMap[k]; !exists {
+					kvMap[k] = v
+				}
+			}
+		}
+	}
+
+	parseCookieIntoMap(existingCookie)
+
+	// 如果已有 cookie 只有 SUB（或为空），从 fallback 补充
+	hasNonSUB := false
+	for k := range kvMap {
+		if !strings.EqualFold(k, "SUB") {
+			hasNonSUB = true
+			break
+		}
+	}
+	if !hasNonSUB && fallbackCookie != "" {
+		parseCookieIntoMap(fallbackCookie)
+	}
+
+	// 替换 SUB 值
+	kvMap["SUB"] = newGSID
+
+	// 按标准顺序重建 cookie
+	orderedKeys := []string{"SCF", "SUB", "SUBP", "WBPSESS", "ALF", "SSOLoginState", "_T_WM", "MLOGIN", "XSRF-TOKEN", "mweibo_short_token", "M_WEIBOCN_PARAMS", "WEIBOCN_FROM"}
+	seen := make(map[string]bool, len(orderedKeys))
+	out := make([]string, 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		if val, ok := kvMap[key]; ok && val != "" {
+			out = append(out, key+"="+val)
+			seen[key] = true
+		}
+	}
+	// 补上其他未在 orderedKeys 中的字段
+	for k, v := range kvMap {
+		if !seen[k] && v != "" {
+			out = append(out, k+"="+v)
+			seen[k] = true
+		}
+	}
+
+	if len(out) == 0 {
+		return "SUB=" + newGSID
+	}
+	return strings.Join(out, "; ")
+}
+
 func (b *Bot) updateWeiboAppAuth(appCfg *config.WeiboAppConfig) error {
 	if appCfg == nil {
 		return fmt.Errorf("app 配置为空")
@@ -337,8 +449,10 @@ func (b *Bot) updateWeiboAppAuth(appCfg *config.WeiboAppConfig) error {
 	b.cfg.WeiboApp = &copied
 
 	// 自动同步 gsid → weibo.com Cookie（gsid 就是 SUB token）
+	// 保留已有 cookie 中除 SUB 外的其他字段（如 SCF/SUBP/ALF），
+	// 这些字段对 weibo.com 签到等写操作是必需的。
 	if gsid := strings.TrimSpace(copied.GSID); gsid != "" {
-		cookieStr := "SUB=" + gsid
+		cookieStr := mergeWeiboCookieWithGSID(b.cfg.WeiboCookie, gsid, b.cfg.WeiboMWeiboCookie)
 		b.cfg.WeiboCookie = cookieStr
 		b.weiboMonitor.SetCookie(cookieStr)
 	}
@@ -732,7 +846,13 @@ func (b *Bot) signAllWeiboSuperTopics() string {
 	var lines []string
 	for oid, topic := range topics {
 		// 如果该超话标注了随日报签到，自动签到跳过
-		if ct, inCount := countTopics[oid]; inCount && ct.ReportSign == 1 {
+		// 注意：countTopics 的 key 可能带 "1022:" 前缀（从配置直接读取），也可能不带（运行时写入）
+		normKey := normalizeWeiboSuperOID(oid)
+		ct, inCount := countTopics[normKey]
+		if !inCount {
+			ct, inCount = countTopics["1022:"+normKey]
+		}
+		if inCount && ct.ReportSign == 1 {
 			log.Printf("[WeiboSuper] skip auto sign for report-sign topic oid=%s name=%s", oid, topic.Name)
 			name := strings.TrimSpace(topic.Name)
 			if name == "" {
@@ -817,6 +937,9 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 		// 如果在自动签到列表里
 		if _, inAuto := autoTopics[oidNorm]; inAuto {
 			ct, inCount := countTopicsMod[oidNorm]
+			if !inCount {
+				ct, inCount = countTopicsMod["1022:"+oidNorm]
+			}
 			if isRounded {
 				// 标记为日报签到，重置精确计数
 				if ct == nil {
@@ -824,8 +947,9 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 				}
 				ct.ReportSign = 1
 				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
+				delete(b.cfg.WeiboSuperCountTopics, "1022:"+oidNorm) // 清理旧格式
 				needSave = true
-			} else if inCount && ct.ReportSign > 0 {
+			} else if inCount && ct != nil && ct.ReportSign > 0 {
 				// 连续拿到精确数据，计数递增；满5天恢复自动签到
 				ct.ReportSign++
 				if ct.ReportSign >= 6 { // 1(标记) + 5(连续精确) = 6
@@ -833,6 +957,7 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 					log.Printf("[Weibo][Count] auto-recover topic oid=%s name=%s back to normal sign", oidNorm, r.Name)
 				}
 				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
+				delete(b.cfg.WeiboSuperCountTopics, "1022:"+oidNorm)
 				needSave = true
 			}
 		}

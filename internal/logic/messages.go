@@ -459,7 +459,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		if !shouldSend {
 			return
 		}
-		title, cover, _ := parseLivePushBody(msg.Body)
+		title, cover, liveID, roomID := parseLivePushBody(msg.Body)
 		if title == "" {
 			title = "直播开始了"
 		}
@@ -473,6 +473,11 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		}
 		segments = append(segments, napcat.TextSegment("\n"+timeStr))
 		b.napcat.SendGroupMessage(targetGroups[0], segments)
+
+		// Connect NIM danmaku bridge to this live stream
+		if b.nimDanmaku != nil {
+			go b.connectDanmakuForLive(liveID, roomID, room)
+		}
 		return
 
 	case pocket48.MsgAudio:
@@ -718,9 +723,9 @@ func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
 }
 
 func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr string) {
-	title, cover, _ := parseLivePushBody(msg.Body)
+	title, cover, _, _ := parseLivePushBody(msg.Body)
 	if title == "" || cover == "" {
-		extTitle, extCover, _ := parseLivePushBody(msg.RawExt)
+		extTitle, extCover, _, _ := parseLivePushBody(msg.RawExt)
 		if title == "" {
 			title = extTitle
 		}
