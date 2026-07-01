@@ -780,6 +780,20 @@ func (b *Bot) getWeiboSuperCountTopics() map[string]*config.WeiboSuperCountTopic
 	if b.cfg.WeiboSuperCountTopics == nil {
 		b.cfg.WeiboSuperCountTopics = make(map[string]*config.WeiboSuperCountTopic)
 	}
+	// 统一 key 格式：把带 "1022:" 前缀的旧 key 迁移到无前缀，避免 lookup 不一致
+	var prefixedKeys []string
+	for k, v := range b.cfg.WeiboSuperCountTopics {
+		if strings.HasPrefix(k, "1022:") {
+			normKey := normalizeWeiboSuperOID(k)
+			if _, exists := b.cfg.WeiboSuperCountTopics[normKey]; !exists {
+				b.cfg.WeiboSuperCountTopics[normKey] = v
+			}
+			prefixedKeys = append(prefixedKeys, k)
+		}
+	}
+	for _, k := range prefixedKeys {
+		delete(b.cfg.WeiboSuperCountTopics, k)
+	}
 	return b.cfg.WeiboSuperCountTopics
 }
 
