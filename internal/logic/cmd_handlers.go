@@ -649,6 +649,29 @@ func cmdWeibo(b *Bot, event *napcat.Event, args []string) {
 				return
 			}
 			rawText := strings.TrimSpace(strings.Join(args[3:], " "))
+			// 先检测是否为完整 weibo.com 浏览器 Cookie（有 SCF/SUBP/ALF 等字段）
+			if detectWeiboSuperCookieText(rawText) {
+				parsed, ok := extractCookieFromCaptureText(rawText)
+				if !ok {
+					parsed = strings.TrimSpace(rawText)
+				}
+				masked, err := b.updateWeiboCookie(event.UserID, parsed)
+				if err != nil {
+					b.reply(event, fmt.Sprintf("[错误] 导入失败: %v", err))
+					return
+				}
+				// 同步更新 MWeiboCookie（相同 SUB 跨域可用）
+				mweiboMasked, mwErr := b.updateWeiboMWeiboCookie(event.UserID, parsed)
+				if mwErr != nil {
+					b.LogInfo("sync mweibo cookie failed: %v", mwErr)
+				}
+				msg := fmt.Sprintf("[OK] 已导入 weibo.com Cookie: %s", masked)
+				if mwErr == nil {
+					msg += fmt.Sprintf("\n[同步] m.weibo.cn Cookie 已同步更新: %s", mweiboMasked)
+				}
+				b.reply(event, msg)
+				return
+			}
 			// 优先尝试解析为 AppAuth
 			if appCfg, ok := extractWeiboAppAuthFromCaptureText(rawText); ok {
 				b.updateWeiboAppAuth(appCfg)
@@ -674,7 +697,7 @@ func cmdWeibo(b *Bot, event *napcat.Event, args []string) {
 				b.reply(event, fmt.Sprintf("[错误] 导入失败: %v", err))
 				return
 			}
-			b.reply(event, fmt.Sprintf("[OK] 已更新 weibo.com Cookie: %s\n💡 建议使用 App 抓包导入以获得完整功能", masked))
+			b.reply(event, fmt.Sprintf("[OK] 已更新 weibo.com Cookie: %s", masked))
 		case "set":
 			if len(args) < 4 {
 				b.reply(event, "格式错误: weibo cookie set <Cookie>")

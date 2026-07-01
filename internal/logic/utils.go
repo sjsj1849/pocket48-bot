@@ -538,22 +538,23 @@ func appendTextWithQQFaces(segments []interface{}, text string) []interface{} {
 	return segments
 }
 
-func parseLivePushBody(body string) (string, string, string) {
+func parseLivePushBody(body string) (string, string, string, int64) {
 	body = strings.TrimSpace(body)
 	if body == "" {
-		return "", "", ""
+		return "", "", "", 0
 	}
 
 	var payload interface{}
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		return "", "", ""
+		return "", "", "", 0
 	}
 
 	title := findStringField(payload, []string{"liveTitle", "title", "pushTitle"})
 	cover := findStringField(payload, []string{"liveCover", "cover", "coverUrl", "image", "pic"})
-	liveID := findStringField(payload, []string{"liveId", "liveID", "id", "roomId", "liveRoomId"})
+	liveID := findStringField(payload, []string{"liveId", "liveID", "id", "liveRoomId"})
+	roomID := findInt64Field(payload, []string{"roomId", "liveRoomId", "chatroomId", "nimRoomId"})
 
-	return title, cover, liveID
+	return title, cover, liveID, roomID
 }
 
 func findStringField(payload interface{}, keys []string) string {
@@ -607,6 +608,33 @@ func findStringField(payload interface{}, keys []string) string {
 	}
 
 	return ""
+}
+
+func findInt64Field(payload interface{}, keys []string) int64 {
+	switch v := payload.(type) {
+	case map[string]interface{}:
+		for _, key := range keys {
+			rawVal, ok := v[key]
+			if !ok {
+				continue
+			}
+			switch n := rawVal.(type) {
+			case float64:
+				return int64(n)
+			case int64:
+				return n
+			case int:
+				return int64(n)
+			case string:
+				if cleaned := strings.TrimSpace(n); cleaned != "" {
+					if parsed, err := strconv.ParseInt(cleaned, 10, 64); err == nil {
+						return parsed
+					}
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func normalizeMediaURL(raw string) string {

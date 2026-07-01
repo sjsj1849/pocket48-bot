@@ -203,6 +203,7 @@ type Bot struct {
 	napcat          *napcat.Client
 	weiboMonitor    *monitor.WeiboMonitor
 	storage         *storage.Storage
+	nimDanmaku      *NimDanmakuBridge
 
 	lastMsgTime            map[int64]int64
 	cursorLoaded           map[int64]bool
@@ -220,6 +221,9 @@ type Bot struct {
 	fastInterval       time.Duration // fast polling interval (~300ms) when messages detected
 	pollFastMode       bool          // use fastInterval temporarily
 	pollFastRemaining  int32         // remaining fast cycles
+
+	memberEnterTimes   map[string]time.Time // userId -> enter time, for calculating watch duration
+	memberEnterMu      sync.Mutex
 }
 
 func NewBot(cfg *config.Config) *Bot {
@@ -261,8 +265,9 @@ func NewBot(cfg *config.Config) *Bot {
 	}
 
 	// 如果 AppAuth 有 gsid 但 Cookie 为空，自动推导
+	// 使用 mergeWeiboCookieWithGSID 保留已有 cookie 的额外字段
 	if cfg.WeiboCookie == "" && cfg.WeiboApp != nil && strings.TrimSpace(cfg.WeiboApp.GSID) != "" {
-		cookieStr := "SUB=" + strings.TrimSpace(cfg.WeiboApp.GSID)
+		cookieStr := mergeWeiboCookieWithGSID(cfg.WeiboCookie, cfg.WeiboApp.GSID, cfg.WeiboMWeiboCookie)
 		cfg.WeiboCookie = cookieStr
 		weiboMon.SetCookie(cookieStr)
 	}
@@ -277,18 +282,20 @@ func NewBot(cfg *config.Config) *Bot {
 	} else {
 		log.Println("⚠️ COS not available, running in degraded mode")
 	}
-
 	bot := &Bot{
 		cfg:                   cfg,
 		pocket:                pocket48.NewClient(cfg),
 		napcat:                napcatClient,
-		weiboMonitor:          weiboMon,		storage:               botStorage,
+		weiboMonitor:          weiboMon,
+		storage:               botStorage,
+		nimDanmaku:            NewNimDanmakuBridge(cfg),
 		lastMsgTime:           make(map[int64]int64),
 		cursorLoaded:          make(map[int64]bool),
 		onMicState:            make(map[int64]bool),
 		onMicLastCheck:        make(map[int64]time.Time),
 		userDetailCache:       make(map[int64]cachedUserDetail),
 		roomInfoCache:         make(map[int64]cachedRoomInfo),
+		memberEnterTimes:      make(map[string]time.Time),
 		isMonitoring:          true,
 		isLiveMonitoring:      cfg.LiveMonitoring,
 		pollingInterval:       interval,
@@ -430,6 +437,22 @@ func (b *Bot) Start() error {
 
 	// Start media cache cleanup
 	go b.runMediaCleanupLoop()
+
+	// Start NIM danmaku bridge (if enabled)
+	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
+		b.nimDanmaku.SetCallbacks(
+			b.handleDanmakuMessage,
+			b.handleDanmakuGift,
+			b.handleMemberEvent,
+			b.handleDanmakuConnected,
+			b.handleDanmakuError,
+		)
+		go func() {
+			if err := b.nimDanmaku.Start(); err != nil {
+				log.Printf("[NIM-danmaku] Failed to start bridge: %v", err)
+			}
+		}()
+	}
 
 	// Startup Notification
 	startTime := time.Now()
