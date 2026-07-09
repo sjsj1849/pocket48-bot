@@ -335,8 +335,8 @@ bot weibo cookie check
 | 命令 | 说明 |
 | :--- | :--- |
 | `bot weibo cookie check` | 检查三套认证（AppAuth / weibo.com / m.weibo.cn）状态 |
-|| `bot weibo cookie import <抓包文本>` | **推荐**：抓包一键导入 AppAuth（Authorization/gsid/aid/s 等），不再自动推导 Cookie |
-|| `bot weibo cookie set <Cookie>` | 设置 weibo.com Cookie（与 import 互不覆盖，分别管理 AppAuth 和 Cookie） |
+| `bot weibo cookie import <抓包文本>` | **推荐**：抓包一键导入 AppAuth（Authorization/gsid/aid/s 等），不再自动推导 Cookie |
+| `bot weibo cookie set <Cookie>` | 设置 weibo.com Cookie（与 import 互不覆盖，分别管理 AppAuth 和 Cookie） |
 
 > 📌 **三种认证说明**：
 > - **AppAuth（最高优先级）**：微博 App 抓包获取的完整认证，所有功能可用（监控、签到、超话发帖监控等）
@@ -382,6 +382,13 @@ bot weibo cookie check
 | `bot weibo super count group create <名称>` | 创建新分组（日报会按分组分别出报告） |
 | `bot weibo super count group rename <旧名称> <新名称>` | 重命名分组（日报标题同步更新） |
 | `bot weibo super count group del <名称>` | 删除分组（其下超话回到未分组，不影响数据） |
+
+> **数据精度与自动签到回退机制**：
+> - 微博 API 对签到人数过万的超话有时返回近似值（如 `1.2万`），而非精确整数
+> - 当检测到近似值时，该超话的**自动签到会暂时跳过**（改为走日报签到流），避免签到浪费
+> - bot 每次拉取数据时会检查是否拿到精确数据（无"万"字样）
+> - 连续 5 天拿到精确数据后，**自动恢复自动签到**，日报也会使用精确值
+> - 此机制是自适应调整，无需手动干预
 
 ---
 
