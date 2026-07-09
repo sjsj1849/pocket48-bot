@@ -18,9 +18,10 @@
 ### 🐼 微博监控
 - **主页微博**动态监控
 - **超话发帖**监控（指定 uid 在指定超话的发帖）
-- **超话签到**（手动/自动每日签到）
+- **超话签到**（手动/自动每日签到，失败可重试）
 - **超话签到人数**查询与日排行
-- **三套认证**同时维护：AppAuth / weibo.com Cookie / m.weibo.cn Cookie
+- **三套认证**独立维护：AppAuth / weibo.com Cookie / m.weibo.cn Cookie
+- **AppAuth 主动健康检查**（每 2 小时，失效/恢复自动通知管理员）
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -257,11 +258,21 @@ bot weibo cookie set "SCF=xxx; SUB=xxx; ..."
 bot weibo cookie check
 ```
 
-> ⚠️ **维护 AppAuth 一个就够了**：AppAuth 是所有功能的基础，只要 AppAuth 有效，Cookie 自动推导就够了。微博 Cookie（weibo.com / m.weibo.cn）基本不用管，bot 会从 AppAuth 的 gsid 自动推导。过期后 bot 会在群里发通知提醒，重新抓包导入即可：
+> ⚠️ **AppAuth 与 Cookie 分属不同认证体系**：
+> - **AppAuth**（`bot weibo cookie import` 导入）— 微博 App 端的短期认证，用于签到、超话监控等
+> - **weibo.com Cookie**（`bot weibo cookie set` 设置）— 浏览器端长期认证，用于动态监控
+> - 两者**各自独立维护**。gsid（App 用）和 Cookie（浏览器用）混合会导致签名不匹配，签到必失败。
+> - `bot weibo cookie import` 只导入 AppAuth，不再自动推导 Cookie。如需 Cookie，请单独使用 `bot weibo cookie set` 设置。
+>
+> 过期后 bot 会自动通知：
+> - AppAuth 失效 → 每 2 小时自动健康检查，检测到后发送通知到群
+> - Cookie 失效 → 动态监控连续失败 3 轮后发送通知
+>
+> 更新认证：
 > ```
-> bot weibo cookie import <新的抓包文本>
+> bot weibo cookie import <新的抓包文本>   # 更新 AppAuth
+> bot weibo cookie set "SCF=xxx; SUB=xxx"  # 更新 Cookie
 > ```
-> 建议在手机上用 Stream / HTTP Catcher 抓一次微博 App 请求，把请求头全文粘贴进来即可，不需要手动提取具体字段。
 
 ---
 
@@ -324,15 +335,15 @@ bot weibo cookie check
 | 命令 | 说明 |
 | :--- | :--- |
 | `bot weibo cookie check` | 检查三套认证（AppAuth / weibo.com / m.weibo.cn）状态 |
-| `bot weibo cookie import <抓包文本>` | **推荐**：从 App 抓包（curl/请求头）一键导入认证，自动解析 AppAuth 和 Cookie |
-| `bot weibo cookie set <Cookie>` | 直接设置 weibo.com Cookie（不推荐，建议用 import） |
+|| `bot weibo cookie import <抓包文本>` | **推荐**：抓包一键导入 AppAuth（Authorization/gsid/aid/s 等），不再自动推导 Cookie |
+|| `bot weibo cookie set <Cookie>` | 设置 weibo.com Cookie（与 import 互不覆盖，分别管理 AppAuth 和 Cookie） |
 
 > 📌 **三种认证说明**：
 > - **AppAuth（最高优先级）**：微博 App 抓包获取的完整认证，所有功能可用（监控、签到、超话发帖监控等）
 > - **m.weibo.cn Cookie（次之）**：仅可用于基础功能（监控主页微博、超话签到、签到人数查询），超话发帖监控（superpost）等需要 AppAuth 的功能不可用
 > - **weibo.com Cookie（最低）**：同上，基础功能可用但有限制（部分接口可能返回不完整数据）
 >
-> 建议优先用 `bot weibo cookie import` 导入 App 抓包文本，一次获取三套认证。
+> 建议优先用 `bot weibo cookie import` 导入 App 抓包文本获取 AppAuth，Cookie 如需请单独使用 `bot weibo cookie set` 设置。
 
 #### 超话签到
 

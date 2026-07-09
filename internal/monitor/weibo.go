@@ -633,6 +633,13 @@ func (m *WeiboMonitor) checkWeiboForConfig(config *WeiboConfig) {
 		return
 	}
 
+	// 两条链路都失败。先查 weibo.com Cookie 是否有效
+	// 若有效说明失败非 Cookie 问题（空数据、格式变更等），不应计入失效计数
+	if webOK, _, _ := m.CheckWebCookie(config.UID); webOK {
+		log.Printf("[Weibo] UID %s weibo.com Cookie 有效但获取失败（非 Cookie 问题），不计入失效计数", config.UID)
+		return
+	}
+
 	shouldAlert, shouldLog, streak, justBlocked := m.onCookieInvalid(config.UID)
 	delay := m.markRateLimited(config.UID)
 	if shouldLog {
@@ -2284,38 +2291,15 @@ func (m *WeiboMonitor) FetchSuperCountByOID(oid string, nameHint string) (*Weibo
 		return nil, fmt.Errorf("oid 不能为空")
 	}
 	if res, err := m.fetchSuperCountByOIDViaApp(oid, nameHint); err == nil {
-		return m.augmentSignCountWithRank(res), nil
+		return res, nil
 	}
 	res, err := m.fetchSuperCountByOIDViaWeb(oid, nameHint)
 	if err != nil {
 		return nil, err
 	}
-	return m.augmentSignCountWithRank(res), nil
+	return res, nil
 }
 
-// augmentSignCountWithRank 当签到人数来自 "1.2万" 这种近似值时，尝试通过签到获取精确排名
-func (m *WeiboMonitor) augmentSignCountWithRank(res *WeiboSuperCountResult) *WeiboSuperCountResult {
-	if res == nil || res.SignCount <= 0 {
-		return res
-	}
-	// 只有文本含 "万" 才说明是近似值，需要精确排名
-	if !strings.Contains(res.SignText, "万") {
-		return res
-	}
-	signRes, err := m.SignWeiboSuperTopic(res.OID)
-	if err != nil {
-		log.Printf("[Weibo][Count] sign-in fallback failed oid=%s err=%v", res.OID, err)
-		return res
-	}
-	if signRes.Rank > 0 && signRes.Rank != res.SignCount {
-		log.Printf("[Weibo][Count] sign-in rank fallback oid=%s label=%d exact=%d", res.OID, res.SignCount, signRes.Rank)
-		res.SignCount = signRes.Rank
-		res.SignText = fmt.Sprintf("签到%d人", signRes.Rank)
-	} else if signRes.Rank <= 0 {
-		log.Printf("[Weibo][Count] sign-in rank zero oid=%s label=%d code=%d msg=%q", res.OID, res.SignCount, signRes.Code, signRes.Message)
-	}
-	return res
-}
 
 func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (*WeiboSuperCountResult, error) {
 	baseID := strings.TrimPrefix(oid, "1022:")
@@ -3032,4 +3016,174 @@ func inferWeiboLevelText(iconURL string) string {
 	default:
 		return levelType + levelNum
 	}
+}
+
+// CheckWeiboAppAuth 主动检查微博 App 认证是否有效。
+// 返回 (ok, detail, error)，error 仅表示网络层故障。
+func (m *WeiboMonitor) CheckWeiboAppAuth() (bool, string, error) {
+	m.mu.RLock()
+	app := m.AppConfig
+	m.mu.RUnlock()
+	if app == nil {
+		return false, "weibo app auth 未配置", nil
+	}
+	if strings.TrimSpace(app.Authorization) == "" {
+		return false, "weibo app authorization 缺失", nil
+	}
+
+	baseID := strings.TrimPrefix(strings.TrimSpace(app.CapturedOID), "1022:")
+	if baseID == "" {
+		return false, "无 CapturedOID，无法测试", nil
+	}
+
+	// 复用相同构造逻辑但简化：只检查是否返回 auth 错误
+	containerID := baseID
+	flowID := baseID + "_-_recommend"
+
+	path := strings.TrimSpace(app.RequestPath)
+	if path == "" {
+		path = "/2/statuses/container_timeline_topicpage"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	host := strings.TrimSpace(app.Host)
+	if host == "" {
+		host = "api.weibo.cn"
+	}
+
+	params := neturl.Values{}
+	if rawCapture := strings.TrimSpace(html.UnescapeString(app.RawCapture)); rawCapture != "" {
+		re := regexp.MustCompile(`https://api\.weibo\.cn[^\s'\\\"]+`)
+		if rawURL := strings.TrimSpace(re.FindString(rawCapture)); rawURL != "" {
+			if parsedURL, err := neturl.Parse(rawURL); err == nil {
+				for k, vals := range parsedURL.Query() {
+					for _, v := range vals {
+						params.Add(k, v)
+					}
+				}
+			}
+		}
+	}
+	params.Set("containerid", containerID)
+	params.Set("flowId", flowID)
+	if params.Get("channelid") == "" {
+		params.Set("channelid", "recommend")
+	}
+	if app.GSID != "" {
+		params.Set("gsid", app.GSID)
+	}
+	if app.Aid != "" {
+		params.Set("aid", app.Aid)
+	}
+	if app.S != "" {
+		params.Set("s", app.S)
+	}
+
+	urlStr := "https://" + host + path + "?" + params.Encode()
+
+	requestBody := strings.TrimSpace(html.UnescapeString(app.RequestBody))
+	if requestBody == "" {
+		bodyValues := neturl.Values{}
+		bodyValues.Set("fid", containerID)
+		bodyValues.Set("flowId", containerID)
+		bodyValues.Set("refresh", "init")
+		bodyValues.Set("featurecode", "10000001")
+		bodyValues.Set("luicode", "10000001")
+		bodyValues.Set("uicode", "10000011")
+		requestBody = bodyValues.Encode()
+	} else {
+		if values, err := neturl.ParseQuery(requestBody); err == nil {
+			values.Set("flowId", containerID)
+			values.Set("fid", containerID)
+			requestBody = values.Encode()
+		}
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, _ := http.NewRequest("POST", urlStr, strings.NewReader(requestBody))
+	ua := strings.TrimSpace(app.UserAgent)
+	if ua == "" {
+		ua = "WeiboOversea/16.4.1 (iPhone15,2; iOS 26.3.1; Scale/3.00)"
+	}
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Authorization", app.Authorization)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+	req.Header.Set("Host", host)
+	if app.SNRT != "" {
+		req.Header.Set("SNRT", app.SNRT)
+	}
+	if app.XSessionID != "" {
+		req.Header.Set("X-Sessionid", app.XSessionID)
+	}
+	if app.XEngineType != "" {
+		req.Header.Set("x-engine-type", app.XEngineType)
+	}
+	if app.XShanhaiPass != "" {
+		req.Header.Set("x-shanhai-pass", app.XShanhaiPass)
+	}
+	if app.XLogUID != "" {
+		req.Header.Set("X-Log-Uid", app.XLogUID)
+	}
+	if app.XValidator != "" {
+		req.Header.Set("X-Validator", app.XValidator)
+	}
+	if app.CronetRID != "" {
+		req.Header.Set("cronet_rid", app.CronetRID)
+	}
+	if app.AcceptLanguage != "" {
+		req.Header.Set("Accept-Language", app.AcceptLanguage)
+	}
+	if app.GSID != "" {
+		req.Header.Set("Cookie", "gsid="+app.GSID)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("网络错误: %v", err), err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Sprintf("读取响应失败: %v", err), err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Sprintf("HTTP %d", resp.StatusCode), nil
+	}
+
+	// 检查响应体中的 auth 错误码
+	var authErr struct {
+		ErrNo  int    `json:"errno"`
+		ErrMsg string `json:"errmsg"`
+	}
+	if err := json.Unmarshal(body, &authErr); err == nil && authErr.ErrNo != 0 {
+		errMsg := strings.ToLower(strings.TrimSpace(authErr.ErrMsg))
+		if strings.Contains(errMsg, "校验参数") || strings.Contains(errMsg, "身份校验") ||
+			strings.Contains(errMsg, "重新登录") || strings.Contains(errMsg, "auth") ||
+			strings.Contains(errMsg, "sso") {
+			return false, fmt.Sprintf("errno=%d %s", authErr.ErrNo, authErr.ErrMsg), nil
+		}
+		// errno 非零但非 auth 类错误（如数据不存在），认证可能仍有效
+	}
+
+	// 检查是否返回了 header data（有 nick/oid 说明认证有效）
+	var result struct {
+		Header struct {
+			Data struct {
+				Nick string `json:"nick"`
+				OID  string `json:"oid"`
+			} `json:"data"`
+		} `json:"header"`
+	}
+	if err := json.Unmarshal(body, &result); err == nil {
+		if result.Header.Data.Nick != "" || result.Header.Data.OID != "" {
+			return true, "app auth ok", nil
+		}
+	}
+
+	// 有正常响应但没 header 数据 — 可能是该 OID 暂时无数据，认证本身可能有效
+	return true, "app auth 响应正常", nil
 }

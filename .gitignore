@@ -11,5 +11,6 @@ data/
 *.html
 pocket48-bot
 bot48
+bot
 dist/
 *.bak
