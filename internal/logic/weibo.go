@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +19,9 @@ func (b *Bot) notifyWeiboCookieInvalid(uid string) {
 	webOK, webDetail, _ := b.weiboMonitor.CheckWebCookie(uid)
 	mwebOK, mwebDetail, _ := b.weiboMonitor.CheckMWeiboCookie(uid)
 
-	msg := fmt.Sprintf("⚠️ 微博动态监控异常（UID=%s 连续3轮 mweibo 返回非成功）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：现在动态监控只认 mweibo 成功态；只要不是 ok=1，就会进入异常监测。\n建议先检查/更新：bot weibo cookie mset <Cookie>\n如需总检，也可执行：bot weibo cookie check", uid, webDetail, mwebDetail)
+	msg := fmt.Sprintf("⚠️ 微博动态监控异常（UID=%s 连续3轮获取失败）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：监控优先走 weibo.com（web API），失败后回退到 m.weibo.cn；\n两条链路都不成功时触发此告警。\n建议先检查/更新 Cookie：bot weibo cookie set <Cookie>\n如需总检，也可执行：bot weibo cookie check", uid, webDetail, mwebDetail)
 	if webOK || mwebOK {
-		log.Printf("[Weibo] UID %s 触发 mweibo 异常告警：web=%v(%s) mweb=%v(%s)", uid, webOK, webDetail, mwebOK, mwebDetail)
+		log.Printf("[Weibo] UID %s 触发监控异常告警：web=%v(%s) mweb=%v(%s)", uid, webOK, webDetail, mwebOK, mwebDetail)
 	}
 	for _, adminID := range b.collectAdminRecipients() {
 		if adminID == 0 {
@@ -271,6 +272,10 @@ func extractWeiboAppAuthFromCaptureText(text string) (*config.WeiboAppConfig, bo
 	if cfg.CapturedOID != "" && !strings.HasPrefix(cfg.CapturedOID, "1022:") {
 		cfg.CapturedOID = "1022:" + cfg.CapturedOID
 	}
+	// flowId/fid 参数会包含 "_-_recommend" "_-_feed" 等后缀，提取纯 OID
+	if idx := strings.Index(cfg.CapturedOID, "_-_"); idx >= 0 {
+		cfg.CapturedOID = cfg.CapturedOID[:idx]
+	}
 
 	if cfg.RequestPath != "" {
 		if idx := strings.Index(cfg.RequestPath, "?"); idx >= 0 {
@@ -448,14 +453,12 @@ func (b *Bot) updateWeiboAppAuth(appCfg *config.WeiboAppConfig) error {
 	copied := *appCfg
 	b.cfg.WeiboApp = &copied
 
-	// 自动同步 gsid → weibo.com Cookie（gsid 就是 SUB token）
-	// 保留已有 cookie 中除 SUB 外的其他字段（如 SCF/SUBP/ALF），
-	// 这些字段对 weibo.com 签到等写操作是必需的。
-	if gsid := strings.TrimSpace(copied.GSID); gsid != "" {
-		cookieStr := mergeWeiboCookieWithGSID(b.cfg.WeiboCookie, gsid, b.cfg.WeiboMWeiboCookie)
-		b.cfg.WeiboCookie = cookieStr
-		b.weiboMonitor.SetCookie(cookieStr)
-	}
+	// 导入新 AppAuth 后重置自动签到日期，让下一个 15 分钟 tick 重试自动签到
+	b.cfg.WeiboSuperLastRunDate = ""
+
+	// 注意：不再自动从 gsid 推导 weibo.com Cookie。
+	// gsid（App 用）与 weibo.com Cookie（浏览器用）分属不同认证体系，
+	// 混合字段会导致签名不匹配，签到必失败。Cookie 需要单独导入。
 
 	if err := b.cfg.Save(); err != nil {
 		return err
@@ -599,6 +602,17 @@ func (b *Bot) updateWeiboCookie(operatorID int64, rawCookie string) (string, err
 
 	b.cfg.WeiboCookie = cookie
 	b.weiboMonitor.SetCookie(cookie)
+
+	// 导入新 Cookie 后重置自动签到日期，让下一个 15 分钟 tick 重试自动签到
+	b.cfg.WeiboSuperLastRunDate = ""
+
+	// 自动同步到 MWeiboCookie（同一个 SUB token 可同时用于两个域名）
+	if b.cfg.WeiboMWeiboCookie == "" || b.cfg.WeiboMWeiboCookie != cookie {
+		b.cfg.WeiboMWeiboCookie = cookie
+		b.weiboMonitor.SetMWeiboCookie(cookie)
+		b.LogInfo("Weibo mweibo cookie auto-synced from weibo.com cookie")
+	}
+
 	if err := b.cfg.Save(); err != nil {
 		return "", err
 	}
@@ -689,27 +703,41 @@ func encryptPlainPassword(plain string) string {
 }
 
 func (b *Bot) runWeiboSuperAutoSignLoop() {
+	// 启动后立即尝试一次自动签到，不等第一个 tick
+	b.tryWeiboSuperAutoSign()
+
 	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if !b.cfg.WeiboSuperAutoEnabled {
-			continue
-		}
-		today := time.Now().Format("2006-01-02")
-		if strings.TrimSpace(b.cfg.WeiboSuperLastRunDate) == today {
-			continue
-		}
-		result := b.signAllWeiboSuperTopics()
-		if result == "" {
-			continue
-		}
-		b.cfg.WeiboSuperLastRunDate = today
-		if err := b.cfg.Save(); err != nil {
-			log.Printf("[WeiboSuper] save auto run date failed: %v", err)
-		}
-		b.notifyAdmins("[Weibo超话自动签到]\n" + result)
+		b.tryWeiboSuperAutoSign()
 	}
+}
+
+// tryWeiboSuperAutoSign 单次自动签到尝试，提取为独立方法供启动立即调用
+func (b *Bot) tryWeiboSuperAutoSign() {
+	if !b.cfg.WeiboSuperAutoEnabled {
+		return
+	}
+	today := time.Now().Format("2006-01-02")
+	if strings.TrimSpace(b.cfg.WeiboSuperLastRunDate) == today {
+		return
+	}
+	result, anySuccess := b.signAllWeiboSuperTopics()
+	if result == "" {
+		return
+	}
+	// 只有至少一个超话签到成功时才标记为今日已跑
+	// 全部失败时不标记，让下一个 tick 可以重试（如新 cookie 导入后）
+	if anySuccess {
+		b.cfg.WeiboSuperLastRunDate = today
+	} else {
+		log.Printf("[WeiboSuper] 全部签到失败（可能 Cookie 过期），保留重试机会")
+	}
+	if err := b.cfg.Save(); err != nil {
+		log.Printf("[WeiboSuper] save auto run date failed: %v", err)
+	}
+	b.notifyAdmins("[Weibo超话自动签到]\n" + result)
 }
 
 func (b *Bot) getGlobalWeiboSuperTopics() map[string]*config.WeiboSuperTopic {
@@ -762,7 +790,7 @@ func (b *Bot) filterResultsByGroup(results []monitor.WeiboSuperCountResult, grou
 	topics := b.getWeiboSuperCountTopics()
 	filtered := make([]monitor.WeiboSuperCountResult, 0, len(results))
 	for _, r := range results {
-		oid := normalizeWeiboSuperOID(r.OID)
+		oid := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
 		if t, ok := topics[oid]; ok && t.GroupName == groupName {
 			filtered = append(filtered, r)
 		}
@@ -784,7 +812,7 @@ func (b *Bot) getWeiboSuperCountTopics() map[string]*config.WeiboSuperCountTopic
 	var prefixedKeys []string
 	for k, v := range b.cfg.WeiboSuperCountTopics {
 		if strings.HasPrefix(k, "1022:") {
-			normKey := normalizeWeiboSuperOID(k)
+			normKey := strings.TrimPrefix(k, "1022:")
 			if _, exists := b.cfg.WeiboSuperCountTopics[normKey]; !exists {
 				b.cfg.WeiboSuperCountTopics[normKey] = v
 			}
@@ -814,7 +842,7 @@ func (b *Bot) findWeiboSuperCountTopic(key string) (string, *config.WeiboSuperCo
 	if needle == "" {
 		return "", nil
 	}
-	if topic, ok := topics[normalizeWeiboSuperOID(key)]; ok {
+	if topic, ok := topics[strings.TrimPrefix(normalizeWeiboSuperOID(key), "1022:")]; ok {
 		return normalizeWeiboSuperOID(key), topic
 	}
 	for oid, topic := range topics {
@@ -837,7 +865,7 @@ func (b *Bot) findWeiboSuperTopic(key string) (string, *config.WeiboSuperTopic) 
 	if needle == "" {
 		return "", nil
 	}
-	if topic, ok := topics[normalizeWeiboSuperOID(key)]; ok {
+	if topic, ok := topics[strings.TrimPrefix(normalizeWeiboSuperOID(key), "1022:")]; ok {
 		return normalizeWeiboSuperOID(key), topic
 	}
 	for oid, topic := range topics {
@@ -851,22 +879,19 @@ func (b *Bot) findWeiboSuperTopic(key string) (string, *config.WeiboSuperTopic) 
 	return "", nil
 }
 
-func (b *Bot) signAllWeiboSuperTopics() string {
+func (b *Bot) signAllWeiboSuperTopics() (string, bool) {
 	topics := b.getGlobalWeiboSuperTopics()
 	if len(topics) == 0 {
-		return ""
+		return "", false
 	}
 	countTopics := b.getWeiboSuperCountTopics()
 	var lines []string
+	anySuccess := false
 	for oid, topic := range topics {
 		// 如果该超话标注了随日报签到，自动签到跳过
-		// 注意：countTopics 的 key 可能带 "1022:" 前缀（从配置直接读取），也可能不带（运行时写入）
-		normKey := normalizeWeiboSuperOID(oid)
+		normKey := strings.TrimPrefix(normalizeWeiboSuperOID(oid), "1022:")
 		ct, inCount := countTopics[normKey]
-		if !inCount {
-			ct, inCount = countTopics["1022:"+normKey]
-		}
-		if inCount && ct.ReportSign == 1 {
+		if inCount && ct.ReportSign > 0 {
 			log.Printf("[WeiboSuper] skip auto sign for report-sign topic oid=%s name=%s", oid, topic.Name)
 			name := strings.TrimSpace(topic.Name)
 			if name == "" {
@@ -894,20 +919,22 @@ func (b *Bot) signAllWeiboSuperTopics() string {
 		if res.Success {
 			if res.AlreadyDone {
 				lines = append(lines, fmt.Sprintf("[%s] 今日已签到", name))
+				anySuccess = true
 			} else {
 				lines = append(lines, fmt.Sprintf("[%s] 签到成功", name))
+				anySuccess = true
 			}
 		} else {
 			lines = append(lines, fmt.Sprintf("[%s] 签到失败(code=%d): %s", name, res.Code, res.Message))
 		}
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", false
 	}
 	if err := b.cfg.Save(); err != nil {
 		log.Printf("[WeiboSuper] save sign result failed: %v", err)
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), anySuccess
 }
 
 func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []string) {
@@ -946,14 +973,11 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 	needSave := false
 	for i, r := range results {
 		isRounded := strings.Contains(r.SignText, "万")
-		oidNorm := normalizeWeiboSuperOID(r.OID)
+		oidNorm := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
 
 		// 如果在自动签到列表里
 		if _, inAuto := autoTopics[oidNorm]; inAuto {
 			ct, inCount := countTopicsMod[oidNorm]
-			if !inCount {
-				ct, inCount = countTopicsMod["1022:"+oidNorm]
-			}
 			if isRounded {
 				// 标记为日报签到，重置精确计数
 				if ct == nil {
@@ -961,7 +985,6 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 				}
 				ct.ReportSign = 1
 				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
-				delete(b.cfg.WeiboSuperCountTopics, "1022:"+oidNorm) // 清理旧格式
 				needSave = true
 			} else if inCount && ct != nil && ct.ReportSign > 0 {
 				// 连续拿到精确数据，计数递增；满5天恢复自动签到
@@ -971,7 +994,6 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 					log.Printf("[Weibo][Count] auto-recover topic oid=%s name=%s back to normal sign", oidNorm, r.Name)
 				}
 				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
-				delete(b.cfg.WeiboSuperCountTopics, "1022:"+oidNorm)
 				needSave = true
 			}
 		}
@@ -1396,11 +1418,9 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		if startSecond > maxStart {
 			startSecond = maxStart
 		}
-		startHour := startSecond / 3600
-		startMin := (startSecond % 3600) / 60
-		startSec := startSecond % 60
-
-		if now.Hour() != startHour || now.Minute() != startMin || now.Second() != startSec {
+		// 用范围匹配代替精确秒匹配，避免 1s ticker 经长时间运行后累积漂移错过触发
+		currentSecond := now.Hour()*3600 + now.Minute()*60 + now.Second()
+		if currentSecond < startSecond || currentSecond >= maxStart {
 			continue
 		}
 		today := now.Format("2006-01-02")
@@ -1468,6 +1488,71 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			log.Printf("[WeiboSuperCount] save last push date failed: %v", err)
 		}
 	}
+}
+
+// runWeiboAppAuthHealthCheckLoop 主动健康检查微博 App 认证，每 2 小时检查一次。
+// 认证失效时通知管理员，恢复时也通知。通知冷却 4 小时避免刷屏。
+func (b *Bot) runWeiboAppAuthHealthCheckLoop() {
+	if b.cfg.WeiboApp == nil {
+		return
+	}
+
+	// 启动 5 分钟后首次检查（给其他初始化留时间）
+	time.Sleep(5 * time.Minute)
+	b.weiboAppAuthHealthCheckTick()
+
+	ticker := time.NewTicker(2 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.weiboAppAuthHealthCheckTick()
+	}
+}
+
+func (b *Bot) weiboAppAuthHealthCheckTick() {
+	if b.cfg.WeiboApp == nil {
+		return
+	}
+
+	ok, detail, err := b.weiboMonitor.CheckWeiboAppAuth()
+	now := time.Now().Unix()
+
+	// 健康 — 之前有通知过认证失效则发恢复通知
+	if ok {
+		lastNotify := strings.TrimSpace(b.cfg.WeiboAppAuthHealthCheckNotifyAt)
+		if lastNotify != "" {
+			b.cfg.WeiboAppAuthHealthCheckNotifyAt = ""
+			if saveErr := b.cfg.Save(); saveErr != nil {
+				log.Printf("[WeiboAppAuth] save health check notify state failed: %v", saveErr)
+			}
+			b.notifyAdmins(fmt.Sprintf("✅ 微博 App 认证已恢复。\n详情: %s", detail))
+			log.Printf("[WeiboAppAuth] health check OK, sent recovery notice: %s", detail)
+		}
+		return
+	}
+
+	// 异常 — 检查冷却期
+	cooldown := int64(4 * 3600) // 4 小时
+	lastNotifyStr := strings.TrimSpace(b.cfg.WeiboAppAuthHealthCheckNotifyAt)
+	if lastNotifyStr != "" {
+		lastNotify, parseErr := strconv.ParseInt(lastNotifyStr, 10, 64)
+		if parseErr == nil && now-lastNotify < cooldown {
+			return // 冷却中
+		}
+	}
+
+	// 发通知
+	reason := detail
+	if err != nil {
+		reason = fmt.Sprintf("%v", err)
+	}
+	msg := fmt.Sprintf("⚠️ 微博 App 认证失效（主动健康检查发现）\n详情: %s\n请尽快更新 WEIBO_APP 抓包参数（Authorization / gsid / aid / s 等）。", reason)
+	b.notifyAdmins(msg)
+
+	b.cfg.WeiboAppAuthHealthCheckNotifyAt = fmt.Sprintf("%d", now)
+	if saveErr := b.cfg.Save(); saveErr != nil {
+		log.Printf("[WeiboAppAuth] save health check notify state failed: %v", saveErr)
+	}
+	log.Printf("[WeiboAppAuth] health check FAILED, admin notified: %s", reason)
 }
 
 func (b *Bot) handleWeiboSuperCountGroupCommand(args []string) string {
@@ -2191,8 +2276,20 @@ func (b *Bot) handleWeiboSuperCommand(event *napcat.Event, args []string) string
 			if len(topics) == 0 {
 				return "暂无超话配置"
 			}
+			countTopics := b.getWeiboSuperCountTopics()
 			lines := make([]string, 0, len(topics))
 			for oid, topic := range topics {
+				// 如果该超话标注了随日报签到，手动签到也跳过
+				normKey := strings.TrimPrefix(normalizeWeiboSuperOID(oid), "1022:")
+				ct, inCount := countTopics[normKey]
+				if inCount && ct.ReportSign > 0 {
+					name := strings.TrimSpace(topic.Name)
+					if name == "" {
+						name = oid
+					}
+					lines = append(lines, fmt.Sprintf("[%s] 跳过（走日报签到流）", name))
+					continue
+				}
 				res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
 				name := strings.TrimSpace(topic.Name)
 				if name == "" {

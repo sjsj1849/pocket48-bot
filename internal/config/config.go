@@ -49,6 +49,7 @@ type Config struct {
 	WeiboSuperCountDailySnapshots     map[string]map[string]int                          `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS"`           // YYYY-MM-DD -> OID -> SignCount
 	WeiboSuperCountDailySnapshotsV2   map[string]map[string]*WeiboSuperCountSnapshotItem `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"`        // YYYY-MM-DD -> OID -> SnapshotItem
 	WeiboAppAuthInvalidLastNotifyDate string                                             `json:"WEIBO_APP_AUTH_INVALID_LAST_NOTIFY_DATE,omitempty"`
+	WeiboAppAuthHealthCheckNotifyAt string                                             `json:"WEIBO_APP_AUTH_HEALTH_CHECK_NOTIFY_AT,omitempty"` // 主动健康检查上次通知时间 (unix ts)
 	WeiboApp                          *WeiboAppConfig                                    `json:"WEIBO_APP,omitempty"`
 	BilibiliSubscriptions             map[int64]map[string]*BilibiliConfig               `json:"BILIBILI_SUBSCRIPTIONS"`        // GroupID -> RoomID -> BilibiliConfig
 	WeiboCookie                       string                                             `json:"WEIBO_COOKIE"`                  // Weibo web Cookie
