@@ -194,3 +194,10 @@ type LoginResponseContent struct {
 	Token    string `json:"token"`
 	UserInfo User   `json:"userInfo"`
 }
+
+// IMUserInfo contains the per-user credentials returned by /im/userinfo.
+// Pwd is the NIM login token, not the Pocket48 account password.
+type IMUserInfo struct {
+	AccID string `json:"accid"`
+	Pwd   string `json:"pwd"`
+}

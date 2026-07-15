@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+	"unicode"
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/napcat"
@@ -20,273 +20,428 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// NimDanmakuBridge manages the Node.js sidecar for NIM chatroom danmaku.
+// NimDanmakuBridge owns the local Node.js bridge. One sidecar multiplexes all
+// live chatrooms and the authenticated QChat room-message connection.
 type NimDanmakuBridge struct {
-	cfg         *config.Config
-	cmd         *exec.Cmd
-	conn        *websocket.Conn
-	mu          sync.Mutex
-	connected   bool
-	currentRoom int64
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
-	onDanmaku   func(roomID int64, d *DanmakuMessage)
-	onGift      func(roomID int64, g *GiftMessage)
-	onMemberEvent func(roomID int64, m *MemberEvent)
-	onConnected func(roomID int64)
-	onError     func(err error)
+	cfg *config.Config
+
+	mu             sync.RWMutex
+	writeMu        sync.Mutex
+	cmd            *exec.Cmd
+	conn           *websocket.Conn
+	started        bool
+	stopping       bool
+	liveBindings   map[int64]int64 // NIM chatroom id -> Pocket48 channel id
+	connectedLives map[int64]bool
+	realtimeRooms  map[int64]int64 // QChat channel id -> Pocket48 channel id
+	qchatConnected bool
+	stopCh         chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
+
+	onDanmaku    func(roomID int64, d *DanmakuMessage)
+	onGift       func(roomID int64, g *GiftMessage)
+	onMember     func(roomID int64, m *MemberEvent)
+	onLiveUpdate func(roomID int64, update *LiveUpdate)
+	onLiveEnded  func(roomID int64, ended *LiveEnded)
+	onRoom       func(m *RoomRealtimeMessage)
+	onConnected  func(roomID int64)
+	onError      func(err error)
 }
 
-// DanmakuMessage represents a live danmaku (弹幕) message.
 type DanmakuMessage struct {
-	Type   string `json:"type"`   // "text", "barrage", "member_barrage"
-	Nick   string `json:"nick"`   // sender nickname
-	From   string `json:"from"`   // sender ID
-	Text   string `json:"text"`   // message text
+	Type   string `json:"type"`
+	Nick   string `json:"nick"`
+	From   string `json:"from"`
+	Text   string `json:"text"`
 	Avatar string `json:"avatar,omitempty"`
-	Time   int64  `json:"time"`   // timestamp
+	Time   int64  `json:"time"`
 }
 
-// GiftMessage represents a live gift notification.
 type GiftMessage struct {
-	Nick     string `json:"nick"`
-	From     string `json:"from"`
-	GiftName string `json:"giftName"`
-	GiftNum  int    `json:"giftNum"`
-	GiftID   int    `json:"giftId"`
-	Receiver string `json:"receiver,omitempty"`
-	Avatar   string `json:"avatar,omitempty"`
-	Time     int64  `json:"time"`
+	Nick     string          `json:"nick"`
+	From     string          `json:"from"`
+	GiftName string          `json:"giftName"`
+	GiftNum  int             `json:"giftNum"`
+	GiftID   string          `json:"giftId"`
+	Receiver string          `json:"receiver,omitempty"`
+	Avatar   string          `json:"avatar,omitempty"`
+	Time     int64           `json:"time"`
+	Raw      json.RawMessage `json:"raw,omitempty"`
 }
 
-// MemberEvent represents a member enter/leave notification from the chatroom.
+type LiveUpdate struct {
+	OnlineNum int64 `json:"onlineNum"`
+	Time      int64 `json:"time"`
+}
+
+type LiveEnded struct {
+	OnlineNum int64  `json:"onlineNum"`
+	Time      int64  `json:"time"`
+	Reason    string `json:"reason"`
+}
+
 type MemberEvent struct {
-	Event  string `json:"event"`  // "memberEnter" or "memberExit"
+	Event  string `json:"event"`
 	UserID string `json:"userId"`
 	Nick   string `json:"nick"`
 	Time   int64  `json:"time"`
 }
 
-// sidecarEvent is the JSON message from the Node.js sidecar.
+// RoomRealtimeMessage is the stable wire representation emitted by the
+// sidecar for a QChat message.
+type RoomRealtimeMessage struct {
+	ServerID  int64           `json:"serverId"`
+	ChannelID int64           `json:"channelId"`
+	Type      string          `json:"type"`
+	Body      string          `json:"body,omitempty"`
+	Attach    json.RawMessage `json:"attach,omitempty"`
+	Ext       json.RawMessage `json:"ext,omitempty"`
+	Time      int64           `json:"time"`
+	IDServer  string          `json:"idServer,omitempty"`
+	IDClient  string          `json:"idClient,omitempty"`
+}
+
+type RoomSubscription struct {
+	ServerID     int64 `json:"serverId"`
+	ChannelID    int64 `json:"channelId"`
+	PocketRoomID int64 `json:"pocketRoomId"`
+}
+
 type sidecarEvent struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data,omitempty"`
-	Msg  string          `json:"msg,omitempty"`
-	Port int             `json:"port,omitempty"`
-	RoomID int64         `json:"roomId,omitempty"`
-	Code  int            `json:"code,omitempty"`
+	Type      string          `json:"type"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	Msg       string          `json:"msg,omitempty"`
+	RoomID    int64           `json:"roomId,omitempty"`    // Pocket48 channel id
+	NIMRoomID int64           `json:"nimRoomId,omitempty"` // live chatroom id
+	ChannelID int64           `json:"channelId,omitempty"`
+	Code      int             `json:"code,omitempty"`
 }
 
-// sidecarCommand is a JSON command sent to the sidecar.
 type sidecarCommand struct {
-	Cmd    string `json:"cmd"`
-	RoomID int64  `json:"roomId,omitempty"`
-	LiveID string `json:"liveId,omitempty"`
+	Cmd       string             `json:"cmd"`
+	RoomID    int64              `json:"roomId,omitempty"`
+	NIMRoomID int64              `json:"nimRoomId,omitempty"`
+	LiveID    string             `json:"liveId,omitempty"`
+	Account   string             `json:"account,omitempty"`
+	Token     string             `json:"token,omitempty"`
+	Rooms     []RoomSubscription `json:"rooms,omitempty"`
 }
 
-// NewNimDanmakuBridge creates a new danmaku bridge manager.
 func NewNimDanmakuBridge(cfg *config.Config) *NimDanmakuBridge {
 	return &NimDanmakuBridge{
-		cfg:    cfg,
-		stopCh: make(chan struct{}),
+		cfg:            cfg,
+		liveBindings:   make(map[int64]int64),
+		connectedLives: make(map[int64]bool),
+		realtimeRooms:  make(map[int64]int64),
+		stopCh:         make(chan struct{}),
 	}
 }
 
-// SetCallbacks registers event handlers.
 func (b *NimDanmakuBridge) SetCallbacks(
 	onDanmaku func(roomID int64, d *DanmakuMessage),
 	onGift func(roomID int64, g *GiftMessage),
-	onMemberEvent func(roomID int64, m *MemberEvent),
+	onMember func(roomID int64, m *MemberEvent),
+	onLiveUpdate func(roomID int64, update *LiveUpdate),
+	onLiveEnded func(roomID int64, ended *LiveEnded),
+	onRoom func(m *RoomRealtimeMessage),
 	onConnected func(roomID int64),
 	onError func(err error),
 ) {
 	b.onDanmaku = onDanmaku
 	b.onGift = onGift
-	b.onMemberEvent = onMemberEvent
+	b.onMember = onMember
+	b.onLiveUpdate = onLiveUpdate
+	b.onLiveEnded = onLiveEnded
+	b.onRoom = onRoom
 	b.onConnected = onConnected
 	b.onError = onError
 }
 
-// Start launches the Node.js sidecar and connects to its WebSocket.
+// parseSidecarCommand accepts both a script path and a complete command line.
+// It deliberately does not invoke a shell.
+func parseSidecarCommand(line string) ([]string, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		line = "./sidecar/nim-bridge/index.mjs"
+	}
+
+	var args []string
+	var current strings.Builder
+	var quote rune
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+	for _, r := range line {
+		switch {
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote == 0 && (r == '\'' || r == '"'):
+			quote = r
+		case quote == 0 && unicode.IsSpace(r):
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("NIM_SIDECAR_CMD contains an unclosed quote")
+	}
+	flush()
+	if len(args) == 0 {
+		return nil, fmt.Errorf("NIM_SIDECAR_CMD is empty")
+	}
+	if strings.HasSuffix(strings.ToLower(args[0]), ".mjs") || strings.HasSuffix(strings.ToLower(args[0]), ".js") {
+		args = append([]string{"node"}, args...)
+	}
+	return args, nil
+}
+
 func (b *NimDanmakuBridge) Start() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.conn != nil {
+	if b.started {
+		b.mu.Unlock()
 		return fmt.Errorf("bridge already started")
 	}
+	b.started = true
+	b.mu.Unlock()
 
-	// Start the Node.js sidecar process
-	sidecarPath := b.cfg.NIMSidecarCmd
-	if sidecarPath == "" {
-		sidecarPath = "./sidecar/nim-bridge/index.mjs"
+	parts, err := parseSidecarCommand(b.cfg.NIMSidecarCmd)
+	if err != nil {
+		b.resetStarted()
+		return err
+	}
+	args := append([]string{}, parts[1:]...)
+	hasPort := false
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--wsPort=") {
+			hasPort = true
+			break
+		}
+	}
+	if !hasPort {
+		args = append(args, "--wsPort=0")
 	}
 
-	cmd := exec.Command("node", sidecarPath, "--wsPort=0")
+	cmd := exec.Command(parts[0], args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
+		b.resetStarted()
+		return fmt.Errorf("sidecar stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
+		b.resetStarted()
+		return fmt.Errorf("sidecar stderr pipe: %w", err)
 	}
-
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start sidecar: %w", err)
+		b.resetStarted()
+		return fmt.Errorf("start NIM sidecar: %w", err)
 	}
+	b.mu.Lock()
 	b.cmd = cmd
+	b.mu.Unlock()
 
-	// Read stderr in background for logging
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Try to parse as JSON log
-			var evt sidecarEvent
-			if json.Unmarshal([]byte(line), &evt) == nil && evt.Type == "log" {
-				log.Printf("[NIM-bridge] %s", evt.Msg)
-			} else {
-				log.Printf("[NIM-bridge] %s", line)
-			}
-		}
-	}()
-
-	// Read the port from stdout
+	go scanSidecarLogs(stderr, "[NIM-bridge]")
 	portCh := make(chan int, 1)
 	errCh := make(chan error, 1)
-
 	go func() {
 		scanner := bufio.NewScanner(stdout)
+		reported := false
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "PORT:") {
-				portStr := strings.TrimPrefix(line, "PORT:")
-				port, err := strconv.Atoi(portStr)
-				if err != nil {
-					errCh <- fmt.Errorf("parse port %q: %w", portStr, err)
+			if !reported && strings.HasPrefix(line, "PORT:") {
+				port, parseErr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PORT:")))
+				if parseErr != nil {
+					errCh <- fmt.Errorf("parse sidecar port %q: %w", line, parseErr)
 					return
 				}
+				reported = true
 				portCh <- port
-				return
+				continue
 			}
 			log.Printf("[NIM-bridge:stdout] %s", line)
 		}
-		err := scanner.Err()
-		if err != nil {
-			errCh <- err
-		} else {
-			errCh <- fmt.Errorf("sidecar exited before reporting port")
+		if !reported {
+			if scanErr := scanner.Err(); scanErr != nil {
+				errCh <- scanErr
+			} else {
+				errCh <- fmt.Errorf("sidecar exited before reporting port")
+			}
 		}
 	}()
 
-	// Wait for port with timeout
 	var port int
 	select {
 	case port = <-portCh:
-	case err := <-errCh:
-		b.cmd.Process.Kill()
-		return fmt.Errorf("sidecar startup: %w", err)
-	case <-time.After(10 * time.Second):
-		b.cmd.Process.Kill()
-		return fmt.Errorf("sidecar startup timeout (10s)")
+	case startErr := <-errCh:
+		_ = cmd.Process.Kill()
+		b.resetStarted()
+		return fmt.Errorf("sidecar startup: %w", startErr)
+	case <-time.After(15 * time.Second):
+		_ = cmd.Process.Kill()
+		b.resetStarted()
+		return fmt.Errorf("sidecar startup timeout (15s)")
 	}
 
-	// Connect WebSocket to sidecar
 	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("127.0.0.1:%d", port), Path: "/"}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		b.cmd.Process.Kill()
-		return fmt.Errorf("connect to sidecar ws: %w", err)
+		_ = cmd.Process.Kill()
+		b.resetStarted()
+		return fmt.Errorf("connect to NIM sidecar websocket: %w", err)
 	}
+	b.mu.Lock()
 	b.conn = conn
+	b.mu.Unlock()
 
-	// Start reader goroutine
 	b.wg.Add(1)
 	go b.readLoop()
-
-	log.Printf("[NIM-danmaku] Bridge started, sidecar PID=%d, ws=127.0.0.1:%d", cmd.Process.Pid, port)
+	log.Printf("[NIM] sidecar started pid=%d ws=127.0.0.1:%d", cmd.Process.Pid, port)
 	return nil
 }
 
-// Stop terminates the sidecar and cleans up.
-func (b *NimDanmakuBridge) Stop() {
+func scanSidecarLogs(r interface{ Read([]byte) (int, error) }, prefix string) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var evt sidecarEvent
+		if json.Unmarshal([]byte(line), &evt) == nil && evt.Type == "log" {
+			log.Printf("%s %s", prefix, evt.Msg)
+		} else {
+			log.Printf("%s %s", prefix, line)
+		}
+	}
+}
+
+func (b *NimDanmakuBridge) resetStarted() {
 	b.mu.Lock()
-	conn := b.conn
-	b.conn = nil
+	b.started = false
+	b.cmd = nil
 	b.mu.Unlock()
-
-	if conn != nil {
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"))
-		conn.Close()
-	}
-
-	if b.cmd != nil && b.cmd.Process != nil {
-		b.cmd.Process.Signal(gracefulShutdownSignal)
-		go func() {
-			time.Sleep(3 * time.Second)
-			b.cmd.Process.Kill()
-		}()
-		b.cmd.Wait()
-	}
-
-	close(b.stopCh)
-	b.wg.Wait()
-	log.Printf("[NIM-danmaku] Bridge stopped")
 }
 
-// ConnectRoom tells the sidecar to join a NIM chatroom for danmaku.
-func (b *NimDanmakuBridge) ConnectRoom(roomID int64, liveID string) error {
+func (b *NimDanmakuBridge) Stop() {
+	b.stopOnce.Do(func() {
+		b.mu.Lock()
+		b.stopping = true
+		conn := b.conn
+		cmd := b.cmd
+		b.conn = nil
+		b.qchatConnected = false
+		b.mu.Unlock()
+
+		if conn != nil {
+			payload, _ := json.Marshal(sidecarCommand{Cmd: "shutdown"})
+			b.writeMu.Lock()
+			_ = conn.WriteMessage(websocket.TextMessage, payload)
+			_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "shutdown"))
+			b.writeMu.Unlock()
+			_ = conn.Close()
+		}
+		close(b.stopCh)
+
+		if cmd != nil && cmd.Process != nil {
+			done := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+			}
+		}
+		b.wg.Wait()
+		log.Printf("[NIM] sidecar stopped")
+	})
+}
+
+func (b *NimDanmakuBridge) send(command sidecarCommand) error {
+	b.mu.RLock()
+	conn := b.conn
+	stopping := b.stopping
+	b.mu.RUnlock()
+	if conn == nil || stopping {
+		return fmt.Errorf("NIM sidecar is not connected")
+	}
+	payload, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
+	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func (b *NimDanmakuBridge) ConnectRoom(pocketRoomID, nimRoomID int64, liveID string) error {
+	if pocketRoomID == 0 || nimRoomID == 0 {
+		return fmt.Errorf("pocket room id and NIM room id are required")
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.conn == nil {
-		return fmt.Errorf("bridge not started")
-	}
-
-	cmd := sidecarCommand{
-		Cmd:    "connect",
-		RoomID: roomID,
-		LiveID: liveID,
-	}
-	b.currentRoom = roomID
-
-	data, _ := json.Marshal(cmd)
-	return b.conn.WriteMessage(websocket.TextMessage, data)
+	b.liveBindings[nimRoomID] = pocketRoomID
+	b.mu.Unlock()
+	return b.send(sidecarCommand{
+		Cmd:       "connect_live",
+		RoomID:    pocketRoomID,
+		NIMRoomID: nimRoomID,
+		LiveID:    liveID,
+		Account:   b.cfg.NIMAccount,
+		Token:     b.cfg.NIMToken,
+	})
 }
 
-// DisconnectRoom tells the sidecar to leave the current chatroom.
-func (b *NimDanmakuBridge) DisconnectRoom() error {
+func (b *NimDanmakuBridge) DisconnectRoom(nimRoomID int64) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	delete(b.liveBindings, nimRoomID)
+	delete(b.connectedLives, nimRoomID)
+	b.mu.Unlock()
+	return b.send(sidecarCommand{Cmd: "disconnect_live", NIMRoomID: nimRoomID})
+}
 
-	if b.conn == nil {
-		return nil
+func (b *NimDanmakuBridge) SyncRooms(rooms []RoomSubscription) error {
+	if strings.TrimSpace(b.cfg.NIMAccount) == "" || strings.TrimSpace(b.cfg.NIMToken) == "" {
+		return fmt.Errorf("NIM_ACCOUNT and NIM_TOKEN are required for room realtime monitoring")
 	}
-
-	b.currentRoom = 0
-	cmd := sidecarCommand{Cmd: "disconnect"}
-	data, _ := json.Marshal(cmd)
-	return b.conn.WriteMessage(websocket.TextMessage, data)
-}
-
-// IsConnected returns whether the bridge is connected to a chatroom.
-func (b *NimDanmakuBridge) IsConnected() bool {
+	next := make(map[int64]int64, len(rooms))
+	for _, room := range rooms {
+		next[room.ChannelID] = room.PocketRoomID
+	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.connected
+	b.realtimeRooms = next
+	b.mu.Unlock()
+	return b.send(sidecarCommand{Cmd: "sync_rooms", Account: b.cfg.NIMAccount, Token: b.cfg.NIMToken, Rooms: rooms})
 }
 
-// CurrentRoomID returns the currently connected room ID.
-func (b *NimDanmakuBridge) CurrentRoomID() int64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.currentRoom
+func (b *NimDanmakuBridge) RoomRealtimeAvailable(pocketRoomID int64) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if !b.qchatConnected {
+		return false
+	}
+	for _, mappedRoomID := range b.realtimeRooms {
+		if mappedRoomID == pocketRoomID {
+			return true
+		}
+	}
+	return false
 }
+
+func (b *NimDanmakuBridge) HasLiveBinding(pocketRoomID, nimRoomID int64) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.liveBindings[nimRoomID] == pocketRoomID
+}
+
+func eventPocketRoomID(evt sidecarEvent) int64 { return evt.RoomID }
 
 func (b *NimDanmakuBridge) readLoop() {
 	defer b.wg.Done()
-
 	for {
 		select {
 		case <-b.stopCh:
@@ -294,206 +449,540 @@ func (b *NimDanmakuBridge) readLoop() {
 		default:
 		}
 
-		b.mu.Lock()
+		b.mu.RLock()
 		conn := b.conn
-		b.mu.Unlock()
-
+		b.mu.RUnlock()
 		if conn == nil {
 			return
 		}
-
-		_, message, err := conn.ReadMessage()
+		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				log.Printf("[NIM-danmaku] read error: %v", err)
-			}
 			b.mu.Lock()
-			b.connected = false
+			b.qchatConnected = false
+			stopping := b.stopping
 			b.mu.Unlock()
+			if !stopping && websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				b.reportError(fmt.Errorf("sidecar websocket read: %w", err))
+			}
 			return
 		}
 
 		var evt sidecarEvent
-		if err := json.Unmarshal(message, &evt); err != nil {
-			log.Printf("[NIM-danmaku] parse event error: %v (raw: %s)", err, string(message))
+		if err := json.Unmarshal(raw, &evt); err != nil {
+			log.Printf("[NIM] invalid sidecar event: %v raw=%s", err, string(raw))
 			continue
 		}
-
+		roomID := eventPocketRoomID(evt)
 		switch evt.Type {
-		case "connected":
+		case "live_connected":
 			b.mu.Lock()
-			b.connected = true
-			roomID := b.currentRoom
+			b.connectedLives[evt.NIMRoomID] = true
 			b.mu.Unlock()
 			if b.onConnected != nil {
 				b.onConnected(roomID)
 			}
-			log.Printf("[NIM-danmaku] Connected to chatroom %d", roomID)
-
-		case "disconnected":
+		case "live_disconnected":
 			b.mu.Lock()
-			b.connected = false
+			delete(b.connectedLives, evt.NIMRoomID)
 			b.mu.Unlock()
-			log.Printf("[NIM-danmaku] Disconnected: %s", evt.Msg)
-
+		case "qchat_connected":
+			b.mu.Lock()
+			b.qchatConnected = true
+			b.mu.Unlock()
+			log.Printf("[NIM-room] QChat connected")
+		case "qchat_disconnected":
+			b.mu.Lock()
+			b.qchatConnected = false
+			b.mu.Unlock()
+			log.Printf("[NIM-room] QChat disconnected: %s", evt.Msg)
 		case "danmaku":
-			var d DanmakuMessage
-			if err := json.Unmarshal(evt.Data, &d); err != nil {
-				log.Printf("[NIM-danmaku] parse danmaku error: %v", err)
-				continue
+			var msg DanmakuMessage
+			if json.Unmarshal(evt.Data, &msg) == nil && b.onDanmaku != nil {
+				b.onDanmaku(roomID, &msg)
 			}
-			b.mu.Lock()
-			roomID := b.currentRoom
-			b.mu.Unlock()
-			if b.onDanmaku != nil {
-				b.onDanmaku(roomID, &d)
-			}
-
 		case "gift":
-			var g GiftMessage
-			if err := json.Unmarshal(evt.Data, &g); err != nil {
-				log.Printf("[NIM-danmaku] parse gift error: %v", err)
-				continue
+			var msg GiftMessage
+			if json.Unmarshal(evt.Data, &msg) == nil && b.onGift != nil {
+				b.onGift(roomID, &msg)
+			}
+		case "live_update":
+			var update LiveUpdate
+			if json.Unmarshal(evt.Data, &update) == nil && b.onLiveUpdate != nil {
+				b.onLiveUpdate(roomID, &update)
+			}
+		case "live_ended":
+			var ended LiveEnded
+			if json.Unmarshal(evt.Data, &ended) == nil && b.onLiveEnded != nil {
+				b.onLiveEnded(roomID, &ended)
 			}
 			b.mu.Lock()
-			roomID := b.currentRoom
+			delete(b.liveBindings, evt.NIMRoomID)
+			delete(b.connectedLives, evt.NIMRoomID)
 			b.mu.Unlock()
-			if b.onGift != nil {
-				b.onGift(roomID, &g)
-			}
-
 		case "member_event":
-			var m MemberEvent
-			if err := json.Unmarshal(evt.Data, &m); err != nil {
-				log.Printf("[NIM-danmaku] parse member_event error: %v", err)
+			var msg MemberEvent
+			if json.Unmarshal(evt.Data, &msg) == nil && b.onMember != nil {
+				b.onMember(roomID, &msg)
+			}
+		case "room_message":
+			var msg RoomRealtimeMessage
+			if err := json.Unmarshal(evt.Data, &msg); err != nil {
+				b.reportError(fmt.Errorf("decode QChat room message: %w", err))
 				continue
 			}
-			b.mu.Lock()
-			roomID := b.currentRoom
-			b.mu.Unlock()
-			if b.onMemberEvent != nil {
-				b.onMemberEvent(roomID, &m)
+			if b.onRoom != nil {
+				b.onRoom(&msg)
 			}
-
 		case "error":
-			log.Printf("[NIM-danmaku] Error: %s (code=%d)", evt.Msg, evt.Code)
-			if b.onError != nil {
-				b.onError(fmt.Errorf("sidecar error: %s (code=%d)", evt.Msg, evt.Code))
-			}
-
+			b.reportError(fmt.Errorf("sidecar error: %s (code=%d)", evt.Msg, evt.Code))
 		case "log":
-			log.Printf("[NIM-danmaku] %s", evt.Msg)
-
-		case "status":
-			// Status response, ignore
+			log.Printf("[NIM] %s", evt.Msg)
 		}
 	}
 }
 
-// gracefulShutdownSignal is SIGTERM on Unix.
-var gracefulShutdownSignal = syscall.SIGTERM
+func (b *NimDanmakuBridge) reportError(err error) {
+	log.Printf("[NIM] %v", err)
+	if b.onError != nil {
+		b.onError(err)
+	}
+}
 
-// connectDanmakuForLive fetches the NIM chatroom ID for a live stream and tells the bridge to connect.
-// roomIDFromPush is the NIM roomId from the push body (may be 0 if not included).
-// liveID is the Pocket48 live stream ID (for fallback lookup).
-func (b *Bot) connectDanmakuForLive(liveID string, roomIDFromPush int64, room *pocket48.RoomInfo) {
-	// Priority: roomId from push body > GetLiveOne API
-	roomID := roomIDFromPush
-	if roomID == 0 && liveID != "" {
-		liveOne, err := b.pocket.GetLiveOne(liveID)
+func decodeRawObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return map[string]json.RawMessage{}, nil
+	}
+	var encoded string
+	if raw[0] == '"' && json.Unmarshal(raw, &encoded) == nil {
+		raw = json.RawMessage(encoded)
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48.Message, error) {
+	if room == nil {
+		room = &pocket48.RoomInfo{ServerID: m.ServerID, ChannelID: m.ChannelID}
+	}
+	msgType := strings.ToUpper(strings.TrimSpace(m.Type))
+	body := m.Body
+	if strings.EqualFold(m.Type, "custom") {
+		attach, err := decodeRawObject(m.Attach)
 		if err != nil {
-			log.Printf("[NIM-danmaku] GetLiveOne failed for live %s: %v", liveID, err)
-			return
+			return nil, fmt.Errorf("decode room message attach: %w", err)
 		}
-		roomID = liveOne.RoomID
+		if rawType := attach["messageType"]; len(rawType) > 0 {
+			_ = json.Unmarshal(rawType, &msgType)
+		}
+		if len(m.Attach) > 0 {
+			body = string(m.Attach)
+		}
 	}
 
-	if roomID == 0 {
-		log.Printf("[NIM-danmaku] No NIM roomId available for live (liveID=%s)", liveID)
+	msg := &pocket48.Message{
+		Room:        room,
+		MsgIDServer: m.IDServer,
+		MsgIDClient: m.IDClient,
+		Type:        pocket48.MessageType(strings.ToUpper(msgType)),
+		Body:        body,
+		Time:        normalizeMessageTimestampMs(m.Time),
+		RawExt:      string(m.Ext),
+	}
+	if len(m.Ext) > 0 {
+		var ext pocket48.ExtInfo
+		raw := m.Ext
+		var encoded string
+		if raw[0] == '"' && json.Unmarshal(raw, &encoded) == nil {
+			raw = json.RawMessage(encoded)
+		}
+		if err := json.Unmarshal(raw, &ext); err == nil {
+			msg.ExtInfo = ext
+			msg.NickName = ext.User.Nickname
+		}
+	}
+	return msg, nil
+}
+
+func (b *Bot) startNIMBridge() {
+	b.refreshNIMCredentials()
+	b.nimDanmaku.SetCallbacks(
+		b.handleDanmakuMessage,
+		b.handleDanmakuGift,
+		b.handleMemberEvent,
+		b.handleLiveUpdate,
+		b.handleLiveEnded,
+		b.handleRoomRealtimeMessage,
+		b.handleDanmakuConnected,
+		b.handleDanmakuError,
+	)
+	if err := b.nimDanmaku.Start(); err != nil {
+		log.Printf("[NIM] failed to start bridge: %v", err)
 		return
 	}
-
-	log.Printf("[NIM-danmaku] Connecting to live chatroom roomId=%d for %s (liveId=%s)",
-		roomID, room.OwnerName, liveID)
-
-	if err := b.nimDanmaku.ConnectRoom(roomID, liveID); err != nil {
-		log.Printf("[NIM-danmaku] ConnectRoom failed: %v", err)
+	if b.cfg.NIMRoomMessageEnabled {
+		b.refreshNIMRoomSubscriptions()
+		go b.runNIMRoomSyncLoop()
+	}
+	if b.cfg.NIMEnabled {
+		b.refreshNIMLiveRooms()
+		go b.runNIMLiveDiscoveryLoop()
 	}
 }
 
-// --- Bot callback handlers for danmaku events ---
+func (b *Bot) tryPocketPasswordLogin() bool {
+	mobile := strings.TrimSpace(b.cfg.PocketUsername)
+	password := b.cfg.PocketPassword
+	if mobile == "" || password == "" {
+		return false
+	}
+	b.LogInfo("Trying Pocket48 password login for %s...", maskMobile(mobile))
+	if err := b.pocket.LoginWithPassword(mobile, password); err != nil {
+		log.Printf("[Pocket48] password login failed: %v", err)
+		return false
+	}
+	b.clearPocketAuthExpired()
+	b.refreshNIMCredentials()
+	b.LogInfo("Pocket48 password login successful")
+	return true
+}
 
-// handleDanmakuMessage is called when a danmaku message is received from the sidecar.
-// Only forwards messages from OTHER idols visiting the live room (not the room owner, not fans).
+// refreshNIMCredentials obtains the account-scoped NIM token from Pocket48.
+// Existing configured credentials remain usable if the refresh is temporarily
+// unavailable, which keeps restarts resilient during an API outage.
+func (b *Bot) refreshNIMCredentials() bool {
+	if strings.TrimSpace(b.cfg.PocketToken) == "" {
+		return strings.TrimSpace(b.cfg.NIMAccount) != "" && strings.TrimSpace(b.cfg.NIMToken) != ""
+	}
+	info, err := b.pocket.GetIMUserInfo()
+	if err != nil {
+		log.Printf("[NIM] unable to refresh credentials: %v", err)
+		return strings.TrimSpace(b.cfg.NIMAccount) != "" && strings.TrimSpace(b.cfg.NIMToken) != ""
+	}
+	if info.AccID == b.cfg.NIMAccount && info.Pwd == b.cfg.NIMToken {
+		return true
+	}
+	if err := b.cfg.UpdateNIMCredentials(info.AccID, info.Pwd); err != nil {
+		log.Printf("[NIM] save refreshed credentials: %v", err)
+	}
+	log.Printf("[NIM] credentials refreshed for account %s", info.AccID)
+	return true
+}
+
+func (b *Bot) runNIMRoomSyncLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.refreshNIMRoomSubscriptions()
+	}
+}
+
+func (b *Bot) refreshNIMRoomSubscriptions() {
+	roomIDs := make(map[int64]struct{})
+	for _, rooms := range b.cfg.GroupSubscriptions {
+		for _, roomID := range rooms {
+			roomIDs[roomID] = struct{}{}
+		}
+	}
+	subscriptions := make([]RoomSubscription, 0, len(roomIDs))
+	for roomID := range roomIDs {
+		info, err := b.getCachedRoomInfo(roomID)
+		if err != nil || info == nil {
+			log.Printf("[NIM-room] cannot resolve room %d for subscription: %v", roomID, err)
+			continue
+		}
+		subscriptions = append(subscriptions, RoomSubscription{
+			ServerID: info.ServerID, ChannelID: info.ChannelID, PocketRoomID: roomID,
+		})
+	}
+	if err := b.nimDanmaku.SyncRooms(subscriptions); err != nil {
+		log.Printf("[NIM-room] subscription sync failed: %v", err)
+	}
+}
+
+func (b *Bot) runNIMLiveDiscoveryLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		b.refreshNIMLiveRooms()
+	}
+}
+
+// refreshNIMLiveRooms makes startup during an already-running live stream work;
+// relying only on LIVEPUSH would miss streams whose push predates bot startup.
+func (b *Bot) refreshNIMLiveRooms() {
+	lives, err := b.pocket.GetLiveList()
+	if err != nil {
+		log.Printf("[NIM-live] active live discovery failed: %v", err)
+		return
+	}
+	roomIDs := make(map[int64]struct{})
+	for _, rooms := range b.cfg.GroupSubscriptions {
+		for _, roomID := range rooms {
+			roomIDs[roomID] = struct{}{}
+		}
+	}
+	activeLiveIDs := make(map[string]struct{})
+	for _, live := range lives {
+		if live.LiveID != "" {
+			activeLiveIDs[live.LiveID] = struct{}{}
+		}
+	}
+	for roomID := range roomIDs {
+		room, roomErr := b.getCachedRoomInfo(roomID)
+		if roomErr != nil || room == nil {
+			continue
+		}
+		for _, live := range lives {
+			ownerMatches := live.UserID == room.OwnerID || live.MemberID == room.OwnerID
+			nameMatches := room.OwnerName != "" && (live.MemberName == room.OwnerName || live.NickName == room.OwnerName)
+			if !ownerMatches && !nameMatches {
+				continue
+			}
+			// getLiveList discovers the active liveId. Its roomId is not the
+			// authoritative NIM chatroom id; getLiveOne supplies that value.
+			b.connectDanmakuForLive(live.LiveID, 0, room)
+			break
+		}
+	}
+	b.finishMissingLiveSessions(activeLiveIDs)
+}
+
+func resolveNIMLiveRoomID(liveID string, fallback int64, getLiveOne func(string) (*pocket48.LiveOne, error)) (int64, error) {
+	if liveID == "" {
+		return fallback, nil
+	}
+	liveOne, err := getLiveOne(liveID)
+	if err != nil {
+		if fallback != 0 {
+			return fallback, nil
+		}
+		return 0, err
+	}
+	if liveOne == nil || liveOne.RoomID == 0 {
+		if fallback != 0 {
+			return fallback, nil
+		}
+		return 0, fmt.Errorf("getLiveOne returned no NIM chatroom id for live %s", liveID)
+	}
+	return liveOne.RoomID, nil
+}
+
+func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket48.RoomInfo) {
+	if room == nil {
+		return
+	}
+	var liveOne *pocket48.LiveOne
+	var liveOneErr error
+	if liveID != "" {
+		liveOne, liveOneErr = b.pocket.GetLiveOne(liveID)
+	}
+	resolvedRoomID, err := resolveNIMLiveRoomID(liveID, nimRoomID, func(string) (*pocket48.LiveOne, error) {
+		return liveOne, liveOneErr
+	})
+	if err != nil {
+		log.Printf("[NIM-live] GetLiveOne failed for live %s: %v", liveID, err)
+		return
+	}
+	nimRoomID = resolvedRoomID
+	if nimRoomID == 0 {
+		log.Printf("[NIM-live] no chatroom id for live %s", liveID)
+		return
+	}
+	initialOnline := int64(0)
+	if liveOne != nil {
+		initialOnline = liveOne.OnlineNum
+	}
+	if !b.beginLiveSession(room, liveID, nimRoomID, initialOnline) {
+		return
+	}
+	if b.nimDanmaku.HasLiveBinding(room.ChannelID, nimRoomID) {
+		return
+	}
+	if err := b.nimDanmaku.ConnectRoom(room.ChannelID, nimRoomID, liveID); err != nil {
+		log.Printf("[NIM-live] connect room failed: %v", err)
+	}
+}
+
+func (b *Bot) handleRoomRealtimeMessage(raw *RoomRealtimeMessage) {
+	if raw == nil || raw.ChannelID == 0 || !b.cfg.NIMRoomMessageEnabled {
+		return
+	}
+	if len(b.getTargetGroupsForRoom(raw.ChannelID)) == 0 {
+		return
+	}
+	room, err := b.getCachedRoomInfo(raw.ChannelID)
+	if err != nil {
+		log.Printf("[NIM-room] resolve channel %d: %v", raw.ChannelID, err)
+		return
+	}
+	msg, err := raw.toPocketMessage(room)
+	if err != nil {
+		log.Printf("[NIM-room] normalize channel %d message: %v", raw.ChannelID, err)
+		return
+	}
+	b.processMessages([]*pocket48.Message{msg})
+	b.mu.Lock()
+	if msg.Time > b.lastMsgTime[raw.ChannelID] {
+		b.lastMsgTime[raw.ChannelID] = msg.Time
+	}
+	b.mu.Unlock()
+	if b.storage != nil {
+		_ = b.storage.SaveCursor(raw.ChannelID, msg.MsgIDServer, msg.Time)
+	}
+}
+
 func (b *Bot) handleDanmakuMessage(roomID int64, d *DanmakuMessage) {
-	if d.Text == "" {
+	if d == nil || strings.TrimSpace(d.Text) == "" || !b.cfg.NIMLiveDanmakuEnabled {
 		return
 	}
-
-	// Skip fans (non-stars)
 	fromID, _ := strconv.ParseInt(d.From, 10, 64)
-	if fromID == 0 || !b.isKnownStar(fromID) {
+	if fromID == 0 || !b.isKnownStar(fromID) || fromID == b.getRoomOwnerID(roomID) {
 		return
 	}
-
-	// Skip the room owner (the streamer themself)
-	ownerID := b.getRoomOwnerID(roomID)
-	if fromID == ownerID {
-		return
-	}
-
-	// Find target groups for this room
 	targetGroups := b.getTargetGroupsForRoom(roomID)
-	if len(targetGroups) == 0 {
-		return
-	}
-
-	// Get room name
 	roomName := b.getRoomNameForDanmaku(roomID)
-
-	segments := []interface{}{
-		napcat.TextSegment(fmt.Sprintf("💬 %s直播间 · %s: %s", roomName, d.Nick, d.Text)),
-	}
 	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, segments)
+		b.napcat.SendGroupMessage(gid, napcat.TextSegment(fmt.Sprintf("💬 %s直播间 · %s: %s", roomName, d.Nick, d.Text)))
 	}
 }
 
-// handleDanmakuGift is called when a gift notification is received from the sidecar.
-// Only forwards gifts from other idols (not room owner, not fans).
 func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
-	fromID, _ := strconv.ParseInt(g.From, 10, 64)
-	if fromID == 0 || !b.isKnownStar(fromID) {
+	if g == nil {
 		return
 	}
+	_, totalLegs, _ := extractChickenLegFromRaw(g.Raw, g.GiftName, int64(g.GiftNum))
+	var score float64
+	if scoreGift, ok := parseAnnualScoreGiftMessage(string(g.Raw)); ok {
+		score = scoreGift.TotalScore
+	}
+	b.liveSessionsMu.Lock()
+	if session := b.liveSessions[roomID]; session != nil && !session.Ended {
+		session.ChickenLegs += totalLegs
+		session.AnnualScore += score
+	}
+	b.liveSessionsMu.Unlock()
+}
 
-	ownerID := b.getRoomOwnerID(roomID)
-	if fromID == ownerID {
+func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID, initialOnline int64) bool {
+	if room == nil {
+		return false
+	}
+	b.liveSessionsMu.Lock()
+	defer b.liveSessionsMu.Unlock()
+	current := b.liveSessions[room.ChannelID]
+	if current != nil && current.LiveID == liveID {
+		if initialOnline > current.PeakOnline {
+			current.PeakOnline = initialOnline
+		}
+		return !current.Ended
+	}
+	b.liveSessions[room.ChannelID] = &LiveGiftSession{
+		LiveID: liveID, LiveRoomID: nimRoomID, LiveOwnerID: room.OwnerID,
+		LiveOwnerName: room.OwnerName, StartedAt: time.Now().UnixMilli(), PeakOnline: initialOnline,
+	}
+	return true
+}
+
+func (b *Bot) handleLiveUpdate(roomID int64, update *LiveUpdate) {
+	if update == nil || update.OnlineNum < 0 {
 		return
 	}
-
-	targetGroups := b.getTargetGroupsForRoom(roomID)
-	if len(targetGroups) == 0 {
-		return
+	b.liveSessionsMu.Lock()
+	if session := b.liveSessions[roomID]; session != nil && !session.Ended && update.OnlineNum > session.PeakOnline {
+		session.PeakOnline = update.OnlineNum
 	}
+	b.liveSessionsMu.Unlock()
+}
 
-	roomName := b.getRoomNameForDanmaku(roomID)
-
-	text := fmt.Sprintf("🎁 %s直播间 · %s 送了 %d 个%s",
-		roomName, g.Nick, g.GiftNum, g.GiftName)
-	if g.Receiver != "" {
-		text += fmt.Sprintf(" 给 %s", g.Receiver)
+func (b *Bot) handleLiveEnded(roomID int64, ended *LiveEnded) {
+	if ended != nil {
+		b.handleLiveUpdate(roomID, &LiveUpdate{OnlineNum: ended.OnlineNum, Time: ended.Time})
 	}
+	b.finishLiveSession(roomID)
+}
 
-	segments := []interface{}{
-		napcat.TextSegment(text),
+func (b *Bot) finishMissingLiveSessions(activeLiveIDs map[string]struct{}) {
+	var endedRooms []int64
+	b.liveSessionsMu.Lock()
+	for roomID, session := range b.liveSessions {
+		if session == nil || session.Ended || session.LiveID == "" {
+			continue
+		}
+		if _, active := activeLiveIDs[session.LiveID]; !active {
+			endedRooms = append(endedRooms, roomID)
+		}
 	}
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, segments)
+	b.liveSessionsMu.Unlock()
+	for _, roomID := range endedRooms {
+		b.finishLiveSession(roomID)
 	}
 }
 
-// getRoomOwnerID returns the owner userId of a room from the room info cache.
+func (b *Bot) finishLiveSession(roomID int64) {
+	b.liveSessionsMu.Lock()
+	session := b.liveSessions[roomID]
+	if session == nil || session.Ended {
+		b.liveSessionsMu.Unlock()
+		return
+	}
+	session.Ended = true
+	snapshot := *session
+	b.liveSessionsMu.Unlock()
+
+	name := strings.TrimSpace(snapshot.LiveOwnerName)
+	if name == "" {
+		name = b.getRoomNameForDanmaku(roomID)
+	}
+	text := fmt.Sprintf("⏹️ %s的直播已结束\n本场鸡腿值：%d", name, snapshot.ChickenLegs)
+	if snapshot.AnnualScore > 0 {
+		text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
+	}
+	if snapshot.PeakOnline > 0 {
+		text += fmt.Sprintf("\n最高在线人数：%d", snapshot.PeakOnline)
+	}
+	for _, gid := range b.getTargetGroupsForRoom(roomID) {
+		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
+	}
+}
+
+func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
+	if m == nil || !b.cfg.NIMViewerEventEnabled {
+		return
+	}
+	fromID, _ := strconv.ParseInt(m.UserID, 10, 64)
+	if fromID == 0 || !b.isKnownStar(fromID) || fromID == b.getRoomOwnerID(roomID) {
+		return
+	}
+	now := time.Now()
+	key := fmt.Sprintf("%d:%s", roomID, m.UserID)
+	roomName := b.getRoomNameForDanmaku(roomID)
+	var text string
+	switch m.Event {
+	case "memberEnter":
+		b.memberEnterMu.Lock()
+		b.memberEnterTimes[key] = now
+		b.memberEnterMu.Unlock()
+		text = fmt.Sprintf("👀 %s进入了%s的直播间\n%s", m.Nick, roomName, now.Format("2006-01-02 15:04:05"))
+	case "memberExit":
+		var duration string
+		b.memberEnterMu.Lock()
+		if entered, ok := b.memberEnterTimes[key]; ok {
+			duration = fmt.Sprintf("\n观看时长%s", now.Sub(entered).Round(time.Second))
+			delete(b.memberEnterTimes, key)
+		}
+		b.memberEnterMu.Unlock()
+		text = fmt.Sprintf("👀 %s离开了%s的直播间%s\n%s", m.Nick, roomName, duration, now.Format("2006-01-02 15:04:05"))
+	default:
+		return
+	}
+	for _, gid := range b.getTargetGroupsForRoom(roomID) {
+		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
+	}
+}
+
 func (b *Bot) getRoomOwnerID(roomID int64) int64 {
 	info, err := b.getCachedRoomInfo(roomID)
 	if err == nil && info != nil {
@@ -502,119 +991,44 @@ func (b *Bot) getRoomOwnerID(roomID int64) int64 {
 	return 0
 }
 
-// handleMemberEvent is called when a member enters or leaves the live chatroom.
-// Only reports events for other idols (not room owner, not fans).
-func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
-	fromID, _ := strconv.ParseInt(m.UserID, 10, 64)
-	if fromID == 0 || !b.isKnownStar(fromID) {
-		return
-	}
-
-	ownerID := b.getRoomOwnerID(roomID)
-	if fromID == ownerID {
-		return
-	}
-
-	targetGroups := b.getTargetGroupsForRoom(roomID)
-	if len(targetGroups) == 0 {
-		return
-	}
-
-	roomName := b.getRoomNameForDanmaku(roomID)
-	now := time.Now()
-	timeStr := now.Format("2006-01-02 15:04:05")
-
-	var msg string
-
-	if m.Event == "memberEnter" {
-		// Track enter time
-		b.memberEnterMu.Lock()
-		b.memberEnterTimes[m.UserID] = now
-		b.memberEnterMu.Unlock()
-
-		msg = fmt.Sprintf("👀 %s进入了%s的直播间\n%s", m.Nick, roomName, timeStr)
-	} else if m.Event == "memberExit" {
-		// Calculate duration from enter time
-		durationStr := ""
-		b.memberEnterMu.Lock()
-		if enterTime, ok := b.memberEnterTimes[m.UserID]; ok {
-			watched := now.Sub(enterTime)
-			delete(b.memberEnterTimes, m.UserID)
-			if watched >= time.Minute {
-				mins := int(watched.Minutes())
-				secs := int(watched.Seconds()) % 60
-				if mins > 0 {
-					durationStr = fmt.Sprintf("观看时长%d分钟", mins)
-					if secs > 0 && mins < 10 {
-						durationStr = fmt.Sprintf("观看时长%d分%d秒", mins, secs)
-					}
-				} else {
-					durationStr = fmt.Sprintf("观看时长%d秒", secs)
-				}
-			}
-		}
-		b.memberEnterMu.Unlock()
-
-		msg = fmt.Sprintf("👀 %s离开了%s的直播间\n%s\n%s", m.Nick, roomName, durationStr, timeStr)
-	} else {
-		return
-	}
-
-	segments := []interface{}{napcat.TextSegment(msg)}
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, segments)
-	}
-}
-
-// isKnownStar checks if a user is a known SNH48 star/idol.
-// Uses a cached set of star userIds populated from:
-//   - Room owners of monitored rooms
-//   - Previously looked-up star statuses
 func (b *Bot) isKnownStar(userID int64) bool {
 	if userID == 0 {
 		return false
 	}
-
 	b.mu.RLock()
 	cached, ok := b.userDetailCache[userID]
 	b.mu.RUnlock()
-	if ok {
+	if ok && time.Now().Before(cached.expiresAt) {
 		return cached.info != nil && cached.info.IsStar
 	}
-
-	// Not in cache, try to look up via API
 	detail, err := b.pocket.GetUserDetailInfo(userID)
 	if err != nil {
-		// API error, log and assume not a star
-		log.Printf("[NIM-danmaku] Failed to lookup user %d: %v", userID, err)
+		log.Printf("[NIM-live] lookup user %d: %v", userID, err)
 		return false
 	}
-
-	// Cache the result
 	b.mu.Lock()
 	b.userDetailCache[userID] = cachedUserDetail{info: detail, expiresAt: time.Now().Add(10 * time.Minute)}
 	b.mu.Unlock()
-
 	return detail.IsStar
 }
 
-// handleDanmakuConnected is called when the sidecar connects to a chatroom.
 func (b *Bot) handleDanmakuConnected(roomID int64) {
-	log.Printf("[NIM-danmaku] Connected to live chatroom roomId=%d", roomID)
+	log.Printf("[NIM-live] connected Pocket48 room=%d", roomID)
 }
 
-// handleDanmakuError is called when the sidecar reports an error.
 func (b *Bot) handleDanmakuError(err error) {
-	log.Printf("[NIM-danmaku] Error: %v", err)
+	log.Printf("[NIM] %v", err)
 }
 
-// getRoomNameForDanmaku returns the room name for display in danmaku messages.
 func (b *Bot) getRoomNameForDanmaku(roomID int64) string {
-	// Try to get from room info cache
 	info, err := b.getCachedRoomInfo(roomID)
-	if err == nil && info != nil && info.ChannelName != "" {
-		return info.ChannelName
+	if err == nil && info != nil {
+		if strings.TrimSpace(info.OwnerName) != "" {
+			return info.OwnerName
+		}
+		if strings.TrimSpace(info.ChannelName) != "" {
+			return info.ChannelName
+		}
 	}
 	return fmt.Sprintf("房间%d", roomID)
 }
-

@@ -1,8 +1,9 @@
 config.json
 *.log
 log/
-storage/
-sidecar/
+/storage/
+/sidecar/nim-bridge/node_modules/
+/sidecar/nim-android-bridge/
 data/
 .DS_Store
 *.swp

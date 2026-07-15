@@ -187,50 +187,12 @@
     *   `bot archive retry`
 *   **适用范围**: QQ 群 / 私聊 (Admin)
 
-### 15. NIM 实时监听 (`nim`)
-控制 NIM sidecar 的实时直播监听能力。
+### 15. NIM 实时监听
 
-*   **格式**:
-    *   `<前缀> nim status`
-    *   `<前缀> nim on`
-    *   `<前缀> nim off`
-    *   `<前缀> nim restart`
-    *   `<前缀> nim account <口袋账号>`
-    *   `<前缀> nim mode <auto|im|anon>`
-    *   `<前缀> nim fallback <on/off>`
-    *   `<前缀> nim cross <on/off>`
-    *   `<前缀> nim roommsg <on/off>`
-    *   `<前缀> nim watch <on/off>`
-    *   `<前缀> nim online <on/off>`
-    *   `<前缀> nim online-notify <on/off>`
-    *   `<前缀> nim gifts`
-    *   `<前缀> nim gifts <房间ID|成员名>`
-    *   `<前缀> nim gifts <房间ID|成员名> <开始时间> <结束时间>`
-*   **示例**:
-    *   `bot nim status`
-    *   `bot nim on`
-    *   `bot nim mode auto`
-    *   `bot nim fallback on`
-    *   `bot nim cross on`
-    *   `bot nim roommsg on`
-    *   `bot nim watch on`
-    *   `bot nim online on`
-    *   `bot nim online-notify on`
-    *   `bot nim gifts`
-    *   `bot nim gifts 67248386`
-    *   `bot nim gifts 林舒晴 2026-04-09T20:00 2026-04-09T20:30`
-*   **适用范围**: QQ 群 / 私聊 (Admin)
-*   **说明**:
-    *   `nim on` 启动实时监听；`nim off` 关闭实时监听但不影响轮询兜底。
-    *   `nim mode auto`：优先 IM；遇到 NIM 鉴权失败时可回退匿名入房（受 fallback 开关控制）。
-    *   `nim mode im`：仅使用 IM 登录链路，不做匿名回退。
-    *   `nim mode anon`：跳过 IM 登录，直接匿名入房。
-    *   `nim fallback on/off`：控制 auto 模式是否允许匿名回退。
-    *   `nim cross on` 开启“小偶像在他人直播间发言”推送（基于昵称匹配）。
-    *   `nim roommsg on/off` 控制“直播间普通文本消息”的实时转发（默认关闭；轮询链路继续作为兜底）。
-    *   `nim watch on/off` 控制“正在看/离开直播间/观看时长”通知（默认关闭）。
-    *   `nim online on/off` 控制上线/离线事件采集（实验性，默认关闭）。
-    *   `nim online-notify on/off` 控制是否把上线/离线事件推送到群（实验性，默认关闭）。
+当前没有运行时 `nim` 管理命令；请在 `config.json` 中配置 `NIM_ENABLED`、
+`NIM_ROOM_MESSAGE_ENABLED`、`NIM_ROOM_MESSAGE_POLL_FALLBACK` 和
+`NIM_VIEWER_EVENT_ENABLED`，然后重启 Bot。直播与普通房间分别使用纯协议
+Chatroom/QChat，旧 `node-nim`、Web SDK 和匿名回退均已移除。
 
 ### 15.1 微博超话签到 (`weibo super`)
 管理当前群超话列表、手动签到和自动签到。

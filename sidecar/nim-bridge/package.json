@@ -1,0 +1,13 @@
+{
+  "name": "pocket48-nim-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check index.mjs",
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "ws": "8.18.3"
+  }
+}
