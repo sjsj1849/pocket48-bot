@@ -582,6 +582,46 @@ func cmdHelp(b *Bot, event *napcat.Event, args []string) {
 			b.reply(event, fmt.Sprintf("❓ 未知命令: %s\n发送 bot help 查看所有可用命令", cmdName))
 			return
 		}
+		// 复杂命令单独输出详细帮助
+		if cmdName == "weibo" {
+			helpText := "📘 命令: weibo — 微博功能合集（管理员）\n" +
+				"📎 用法: bot weibo <add/del/list|cookie|super|superpost>\n\n" +
+				"【一、动态监控】监控指定用户的微博更新，新微博自动推送到群\n" +
+				"  bot weibo add <UID> [at_all]        # 加 at_all 则 @全体\n" +
+				"  bot weibo del [UID]                 # 不写 UID 则删除该群全部\n" +
+				"  bot weibo list                      # 查看该群监控列表\n\n" +
+				"【二、Cookie＆认证】支持 3 种认证链路\n" +
+				"  bot weibo cookie check              # 检查认证状态\n" +
+				"  bot weibo cookie set <Cookie>       # 手动设 weibo.com Cookie\n" +
+				"  bot weibo cookie import <抓包文本>   # 自动识别 AppAuth / Cookie\n" +
+				"  快捷：直接粘贴含 Set-Cookie: SUB= 的抓包文本，机器人自动提取\n" +
+				"  或粘贴含 Authorization: Bearer 的微博 App 抓包，自动导入 AppAuth\n" +
+				"  💡 维护 AppAuth 一个就够了，Cookie 会自动推导\n\n" +
+				"【三、超话签到】超话每日签到\n" +
+				"  bot weibo super list                # 已配置的超话列表\n" +
+				"  bot weibo super add <oid> [名称]    # 添加（oid 从超话页 URL 获取）\n" +
+				"  bot weibo super del <oid|名称>      # 删除\n" +
+				"  bot weibo super sign [all|oid|名称] # 手动签到（all=全部）\n" +
+				"  bot weibo super auto <on/off>       # 自动签到开关\n\n" +
+				"【四、超话签到人数统计】查询签到数/帖子数/互动量\n" +
+				"  bot weibo super count               # 查询所有绑定超话\n" +
+				"  bot weibo super count <组名>        # 按分组查询\n" +
+				"  bot weibo super count list          # 列出绑定的超话\n" +
+				"  bot weibo super count bind <oid> [名称]\n" +
+				"  bot weibo super count unbind <oid|名称>\n" +
+				"  bot weibo super count enable <on/off>\n" +
+				"  bot weibo super count yesterday\n" +
+				"  bot weibo super count group create|list|rename|del <名称>\n\n" +
+				"【五、超话发帖监控】监控指定用户在超话发的新帖\n" +
+				"  bot weibo superpost bind <uid> <oid> [名称]\n" +
+				"  bot weibo superpost unbind <uid> <oid>\n" +
+				"  bot weibo superpost list\n" +
+				"  bot weibo superpost test <uid> <oid>\n\n" +
+				"【六、测试】\n" +
+				"  bot test weibo"
+			b.reply(event, helpText)
+			return
+		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("📘 命令: %s\n", cmdName))
 		sb.WriteString(fmt.Sprintf("📝 说明: %s\n", def.Help))
@@ -679,11 +719,7 @@ func cmdWeibo(b *Bot, event *napcat.Event, args []string) {
 			// 优先尝试解析为 AppAuth
 			if appCfg, ok := extractWeiboAppAuthFromCaptureText(rawText); ok {
 				b.updateWeiboAppAuth(appCfg)
-				extra := ""
-				if strings.TrimSpace(appCfg.GSID) != "" {
-					extra = "\n[自动] 已从 gsid 推导 weibo.com Cookie"
-				}
-				b.reply(event, fmt.Sprintf("[OK] 已导入微博 App 认证: %s%s", maskWeiboAppAuth(appCfg), extra))
+				b.reply(event, fmt.Sprintf("[OK] 已导入微博 App 认证: %s\n[提示] Cookie 需单独导入，gsid 不再自动推导为 Cookie", maskWeiboAppAuth(appCfg)))
 				return
 			}
 			// 尝试解析为 Cookie
