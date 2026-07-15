@@ -271,14 +271,6 @@ func NewBot(cfg *config.Config) *Bot {
 		})
 	}
 
-	// 如果 AppAuth 有 gsid 但 Cookie 为空，自动推导
-	// 使用 mergeWeiboCookieWithGSID 保留已有 cookie 的额外字段
-	if cfg.WeiboCookie == "" && cfg.WeiboApp != nil && strings.TrimSpace(cfg.WeiboApp.GSID) != "" {
-		cookieStr := mergeWeiboCookieWithGSID(cfg.WeiboCookie, cfg.WeiboApp.GSID, cfg.WeiboMWeiboCookie)
-		cfg.WeiboCookie = cookieStr
-		weiboMon.SetCookie(cookieStr)
-	}
-
 	// 初始化存储
 	storageDir := "storage"
 	cosDir := "/lhcos-data/bot48"
