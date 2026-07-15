@@ -141,9 +141,9 @@ func init() {
 			Usage:     "archive <status/retry>",
 		},
 		"help": {
-			Handler:   cmdHelp,
-			Help:      "显示帮助",
-			Category:  "其他",
+			Handler:  cmdHelp,
+			Help:     "显示帮助",
+			Category: "其他",
 		},
 		"test": {
 			Handler:   cmdTest,
@@ -373,6 +373,7 @@ func cmdLogin(b *Bot, event *napcat.Event, args []string) {
 		tokenErr := b.pocket.CheckToken()
 		if tokenErr == nil {
 			b.clearPocketAuthExpired()
+			b.refreshNIMCredentials()
 		} else {
 			b.handlePocketAuthError(tokenErr)
 		}
@@ -409,15 +410,17 @@ func cmdLogin(b *Bot, event *napcat.Event, args []string) {
 			b.reply(event, "请先设置手机号")
 			return
 		}
-		if err := b.pocket.LoginWithPassword(mobile, encryptPlainPassword(password)); err != nil {
+		if err := b.pocket.LoginWithPassword(mobile, password); err != nil {
 			b.reply(event, "密码登录失败: "+err.Error())
 		} else {
+			b.clearPocketAuthExpired()
+			b.refreshNIMCredentials()
 			b.reply(event, "密码登录成功！Token已更新。")
 		}
 		return
 	}
 
-	b.reply(event, "用法:\n  login <token> - 直接设置Token\n  login sms <手机号> - 发送验证码登录\n  login pwd <加密密码> - 密码登录\n  code <验证码> - 输入验证码完成登录")
+	b.reply(event, "用法:\n  login <token> - 直接设置Token\n  login sms <手机号> - 发送验证码登录\n  login pwd <明文密码> - 密码登录\n  code <验证码> - 输入验证码完成登录")
 }
 
 func cmdCode(b *Bot, event *napcat.Event, args []string) {
@@ -442,6 +445,7 @@ func cmdCode(b *Bot, event *napcat.Event, args []string) {
 	b.pendingPocketSMSMobile = ""
 	b.mu.Unlock()
 	b.clearPocketAuthExpired()
+	b.refreshNIMCredentials()
 	b.reply(event, "SMS Login Successful! Token updated.")
 }
 

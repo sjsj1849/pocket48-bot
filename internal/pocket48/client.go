@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"pocket48-bot/internal/config"
@@ -175,12 +176,17 @@ func (c *Client) LoginWithSMS(mobile, code string) error {
 	return nil
 }
 
-func (c *Client) LoginWithPassword(mobile, encryptedPwd string) error {
+func (c *Client) LoginWithPassword(mobile, password string) error {
 	endpoint := BaseURL + "/user/api/v2/login/app/app_login"
+	encryptedPwd, err := EncryptPassword(password)
+	if err != nil {
+		return err
+	}
 
 	payload := map[string]interface{}{
-		"deviceToken": "",
-		"loginType":   "MOBILE_PWD",
+		"deviceToken":       "",
+		"intelligenceToken": "",
+		"loginType":         "MOBILE_PWD",
 		"loginMobile": map[string]string{
 			"mobile": mobile,
 			"pwd":    encryptedPwd,
@@ -196,9 +202,29 @@ func (c *Client) LoginWithPassword(mobile, encryptedPwd string) error {
 	if err := json.Unmarshal(resp.Content, &content); err != nil {
 		return err
 	}
+	if strings.TrimSpace(content.Token) == "" {
+		return fmt.Errorf("Pocket48 password login succeeded without returning a token")
+	}
 
 	c.cfg.UpdateToken(content.Token)
 	return nil
+}
+
+// GetIMUserInfo exchanges the current Pocket48 token for this user's NIM
+// account and token. The credentials are shared by classic Chatroom and QChat.
+func (c *Client) GetIMUserInfo() (*IMUserInfo, error) {
+	resp, err := c.Post(BaseURL+"/im/api/v1/im/userinfo", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var info IMUserInfo
+	if err := json.Unmarshal(resp.Content, &info); err != nil {
+		return nil, fmt.Errorf("decode NIM credentials: %w", err)
+	}
+	if strings.TrimSpace(info.AccID) == "" || strings.TrimSpace(info.Pwd) == "" {
+		return nil, fmt.Errorf("Pocket48 returned empty NIM credentials")
+	}
+	return &info, nil
 }
 
 func (c *Client) CheckToken() error {

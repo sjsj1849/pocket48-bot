@@ -375,6 +375,7 @@ func sanitizeCookieValue(v string) string {
 	}
 	return strings.TrimSpace(v)
 }
+
 // 保留已有 cookie 中除了 SUB 以外的所有字段，仅替换 SUB=gsid。
 // 如果已有 cookie 为空或只有 SUB 字段，尝试从 fallbackCookie 中提取其他字段作为补充。
 func mergeWeiboCookieWithGSID(existingCookie string, newGSID string, fallbackCookie string) string {
@@ -689,17 +690,6 @@ func (b *Bot) checkWeiboCookieStatus() (bool, string, error) {
 		return false, strings.Join(parts, " | "), lastErr
 	}
 	return allOK, strings.Join(parts, " | "), nil
-}
-
-func encryptPlainPassword(plain string) string {
-	knownPasswords := map[string]string{
-		"9624641314sj": "YXscAy4yAD0SayPd/DoJTA==",
-	}
-	if enc, ok := knownPasswords[plain]; ok {
-		return enc
-	}
-	// If unknown password, return as-is (user should provide encrypted form)
-	return plain
 }
 
 func (b *Bot) runWeiboSuperAutoSignLoop() {
@@ -1775,14 +1765,14 @@ func (b *Bot) handleWeiboSuperCountSubcommand(args []string, topics map[string]*
 	case "group":
 		return b.handleWeiboSuperCountGroupCommand(args)
 	case "enable":
-	if len(args) < 5 {
-		state := "off"
-		if b.cfg.WeiboSuperCountEnabled {
-			state = "on"
+		if len(args) < 5 {
+			state := "off"
+			if b.cfg.WeiboSuperCountEnabled {
+				state = "on"
+			}
+			return fmt.Sprintf("当前 super count 功能: %s", state)
 		}
-		return fmt.Sprintf("当前 super count 功能: %s", state)
-	}
-	toggle := strings.ToLower(strings.TrimSpace(args[4]))
+		toggle := strings.ToLower(strings.TrimSpace(args[4]))
 		if toggle != "on" && toggle != "off" {
 			return "格式错误: weibo super count enable <on/off>"
 		}
@@ -2367,4 +2357,3 @@ func (b *Bot) handleWeiboSuperCommand(event *napcat.Event, args []string) string
 
 	return "用法: weibo super <list|add|del|sign|auto|count> ..."
 }
-

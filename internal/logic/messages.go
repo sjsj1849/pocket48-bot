@@ -73,6 +73,14 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 	if b.isPocketAuthExpired() {
 		return false
 	}
+	if b.cfg.NIMRoomMessageEnabled {
+		if b.nimDanmaku.RoomRealtimeAvailable(roomID) {
+			return false
+		}
+		if !b.cfg.NIMRoomMessagePollFallback {
+			return false
+		}
+	}
 
 	roomInfo, err := b.getCachedRoomInfo(roomID)
 	if err != nil {
@@ -196,6 +204,17 @@ func (b *Bot) processMessages(msgs []*pocket48.Message) {
 		return
 	}
 
+	filtered := make([]*pocket48.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if b.markMessageSeen(msg) {
+			filtered = append(filtered, msg)
+		}
+	}
+	msgs = filtered
+	if len(msgs) == 0 {
+		return
+	}
+
 	// Sort messages by time to ensure order
 	sort.Slice(msgs, func(i, j int) bool {
 		return msgs[i].Time < msgs[j].Time
@@ -214,6 +233,43 @@ func (b *Bot) processMessages(msgs []*pocket48.Message) {
 	for _, msg := range msgs {
 		b.processSinglePocketMessage(msg, targetGroups)
 	}
+}
+
+// markMessageSeen atomically deduplicates the same message delivered through
+// QChat and the REST fallback during a reconnect boundary.
+func (b *Bot) markMessageSeen(msg *pocket48.Message) bool {
+	if msg == nil {
+		return false
+	}
+	id := strings.TrimSpace(msg.MsgIDServer)
+	if id == "" {
+		id = strings.TrimSpace(msg.MsgIDClient)
+	}
+	if id == "" {
+		return true
+	}
+	roomID := int64(0)
+	if msg.Room != nil {
+		roomID = msg.Room.ChannelID
+	}
+	key := fmt.Sprintf("%d:%s", roomID, id)
+	now := time.Now()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, exists := b.seenMessageIDs[key]; exists {
+		return false
+	}
+	b.seenMessageIDs[key] = now
+	if len(b.seenMessageIDs) > 5000 {
+		cutoff := now.Add(-30 * time.Minute)
+		for seenKey, seenAt := range b.seenMessageIDs {
+			if seenAt.Before(cutoff) {
+				delete(b.seenMessageIDs, seenKey)
+			}
+		}
+	}
+	return true
 }
 
 func (b *Bot) isAnnualScoreEnabled(roomID int64) bool {
@@ -456,10 +512,15 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 				shouldSend = val
 			}
 		}
+		title, cover, liveID, roomID := parseLivePushBody(msg.Body)
+		// NIM monitoring is independent from whether the QQ live-start notice is
+		// enabled. Join immediately on LIVEPUSH instead of waiting for discovery.
+		if b.cfg.NIMEnabled && b.nimDanmaku != nil {
+			go b.connectDanmakuForLive(liveID, roomID, room)
+		}
 		if !shouldSend {
 			return
 		}
-		title, cover, liveID, roomID := parseLivePushBody(msg.Body)
 		if title == "" {
 			title = "直播开始了"
 		}
@@ -474,10 +535,6 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		segments = append(segments, napcat.TextSegment("\n"+timeStr))
 		b.napcat.SendGroupMessage(targetGroups[0], segments)
 
-		// Connect NIM danmaku bridge to this live stream
-		if b.nimDanmaku != nil {
-			go b.connectDanmakuForLive(liveID, roomID, room)
-		}
 		return
 
 	case pocket48.MsgAudio:
@@ -633,8 +690,6 @@ func (b *Bot) getTargetGroupsByOwnerName(ownerName string) []int64 {
 		return nil
 	}
 
-
-
 	groupSet := make(map[int64]struct{})
 	checkedRoom := make(map[int64]struct{})
 
@@ -775,7 +830,9 @@ func (b *Bot) smartMessageLimit() int {
 
 // adjustPollInterval responds to room activity.
 // NEW MESSAGES: switch to fast polling (300ms) for immediate delivery, extending burst on
-//               each new message.
+//
+//	each new message.
+//
 // QUIET: count down fast-remaining cycles, then fall back to normal 1s polling.
 func (b *Bot) adjustPollInterval(anyNewMsgs bool) {
 	b.mu.Lock()
@@ -812,4 +869,3 @@ func (b *Bot) currentPollInterval() time.Duration {
 	}
 	return base
 }
-

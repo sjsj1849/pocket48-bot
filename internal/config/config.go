@@ -26,30 +26,26 @@ type Config struct {
 	NIMEnabled                        bool                                               `json:"NIM_ENABLED"`
 	NIMSidecarCmd                     string                                             `json:"NIM_SIDECAR_CMD"`
 	NIMAccount                        string                                             `json:"NIM_ACCOUNT"`
-	NIMAppDataDir                     string                                             `json:"NIM_APP_DATA_DIR"`
-	NIMEntryMode                      string                                             `json:"NIM_ENTRY_MODE"`
-	NIMAllowAnonFallback              bool                                               `json:"NIM_ALLOW_ANON_FALLBACK"`
 	NIMRoomMessageEnabled             bool                                               `json:"NIM_ROOM_MESSAGE_ENABLED"`
 	NIMRoomMessagePollFallback        bool                                               `json:"NIM_ROOM_MESSAGE_POLL_FALLBACK"`
+	NIMLiveDanmakuEnabled             bool                                               `json:"NIM_LIVE_DANMAKU_ENABLED"`
 	NIMViewerEventEnabled             bool                                               `json:"NIM_VIEWER_EVENT_ENABLED"`
-	NIMIdolOnlineEventEnabled         bool                                               `json:"NIM_IDOL_ONLINE_EVENT_ENABLED"`
-	NIMIdolOnlineNotifyEnabled        bool                                               `json:"NIM_IDOL_ONLINE_NOTIFY_ENABLED"`
 	CrossRoomIdolSpeak                bool                                               `json:"CROSS_ROOM_IDOL_SPEAK"`
-	PollingInterval                   int                                                `json:"POLLING_INTERVAL"`                            // Seconds
-	LastStartupTime                   int64                                              `json:"LAST_STARTUP_TIME"`                           // Unix Timestamp
-	WeiboSubscriptions                map[int64]map[string]*WeiboConfig                  `json:"WEIBO_SUBSCRIPTIONS"`                         // GroupID -> UID -> WeiboConfig
-	WeiboSuperPostSubscriptions       map[int64]map[string]*WeiboSuperPostConfig         `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"`               // GroupID -> key(uid|oid) -> config
-	WeiboSuperTopics                  map[int64]map[string]*WeiboSuperTopic              `json:"WEIBO_SUPER_TOPICS"`                          // GroupID -> OID -> Topic
-	WeiboSuperAutoEnabled             bool                                               `json:"WEIBO_SUPER_AUTO_ENABLED"`                    // Daily auto super-topic sign-in
-	WeiboSuperLastRunDate             string                                             `json:"WEIBO_SUPER_LAST_RUN_DATE"`                   // YYYY-MM-DD
-	WeiboSuperCountEnabled            bool                                               `json:"WEIBO_SUPER_COUNT_ENABLED"`                   // Enable weibo super count feature
-	WeiboSuperCountTopics             map[string]*WeiboSuperCountTopic                   `json:"WEIBO_SUPER_COUNT_TOPICS"`                    // OID -> Topic for count feature
-	WeiboSuperCountGroups             map[string]*WeiboSuperCountGroupInfo               `json:"WEIBO_SUPER_COUNT_GROUPS"`                    // group_id -> group info
-	WeiboSuperCountLastPushDate       string                                             `json:"WEIBO_SUPER_COUNT_LAST_PUSH_DATE"`            // YYYY-MM-DD (Asia/Shanghai)
-	WeiboSuperCountDailySnapshots     map[string]map[string]int                          `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS"`           // YYYY-MM-DD -> OID -> SignCount
-	WeiboSuperCountDailySnapshotsV2   map[string]map[string]*WeiboSuperCountSnapshotItem `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"`        // YYYY-MM-DD -> OID -> SnapshotItem
+	PollingInterval                   int                                                `json:"POLLING_INTERVAL"`                     // Seconds
+	LastStartupTime                   int64                                              `json:"LAST_STARTUP_TIME"`                    // Unix Timestamp
+	WeiboSubscriptions                map[int64]map[string]*WeiboConfig                  `json:"WEIBO_SUBSCRIPTIONS"`                  // GroupID -> UID -> WeiboConfig
+	WeiboSuperPostSubscriptions       map[int64]map[string]*WeiboSuperPostConfig         `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"`        // GroupID -> key(uid|oid) -> config
+	WeiboSuperTopics                  map[int64]map[string]*WeiboSuperTopic              `json:"WEIBO_SUPER_TOPICS"`                   // GroupID -> OID -> Topic
+	WeiboSuperAutoEnabled             bool                                               `json:"WEIBO_SUPER_AUTO_ENABLED"`             // Daily auto super-topic sign-in
+	WeiboSuperLastRunDate             string                                             `json:"WEIBO_SUPER_LAST_RUN_DATE"`            // YYYY-MM-DD
+	WeiboSuperCountEnabled            bool                                               `json:"WEIBO_SUPER_COUNT_ENABLED"`            // Enable weibo super count feature
+	WeiboSuperCountTopics             map[string]*WeiboSuperCountTopic                   `json:"WEIBO_SUPER_COUNT_TOPICS"`             // OID -> Topic for count feature
+	WeiboSuperCountGroups             map[string]*WeiboSuperCountGroupInfo               `json:"WEIBO_SUPER_COUNT_GROUPS"`             // group_id -> group info
+	WeiboSuperCountLastPushDate       string                                             `json:"WEIBO_SUPER_COUNT_LAST_PUSH_DATE"`     // YYYY-MM-DD (Asia/Shanghai)
+	WeiboSuperCountDailySnapshots     map[string]map[string]int                          `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS"`    // YYYY-MM-DD -> OID -> SignCount
+	WeiboSuperCountDailySnapshotsV2   map[string]map[string]*WeiboSuperCountSnapshotItem `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"` // YYYY-MM-DD -> OID -> SnapshotItem
 	WeiboAppAuthInvalidLastNotifyDate string                                             `json:"WEIBO_APP_AUTH_INVALID_LAST_NOTIFY_DATE,omitempty"`
-	WeiboAppAuthHealthCheckNotifyAt string                                             `json:"WEIBO_APP_AUTH_HEALTH_CHECK_NOTIFY_AT,omitempty"` // 主动健康检查上次通知时间 (unix ts)
+	WeiboAppAuthHealthCheckNotifyAt   string                                             `json:"WEIBO_APP_AUTH_HEALTH_CHECK_NOTIFY_AT,omitempty"` // 主动健康检查上次通知时间 (unix ts)
 	WeiboApp                          *WeiboAppConfig                                    `json:"WEIBO_APP,omitempty"`
 	BilibiliSubscriptions             map[int64]map[string]*BilibiliConfig               `json:"BILIBILI_SUBSCRIPTIONS"`        // GroupID -> RoomID -> BilibiliConfig
 	WeiboCookie                       string                                             `json:"WEIBO_COOKIE"`                  // Weibo web Cookie
@@ -165,11 +161,11 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-	if _, ok := raw["NIM_ALLOW_ANON_FALLBACK"]; !ok {
-		cfg.NIMAllowAnonFallback = true
-	}
 	if _, ok := raw["NIM_ROOM_MESSAGE_POLL_FALLBACK"]; !ok {
 		cfg.NIMRoomMessagePollFallback = true
+	}
+	if _, ok := raw["NIM_LIVE_DANMAKU_ENABLED"]; !ok {
+		cfg.NIMLiveDanmakuEnabled = true
 	}
 	if _, ok := raw["ANNUAL_SCORE_SPECIFIC"]; !ok || cfg.AnnualScoreSpecific == nil {
 		cfg.AnnualScoreSpecific = make(map[string]bool)
@@ -212,29 +208,11 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.WeiboSuperCountDailySnapshotsV2 = make(map[string]map[string]*WeiboSuperCountSnapshotItem)
 	}
 	cfg.filePath = path
-	cfg.NormalizeNIMSettings()
 	return &cfg, nil
-}
-
-func normalizeNIMEntryMode(mode string) string {
-	m := strings.ToLower(strings.TrimSpace(mode))
-	switch m {
-	case "", "auto":
-		return "auto"
-	case "im", "anon":
-		return m
-	default:
-		return "auto"
-	}
-}
-
-func (c *Config) NormalizeNIMSettings() {
-	c.NIMEntryMode = normalizeNIMEntryMode(c.NIMEntryMode)
 }
 
 // Save saves the current configuration back to the file
 func (c *Config) Save() error {
-	c.NormalizeNIMSettings()
 	data, err := json.MarshalIndent(c, "", "    ")
 	if err != nil {
 		return err
@@ -244,7 +222,13 @@ func (c *Config) Save() error {
 
 func (c *Config) UpdateToken(token string) {
 	c.PocketToken = token
-	c.Save()
+	_ = c.Save()
+}
+
+func (c *Config) UpdateNIMCredentials(account, token string) error {
+	c.NIMAccount = strings.TrimSpace(account)
+	c.NIMToken = strings.TrimSpace(token)
+	return c.Save()
 }
 
 func (c *Config) IsAdmin(userID int64) bool {

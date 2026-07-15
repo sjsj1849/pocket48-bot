@@ -195,15 +195,19 @@ type LiveGiftSession struct {
 	LiveOwnerName string
 	StartedAt     int64
 	Events        []GiftEventRecord
+	ChickenLegs   int64
+	AnnualScore   float64
+	PeakOnline    int64
+	Ended         bool
 }
 
 type Bot struct {
-	cfg             *config.Config
-	pocket          *pocket48.Client
-	napcat          *napcat.Client
-	weiboMonitor    *monitor.WeiboMonitor
-	storage         *storage.Storage
-	nimDanmaku      *NimDanmakuBridge
+	cfg          *config.Config
+	pocket       *pocket48.Client
+	napcat       *napcat.Client
+	weiboMonitor *monitor.WeiboMonitor
+	storage      *storage.Storage
+	nimDanmaku   *NimDanmakuBridge
 
 	lastMsgTime            map[int64]int64
 	cursorLoaded           map[int64]bool
@@ -211,19 +215,22 @@ type Bot struct {
 	onMicLastCheck         map[int64]time.Time
 	userDetailCache        map[int64]cachedUserDetail
 	roomInfoCache          map[int64]cachedRoomInfo
+	seenMessageIDs         map[string]time.Time
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
 	mu                     sync.RWMutex
 
-	isMonitoring       bool
-	isLiveMonitoring   bool
-	pollingInterval    time.Duration
-	fastInterval       time.Duration // fast polling interval (~300ms) when messages detected
-	pollFastMode       bool          // use fastInterval temporarily
-	pollFastRemaining  int32         // remaining fast cycles
+	isMonitoring      bool
+	isLiveMonitoring  bool
+	pollingInterval   time.Duration
+	fastInterval      time.Duration // fast polling interval (~300ms) when messages detected
+	pollFastMode      bool          // use fastInterval temporarily
+	pollFastRemaining int32         // remaining fast cycles
 
-	memberEnterTimes   map[string]time.Time // userId -> enter time, for calculating watch duration
-	memberEnterMu      sync.Mutex
+	memberEnterTimes map[string]time.Time // userId -> enter time, for calculating watch duration
+	memberEnterMu    sync.Mutex
+	liveSessions     map[int64]*LiveGiftSession // Pocket48 room id -> current live statistics
+	liveSessionsMu   sync.Mutex
 }
 
 func NewBot(cfg *config.Config) *Bot {
@@ -283,23 +290,25 @@ func NewBot(cfg *config.Config) *Bot {
 		log.Println("⚠️ COS not available, running in degraded mode")
 	}
 	bot := &Bot{
-		cfg:                   cfg,
-		pocket:                pocket48.NewClient(cfg),
-		napcat:                napcatClient,
-		weiboMonitor:          weiboMon,
-		storage:               botStorage,
-		nimDanmaku:            NewNimDanmakuBridge(cfg),
-		lastMsgTime:           make(map[int64]int64),
-		cursorLoaded:          make(map[int64]bool),
-		onMicState:            make(map[int64]bool),
-		onMicLastCheck:        make(map[int64]time.Time),
-		userDetailCache:       make(map[int64]cachedUserDetail),
-		roomInfoCache:         make(map[int64]cachedRoomInfo),
-		memberEnterTimes:      make(map[string]time.Time),
-		isMonitoring:          true,
-		isLiveMonitoring:      cfg.LiveMonitoring,
-		pollingInterval:       interval,
-		fastInterval:          300 * time.Millisecond,
+		cfg:              cfg,
+		pocket:           pocket48.NewClient(cfg),
+		napcat:           napcatClient,
+		weiboMonitor:     weiboMon,
+		storage:          botStorage,
+		nimDanmaku:       NewNimDanmakuBridge(cfg),
+		lastMsgTime:      make(map[int64]int64),
+		cursorLoaded:     make(map[int64]bool),
+		onMicState:       make(map[int64]bool),
+		onMicLastCheck:   make(map[int64]time.Time),
+		userDetailCache:  make(map[int64]cachedUserDetail),
+		roomInfoCache:    make(map[int64]cachedRoomInfo),
+		seenMessageIDs:   make(map[string]time.Time),
+		memberEnterTimes: make(map[string]time.Time),
+		liveSessions:     make(map[int64]*LiveGiftSession),
+		isMonitoring:     true,
+		isLiveMonitoring: cfg.LiveMonitoring,
+		pollingInterval:  interval,
+		fastInterval:     300 * time.Millisecond,
 	}
 	weiboMon.OnCookieInvalid = bot.notifyWeiboCookieInvalid
 
@@ -374,12 +383,16 @@ func (b *Bot) Start() error {
 		if err := b.pocket.CheckToken(); err == nil {
 			b.LogInfo("Token valid. Using existing token for authentication.")
 			b.LogInfo("Pocket48 (Token Mode) logged in successfully")
+			b.clearPocketAuthExpired()
+			b.refreshNIMCredentials()
 		} else {
 			log.Printf("Token invalid or expired: %v", err)
-			b.handlePocketAuthError(err)
+			if !b.tryPocketPasswordLogin() {
+				b.handlePocketAuthError(err)
+			}
 		}
-	} else {
-		b.warnPocketLoginRequired("Pocket48 Token 未配置")
+	} else if !b.tryPocketPasswordLogin() {
+		b.warnPocketLoginRequired("Pocket48 Token 未配置，且账号密码自动登录不可用")
 	}
 
 	// Start Weibo monitor
@@ -444,20 +457,9 @@ func (b *Bot) Start() error {
 	// Start media cache cleanup
 	go b.runMediaCleanupLoop()
 
-	// Start NIM danmaku bridge (if enabled)
+	// Start the NIM sidecar (live chatrooms and/or QChat room messages).
 	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
-		b.nimDanmaku.SetCallbacks(
-			b.handleDanmakuMessage,
-			b.handleDanmakuGift,
-			b.handleMemberEvent,
-			b.handleDanmakuConnected,
-			b.handleDanmakuError,
-		)
-		go func() {
-			if err := b.nimDanmaku.Start(); err != nil {
-				log.Printf("[NIM-danmaku] Failed to start bridge: %v", err)
-			}
-		}()
+		go b.startNIMBridge()
 	}
 
 	// Startup Notification
@@ -495,6 +497,9 @@ func (b *Bot) Start() error {
 	time.Sleep(1 * time.Second)
 
 	b.cfg.Save()
+	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
+		b.nimDanmaku.Stop()
+	}
 
 	return nil
 }
@@ -703,7 +708,7 @@ func (b *Bot) tryHandleNaturalLanguage(event *napcat.Event, msg string) bool {
 		return true
 	}
 
-	// Password login: "登录密码 9624641314sj" or "密码登录"
+	// Password login: "登录密码 <密码>" or "密码登录 <密码>"
 	if (strings.Contains(msg, "登录") || strings.Contains(msg, "登陆")) && strings.Contains(msg, "密码") {
 		// Extract password - try "登录密码 " prefix first
 		password := strings.TrimPrefix(msg, "登录密码 ")
@@ -726,27 +731,12 @@ func (b *Bot) tryHandleNaturalLanguage(event *napcat.Event, msg string) bool {
 			return true
 		}
 
-		// Clean password - remove any extra text
-		var cleanPwd string
-		for _, c := range password {
-			if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
-				cleanPwd += string(c)
-			} else {
-				break // Stop at first non-alphanumeric
-			}
-		}
-
-		if cleanPwd != "" {
-			b.handleCommand(event, []string{"login", "pwd", cleanPwd})
-			return true
-		}
+		b.handleCommand(event, []string{"login", "pwd", password})
+		return true
 	}
 
 	return false
 }
-
-// encryptPlainPassword converts known plain passwords to encrypted form
-// This is device-specific and hardcoded for known passwords
 
 func (b *Bot) resolveTargetGroupID(event *napcat.Event) int64 {
 	if event != nil && event.GroupID != 0 {
@@ -783,7 +773,7 @@ func (b *Bot) handleArchiveCommand(args []string) string {
 }
 
 func (b *Bot) HandleBotCommand(args []string) string {
-	log.Printf("[BotCommand] 处理命令: %v", args)
+	log.Printf("[BotCommand] 处理命令: %v", redactCommandArgs(args))
 	if len(args) == 0 {
 		return ""
 	}
@@ -1131,4 +1121,21 @@ func (b *Bot) HandleBotCommand(args []string) string {
 	default:
 		return "❓ 未知命令，发送「帮助」查看可用命令"
 	}
+}
+
+func redactCommandArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	if len(redacted) >= 3 && strings.EqualFold(redacted[0], "login") && strings.EqualFold(redacted[1], "pwd") {
+		redacted[2] = "<redacted>"
+	}
+	if len(redacted) >= 3 && strings.EqualFold(redacted[0], "login") && strings.EqualFold(redacted[1], "sms") {
+		redacted[2] = "<redacted>"
+	}
+	if len(redacted) >= 2 && strings.EqualFold(redacted[0], "login") && !strings.EqualFold(redacted[1], "sms") && !strings.EqualFold(redacted[1], "pwd") {
+		redacted[1] = "<redacted>"
+	}
+	if len(redacted) >= 2 && strings.EqualFold(redacted[0], "code") {
+		redacted[1] = "<redacted>"
+	}
+	return redacted
 }

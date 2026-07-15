@@ -2,12 +2,13 @@
 
 基于 Go 的 **口袋48** 消息监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ) (OneBot v11) QQ 机器人框架。
 
-实时监控小偶像的口袋房间消息和微博动态，将消息转发到 QQ 群。
+通过 NIM 实时通道（并保留 REST 轮询兜底）监控小偶像的口袋房间、直播间和微博动态，将消息转发到 QQ 群。
 
 ## 功能
 
 ### 📱 口袋48 房间监控
-- **文本/图片/语音/视频** 消息实时转发
+- **文本/图片/语音/视频** 消息转发
+- **QChat 实时推送**：连接成功后停止对应房间的 REST 轮询，断线自动恢复轮询
 - 回复消息、翻牌（FlipCard）消息解析
 - 直播开播通知（含封面图）
 - 礼物消息（含年度青春盛典记分礼物）
@@ -33,6 +34,47 @@
 - 多群分组订阅（不同群监控不同房间）
 - COS 归档存储（消息自动归档）
 - 自适应轮询间隔
+
+### ⚡ NIM 实时监控（可选）
+
+项目内置 `sidecar/nim-bridge` Node.js 侧卡：在 Linux 上直接实现新版 Android NIM 二进制协议，使用登录态 Chatroom 接收直播弹幕、礼物、在线人数和成员进出事件，并使用登录态 QChat 接收普通房间消息。Go 端通过本机 WebSocket 与侧卡通信，支持同时连接多个直播间；不依赖网易原生库、旧 Web SDK 或匿名回退。
+
+| 实时链路 | 协议 | 开关 | 当前状态 |
+| :--- | :--- | :--- | :--- |
+| 直播间 | NIM Chatroom | `NIM_ENABLED` | 已完成真实入房和弹幕收包验证 |
+| 普通房间 | NIM QChat | `NIM_ROOM_MESSAGE_ENABLED` | 已完成真实登录和订阅验证，支持断线轮询兜底 |
+
+运行侧卡需要 Node.js 18+。从源码部署时安装依赖：
+
+```bash
+cd sidecar/nim-bridge
+npm ci
+cd ../..
+```
+
+如果使用的 Release 压缩包没有包含 `sidecar/nim-bridge`，需要从同版本源码复制该目录到 Bot 工作目录，再执行上述 `npm ci`。只启用 REST 轮询时不需要 Node.js。
+
+然后在 `config.json` 中启用需要的通道：
+
+```json
+{
+  "NIM_ENABLED": true,
+  "NIM_SIDECAR_CMD": "node ./sidecar/nim-bridge/index.mjs",
+  "NIM_LIVE_DANMAKU_ENABLED": true,
+  "NIM_VIEWER_EVENT_ENABLED": false,
+
+  "NIM_ROOM_MESSAGE_ENABLED": true,
+  "NIM_ROOM_MESSAGE_POLL_FALLBACK": true
+}
+```
+
+- Bot 会使用有效的 `POCKET_TOKEN` 调用 `/im/api/v1/im/userinfo`，自动取得并保存云信 AccID/Token，通常不需要手工配置 `NIM_ACCOUNT/NIM_TOKEN`。
+- `NIM_ENABLED` 只控制直播 Chatroom；`NIM_ROOM_MESSAGE_ENABLED` 独立控制普通房间 QChat，两项可分别启用。
+- 直播弹幕固定只转发其他口袋成员发送的内容（排除本直播间主人）。普通观众弹幕和单条礼物不会转发；礼物鸡腿值、总选记分只在直播结束时汇总。
+- 直播结束优先由 NIM `CLOSELIVE` 实时事件触发，并以直播列表消失作兜底；结束通知会包含本场鸡腿值、存在时的总选记分收入，以及协议有上报时的最高在线人数。
+- `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开直播间的事件，并在同时收到进出事件时计算停留时长；NIM 未广播或断线期间的事件无法补齐。
+- 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
+- 侧卡仅监听 `127.0.0.1` 的随机端口，不对局域网或公网开放。
 
 ## 快速开始
 
@@ -156,13 +198,19 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `POCKET_USERNAME` | 口袋48手机号 |
 | `POCKET_PASSWORD` | 口袋48密码 |
 | `POCKET_TOKEN` | （可选）直接填 Token 跳过密码登录 |
+| `NIM_ENABLED` | 启用直播间 Chatroom 实时监控 |
+| `NIM_ROOM_MESSAGE_ENABLED` | 启用普通房间 QChat 实时监控 |
+| `NIM_ROOM_MESSAGE_POLL_FALLBACK` | QChat 不可用时继续 REST 轮询 |
+| `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 
-> ⚠️ **密码登录尚未破解**：口袋48 App 密码使用加密/哈希方案登录（非明文传输），我们尚未完全逆向该加密算法，所以 `POCKET_PASSWORD` 直配方式暂时不可用。启动时如果认证失败会报 `password error`。请改用 SMS 短信登录：
-> ```
-> bot login sms <手机号>    # 发送验证码
-> bot code <验证码>          # 输入验证码完成登录
-> ```
-> 登录成功后的 Token 会自动保存到 `config.json`，后续重启不需要重新登录。
+`POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交。也可用短信登录：
+
+```
+bot login sms <手机号>    # 发送验证码
+bot code <验证码>          # 输入验证码完成登录
+```
+
+密码、短信或 Token 登录成功后，Pocket Token 和 NIM 凭据都会自动保存到 `config.json`，后续重启无需重新登录。
 
 其他配置项（全部可选，有默认值）：
 
