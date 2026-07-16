@@ -285,13 +285,19 @@ async function startDouyinIM() {
   const targetPage = await getDouyinIMPage();
   const targetGroupName = String(settings.douyinIMGroupName || '').trim();
   const targetGroupNumber = String(settings.douyinIMGroupNumber || '').trim();
+  let initSeen = false;
   const onResponse = async (response) => {
     if (!response.url().includes('get_message_by_init')) return;
+    initSeen = true;
     try {
       const decoded = decodeDouyinIMInit(await response.body());
       if (!decoded.selfUid || decoded.groups.length === 0) return;
+      const nameMatches = targetGroupName
+        ? decoded.groups.filter((item) => item.name === targetGroupName || item.name.includes(targetGroupName))
+        : [];
       const group = decoded.groups.find((item) => targetGroupNumber && item.groupNumber === targetGroupNumber)
-        || decoded.groups.find((item) => targetGroupName && item.name === targetGroupName);
+        || nameMatches.find((item) => item.name === targetGroupName)
+        || (nameMatches.length === 1 ? nameMatches[0] : undefined);
       douyinIMIdentity = {
         selfUid: decoded.selfUid,
         conversationId: group?.conversationId || '',
@@ -307,7 +313,11 @@ async function startDouyinIM() {
           selfUid: decoded.selfUid,
         });
       } else if (targetGroupNumber || targetGroupName) {
-        emit('douyin_im_status', { status: 'group_not_found', message: `未找到指定的抖音群聊（群号 ${targetGroupNumber || '-'}）` });
+        const candidates = decoded.groups.map((item) => `${item.name || '未命名'}(${item.groupNumber || '-'})`).join('、');
+        emit('douyin_im_status', {
+          status: nameMatches.length > 1 ? 'group_ambiguous' : 'group_not_found',
+          message: `未唯一匹配指定抖音群聊；当前群聊：${candidates || '无'}`,
+        });
       }
       void connectDouyinIM();
     } catch (error) {
@@ -318,6 +328,12 @@ async function startDouyinIM() {
   try {
     await targetPage.goto('https://www.douyin.com/follow', { waitUntil: 'domcontentloaded', timeout: 45_000 });
     await targetPage.waitForTimeout(8_000);
+    if (!initSeen) {
+      emit('douyin_im_status', {
+        status: 'init_missing',
+        message: `抖音消息初始化接口未触发，当前页面：${targetPage.url()}`,
+      });
+    }
   } finally {
     targetPage.off('response', onResponse);
   }
