@@ -951,7 +951,7 @@ func cmdDouyin(b *Bot, event *napcat.Event, args []string) {
 		b.reply(event, "[OK] 正在生成抖音登录二维码，生成后会私聊管理员")
 	case "status":
 		ready, accounts, lives, imConnected := b.douyinMonitor.Status()
-		b.reply(event, fmt.Sprintf("抖音监控状态\n浏览器侧卡: %v\n账号数: %d\n直播连接数: %d\n特别关注白名单: %v（%d 个）\nIM只读连接: %v\n直播服务: %s", ready, accounts, lives, b.cfg.DouyinSpecialFollowEnabled, len(b.cfg.DouyinSpecialFollowIDs), imConnected, b.cfg.DouyinLiveWSURL))
+		b.reply(event, fmt.Sprintf("抖音监控状态\n浏览器侧卡: %v\n手动配置账号数: %d\n直播连接数: %d\nIM只读连接: %v\n直播服务: %s", ready, accounts, lives, imConnected, b.cfg.DouyinLiveWSURL))
 	default:
 		b.reply(event, "用法: douyin <add/del/list/login/scan/status>")
 	}

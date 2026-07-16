@@ -143,9 +143,6 @@ cd ../..
   "DOUYIN_POLL_SECONDS": 60,
   "DOUYIN_LIVE_WS_URL": "ws://127.0.0.1:1088/ws",
   "DOUYIN_LIVE_SIDECAR_CMD": "",
-  "DOUYIN_SPECIAL_FOLLOW_ENABLED": true,
-  "DOUYIN_SPECIAL_FOLLOW_MINUTES": 30,
-  "DOUYIN_SPECIAL_FOLLOW_IDS": ["抖音号1", "抖音号2"],
   "DOUYIN_IM_ENABLED": true,
   "DOUYIN_IM_PRIVATE_ENABLED": true,
   "DOUYIN_IM_GROUP_NAME": "目标群显示名",
@@ -160,7 +157,7 @@ cd ../..
 - 公开主页通常可在未登录状态读取；需要登录时由管理员显式执行 `bot douyin login`，二维码只私聊超级管理员和管理员。
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
-- `DOUYIN_SPECIAL_FOLLOW_ENABLED` 启用后，侧卡每隔 `DOUYIN_SPECIAL_FOLLOW_MINUTES` 分钟按 `DOUYIN_SPECIAL_FOLLOW_IDS` 中配置的抖音号精确解析白名单，并自动同步到 `BOUND_GROUP_ID`。网页关注列表不提供可靠的“特别关注”标记，因此不会依据 `special_lock` 猜测；手工添加的订阅不会被删除。
+- 需要监控的账号通过 `DOUYIN_SUBSCRIPTIONS` 或 `bot douyin add` 手动维护。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
 - 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群。
 - 抖音 IM 模块没有创建会话、回复或发送消息的实现，也不会向抖音群或私聊主动发消息。首次启用只会建立当前消息基线，不转发历史消息。
@@ -169,7 +166,7 @@ cd ../..
 
 ```bash
 cd sidecar/weibo-auth
-DOUYIN_SPECIAL_FOLLOW_IDS=抖音号1,抖音号2 npm run test:douyin-im
+npm run test:douyin-im
 ```
 
 ## 快速开始
@@ -330,9 +327,6 @@ bot code <验证码>          # 输入验证码完成登录
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
 | `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |
 | `DOUYIN_LIVE_SIDECAR_CMD` | 可选的 douyinLive 启动命令 | `""` |
-| `DOUYIN_SPECIAL_FOLLOW_ENABLED` | 自动监控登录账号的特别关注作品与直播 | `false` |
-| `DOUYIN_SPECIAL_FOLLOW_MINUTES` | 特别关注列表同步间隔（分钟，最小 10） | `30` |
-| `DOUYIN_SPECIAL_FOLLOW_IDS` | 精确监控的特别关注抖音号白名单 | `[]` |
 | `DOUYIN_IM_ENABLED` | 启用抖音群聊/私聊只读实时连接 | `false` |
 | `DOUYIN_IM_PRIVATE_ENABLED` | 将收到的抖音私信仅转发给 Bot 管理员 | `false` |
 | `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |

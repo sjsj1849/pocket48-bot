@@ -62,9 +62,6 @@ type Config struct {
 	DouyinLiveWSURL                   string                                             `json:"DOUYIN_LIVE_WS_URL"`
 	DouyinLiveSidecarCmd              string                                             `json:"DOUYIN_LIVE_SIDECAR_CMD"`
 	DouyinSubscriptions               map[int64]map[string]*DouyinConfig                 `json:"DOUYIN_SUBSCRIPTIONS"`
-	DouyinSpecialFollowEnabled        bool                                               `json:"DOUYIN_SPECIAL_FOLLOW_ENABLED"`
-	DouyinSpecialFollowMinutes        int                                                `json:"DOUYIN_SPECIAL_FOLLOW_MINUTES"`
-	DouyinSpecialFollowIDs            []string                                           `json:"DOUYIN_SPECIAL_FOLLOW_IDS"`
 	DouyinIMEnabled                   bool                                               `json:"DOUYIN_IM_ENABLED"`
 	DouyinIMPrivateEnabled            bool                                               `json:"DOUYIN_IM_PRIVATE_ENABLED"`
 	DouyinIMGroupName                 string                                             `json:"DOUYIN_IM_GROUP_NAME"`
@@ -234,9 +231,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.DouyinSubscriptions == nil {
 		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)
-	}
-	if cfg.DouyinSpecialFollowMinutes < 10 {
-		cfg.DouyinSpecialFollowMinutes = 30
 	}
 	if _, ok := raw["WEIBO_SUPERPOST_SUBSCRIPTIONS"]; !ok || cfg.WeiboSuperPostSubscriptions == nil {
 		cfg.WeiboSuperPostSubscriptions = make(map[int64]map[string]*WeiboSuperPostConfig)

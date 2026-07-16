@@ -21,56 +21,52 @@ import (
 )
 
 type weiboAuthEvent struct {
-	Type             string                 `json:"type"`
-	WebCookie        string                 `json:"webCookie,omitempty"`
-	MobileCookie     string                 `json:"mobileCookie,omitempty"`
-	Reason           string                 `json:"reason,omitempty"`
-	ImageBase64      string                 `json:"imageBase64,omitempty"`
-	ExpiresIn        int                    `json:"expiresIn,omitempty"`
-	Status           string                 `json:"status,omitempty"`
-	Message          string                 `json:"message,omitempty"`
-	SecUserID        string                 `json:"secUserId,omitempty"`
-	ProfileURL       string                 `json:"profileUrl,omitempty"`
-	Nickname         string                 `json:"nickname,omitempty"`
-	LiveID           string                 `json:"liveId,omitempty"`
-	Posts            []douyinPost           `json:"posts,omitempty"`
-	Accounts         []douyinSpecialAccount `json:"accounts,omitempty"`
-	GroupName        string                 `json:"groupName,omitempty"`
-	GroupNumber      string                 `json:"groupNumber,omitempty"`
-	ConversationID   string                 `json:"conversationId,omitempty"`
-	ConversationType int                    `json:"conversationType,omitempty"`
-	OwnerUID         string                 `json:"ownerUid,omitempty"`
-	SelfUID          string                 `json:"selfUid,omitempty"`
-	SenderUID        string                 `json:"senderUid,omitempty"`
-	SenderSecUID     string                 `json:"senderSecUid,omitempty"`
-	SenderName       string                 `json:"senderName,omitempty"`
-	ServerMessageID  string                 `json:"serverMessageId,omitempty"`
-	MessageType      int                    `json:"messageType,omitempty"`
-	Text             string                 `json:"text,omitempty"`
-	Link             string                 `json:"link,omitempty"`
-	Index            string                 `json:"index,omitempty"`
+	Type             string       `json:"type"`
+	WebCookie        string       `json:"webCookie,omitempty"`
+	MobileCookie     string       `json:"mobileCookie,omitempty"`
+	Reason           string       `json:"reason,omitempty"`
+	ImageBase64      string       `json:"imageBase64,omitempty"`
+	ExpiresIn        int          `json:"expiresIn,omitempty"`
+	Status           string       `json:"status,omitempty"`
+	Message          string       `json:"message,omitempty"`
+	SecUserID        string       `json:"secUserId,omitempty"`
+	ProfileURL       string       `json:"profileUrl,omitempty"`
+	Nickname         string       `json:"nickname,omitempty"`
+	LiveID           string       `json:"liveId,omitempty"`
+	Posts            []douyinPost `json:"posts,omitempty"`
+	GroupName        string       `json:"groupName,omitempty"`
+	GroupNumber      string       `json:"groupNumber,omitempty"`
+	ConversationID   string       `json:"conversationId,omitempty"`
+	ConversationType int          `json:"conversationType,omitempty"`
+	OwnerUID         string       `json:"ownerUid,omitempty"`
+	SelfUID          string       `json:"selfUid,omitempty"`
+	SenderUID        string       `json:"senderUid,omitempty"`
+	SenderSecUID     string       `json:"senderSecUid,omitempty"`
+	SenderName       string       `json:"senderName,omitempty"`
+	ServerMessageID  string       `json:"serverMessageId,omitempty"`
+	MessageType      int          `json:"messageType,omitempty"`
+	Text             string       `json:"text,omitempty"`
+	Link             string       `json:"link,omitempty"`
+	Index            string       `json:"index,omitempty"`
 }
 
 type weiboAuthCommand struct {
-	Cmd                        string                 `json:"cmd"`
-	ProfileDir                 string                 `json:"profileDir,omitempty"`
-	Headless                   bool                   `json:"headless"`
-	RefreshMinutes             int                    `json:"refreshMinutes,omitempty"`
-	WebCookie                  string                 `json:"webCookie,omitempty"`
-	MobileCookie               string                 `json:"mobileCookie,omitempty"`
-	AllowQRCode                bool                   `json:"allowQRCode"`
-	Reason                     string                 `json:"reason,omitempty"`
-	WeiboEnabled               bool                   `json:"weiboEnabled"`
-	DouyinEnabled              bool                   `json:"douyinEnabled"`
-	DouyinPollSeconds          int                    `json:"douyinPollSeconds,omitempty"`
-	DouyinAccounts             []douyinAccountCommand `json:"douyinAccounts,omitempty"`
-	DouyinSpecialFollowEnabled bool                   `json:"douyinSpecialFollowEnabled"`
-	DouyinSpecialFollowMinutes int                    `json:"douyinSpecialFollowMinutes,omitempty"`
-	DouyinSpecialFollowIDs     []string               `json:"douyinSpecialFollowIds,omitempty"`
-	DouyinIMEnabled            bool                   `json:"douyinIMEnabled"`
-	DouyinIMPrivateEnabled     bool                   `json:"douyinIMPrivateEnabled"`
-	DouyinIMGroupName          string                 `json:"douyinIMGroupName,omitempty"`
-	DouyinIMGroupNumber        string                 `json:"douyinIMGroupNumber,omitempty"`
+	Cmd                    string                 `json:"cmd"`
+	ProfileDir             string                 `json:"profileDir,omitempty"`
+	Headless               bool                   `json:"headless"`
+	RefreshMinutes         int                    `json:"refreshMinutes,omitempty"`
+	WebCookie              string                 `json:"webCookie,omitempty"`
+	MobileCookie           string                 `json:"mobileCookie,omitempty"`
+	AllowQRCode            bool                   `json:"allowQRCode"`
+	Reason                 string                 `json:"reason,omitempty"`
+	WeiboEnabled           bool                   `json:"weiboEnabled"`
+	DouyinEnabled          bool                   `json:"douyinEnabled"`
+	DouyinPollSeconds      int                    `json:"douyinPollSeconds,omitempty"`
+	DouyinAccounts         []douyinAccountCommand `json:"douyinAccounts,omitempty"`
+	DouyinIMEnabled        bool                   `json:"douyinIMEnabled"`
+	DouyinIMPrivateEnabled bool                   `json:"douyinIMPrivateEnabled"`
+	DouyinIMGroupName      string                 `json:"douyinIMGroupName,omitempty"`
+	DouyinIMGroupNumber    string                 `json:"douyinIMGroupNumber,omitempty"`
 }
 
 type WeiboAuthBridge struct {
@@ -250,24 +246,21 @@ func (b *WeiboAuthBridge) Start() error {
 	go b.readLoop()
 
 	if err := b.send(weiboAuthCommand{
-		Cmd:                        "start",
-		ProfileDir:                 b.cfg.BrowserProfileDir,
-		Headless:                   b.cfg.BrowserHeadless,
-		RefreshMinutes:             b.cfg.WeiboBrowserRefreshMinutes,
-		WebCookie:                  b.cfg.WeiboCookie,
-		MobileCookie:               b.cfg.WeiboMWeiboCookie,
-		AllowQRCode:                true,
-		WeiboEnabled:               b.cfg.WeiboBrowserAuthEnabled,
-		DouyinEnabled:              b.cfg.DouyinEnabled,
-		DouyinPollSeconds:          b.cfg.DouyinPollSeconds,
-		DouyinAccounts:             douyinAccountsFromConfig(b.cfg),
-		DouyinSpecialFollowEnabled: b.cfg.DouyinSpecialFollowEnabled,
-		DouyinSpecialFollowMinutes: b.cfg.DouyinSpecialFollowMinutes,
-		DouyinSpecialFollowIDs:     b.cfg.DouyinSpecialFollowIDs,
-		DouyinIMEnabled:            b.cfg.DouyinIMEnabled,
-		DouyinIMPrivateEnabled:     b.cfg.DouyinIMPrivateEnabled,
-		DouyinIMGroupName:          b.cfg.DouyinIMGroupName,
-		DouyinIMGroupNumber:        b.cfg.DouyinIMGroupNumber,
+		Cmd:                    "start",
+		ProfileDir:             b.cfg.BrowserProfileDir,
+		Headless:               b.cfg.BrowserHeadless,
+		RefreshMinutes:         b.cfg.WeiboBrowserRefreshMinutes,
+		WebCookie:              b.cfg.WeiboCookie,
+		MobileCookie:           b.cfg.WeiboMWeiboCookie,
+		AllowQRCode:            true,
+		WeiboEnabled:           b.cfg.WeiboBrowserAuthEnabled,
+		DouyinEnabled:          b.cfg.DouyinEnabled,
+		DouyinPollSeconds:      b.cfg.DouyinPollSeconds,
+		DouyinAccounts:         douyinAccountsFromConfig(b.cfg),
+		DouyinIMEnabled:        b.cfg.DouyinIMEnabled,
+		DouyinIMPrivateEnabled: b.cfg.DouyinIMPrivateEnabled,
+		DouyinIMGroupName:      b.cfg.DouyinIMGroupName,
+		DouyinIMGroupNumber:    b.cfg.DouyinIMGroupNumber,
 	}); err != nil {
 		b.Stop()
 		return err
@@ -328,14 +321,14 @@ func (b *WeiboAuthBridge) readLoop() {
 			}
 		case "log":
 			log.Printf("[Weibo-auth] %s", event.Message)
-		case "douyin_account", "douyin_posts", "douyin_qrcode", "douyin_status", "douyin_account_error", "douyin_error", "douyin_special_follows", "douyin_im_group", "douyin_im_message", "douyin_im_status":
+		case "douyin_account", "douyin_posts", "douyin_qrcode", "douyin_status", "douyin_account_error", "douyin_error", "douyin_im_group", "douyin_im_message", "douyin_im_status":
 			if b.onDouyin != nil {
 				b.onDouyin(douyinBrowserEvent{
 					Type: strings.TrimPrefix(event.Type, "douyin_"), SecUserID: event.SecUserID,
 					ProfileURL: event.ProfileURL, Nickname: event.Nickname, LiveID: event.LiveID,
 					Posts: event.Posts, ImageBase64: event.ImageBase64, ExpiresIn: event.ExpiresIn,
 					Status: event.Status, Message: event.Message,
-					Accounts: event.Accounts, GroupName: event.GroupName, GroupNumber: event.GroupNumber,
+					GroupName: event.GroupName, GroupNumber: event.GroupNumber,
 					ConversationID: event.ConversationID, ConversationType: event.ConversationType,
 					OwnerUID: event.OwnerUID, SelfUID: event.SelfUID, SenderUID: event.SenderUID,
 					SenderSecUID: event.SenderSecUID, SenderName: event.SenderName,

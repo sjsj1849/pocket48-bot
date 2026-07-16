@@ -38,21 +38,11 @@ func TestLoadConfigInitializesDouyinDefaults(t *testing.T) {
 	if cfg.DouyinLiveWSURL != "ws://127.0.0.1:1088/ws" || cfg.DouyinSubscriptions == nil {
 		t.Fatalf("unexpected douyin live/subscription defaults")
 	}
-	if cfg.DouyinSpecialFollowMinutes != 30 || cfg.DouyinIMGroupName != "" || cfg.DouyinIMGroupNumber != "" {
-		t.Fatalf("unexpected douyin special-follow/IM defaults: %#v", cfg)
+	if cfg.DouyinIMGroupName != "" || cfg.DouyinIMGroupNumber != "" {
+		t.Fatalf("unexpected douyin IM defaults: %#v", cfg)
 	}
-	if cfg.DouyinIMEnabled || cfg.DouyinSpecialFollowEnabled {
+	if cfg.DouyinIMEnabled {
 		t.Fatal("privacy-sensitive Douyin account features must default to disabled")
-	}
-	if len(cfg.DouyinSpecialFollowIDs) != 0 {
-		t.Fatalf("special-follow ids must default empty: %#v", cfg.DouyinSpecialFollowIDs)
-	}
-}
-
-func TestLoadConfigKeepsConfiguredDouyinSpecialFollowIDs(t *testing.T) {
-	cfg := loadTestConfig(t, `{"DOUYIN_SPECIAL_FOLLOW_IDS":["123456789","example_account"]}`)
-	if len(cfg.DouyinSpecialFollowIDs) != 2 || cfg.DouyinSpecialFollowIDs[1] != "example_account" {
-		t.Fatalf("unexpected special-follow ids: %#v", cfg.DouyinSpecialFollowIDs)
 	}
 }
 
