@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,25 +21,56 @@ import (
 )
 
 type weiboAuthEvent struct {
-	Type         string `json:"type"`
-	WebCookie    string `json:"webCookie,omitempty"`
-	MobileCookie string `json:"mobileCookie,omitempty"`
-	Reason       string `json:"reason,omitempty"`
-	ImageBase64  string `json:"imageBase64,omitempty"`
-	ExpiresIn    int    `json:"expiresIn,omitempty"`
-	Status       string `json:"status,omitempty"`
-	Message      string `json:"message,omitempty"`
+	Type             string                 `json:"type"`
+	WebCookie        string                 `json:"webCookie,omitempty"`
+	MobileCookie     string                 `json:"mobileCookie,omitempty"`
+	Reason           string                 `json:"reason,omitempty"`
+	ImageBase64      string                 `json:"imageBase64,omitempty"`
+	ExpiresIn        int                    `json:"expiresIn,omitempty"`
+	Status           string                 `json:"status,omitempty"`
+	Message          string                 `json:"message,omitempty"`
+	SecUserID        string                 `json:"secUserId,omitempty"`
+	ProfileURL       string                 `json:"profileUrl,omitempty"`
+	Nickname         string                 `json:"nickname,omitempty"`
+	LiveID           string                 `json:"liveId,omitempty"`
+	Posts            []douyinPost           `json:"posts,omitempty"`
+	Accounts         []douyinSpecialAccount `json:"accounts,omitempty"`
+	GroupName        string                 `json:"groupName,omitempty"`
+	GroupNumber      string                 `json:"groupNumber,omitempty"`
+	ConversationID   string                 `json:"conversationId,omitempty"`
+	ConversationType int                    `json:"conversationType,omitempty"`
+	OwnerUID         string                 `json:"ownerUid,omitempty"`
+	SelfUID          string                 `json:"selfUid,omitempty"`
+	SenderUID        string                 `json:"senderUid,omitempty"`
+	SenderSecUID     string                 `json:"senderSecUid,omitempty"`
+	SenderName       string                 `json:"senderName,omitempty"`
+	ServerMessageID  string                 `json:"serverMessageId,omitempty"`
+	MessageType      int                    `json:"messageType,omitempty"`
+	Text             string                 `json:"text,omitempty"`
+	Link             string                 `json:"link,omitempty"`
+	Index            string                 `json:"index,omitempty"`
 }
 
 type weiboAuthCommand struct {
-	Cmd            string `json:"cmd"`
-	ProfileDir     string `json:"profileDir,omitempty"`
-	Headless       bool   `json:"headless"`
-	RefreshMinutes int    `json:"refreshMinutes,omitempty"`
-	WebCookie      string `json:"webCookie,omitempty"`
-	MobileCookie   string `json:"mobileCookie,omitempty"`
-	AllowQRCode    bool   `json:"allowQRCode"`
-	Reason         string `json:"reason,omitempty"`
+	Cmd                        string                 `json:"cmd"`
+	ProfileDir                 string                 `json:"profileDir,omitempty"`
+	Headless                   bool                   `json:"headless"`
+	RefreshMinutes             int                    `json:"refreshMinutes,omitempty"`
+	WebCookie                  string                 `json:"webCookie,omitempty"`
+	MobileCookie               string                 `json:"mobileCookie,omitempty"`
+	AllowQRCode                bool                   `json:"allowQRCode"`
+	Reason                     string                 `json:"reason,omitempty"`
+	WeiboEnabled               bool                   `json:"weiboEnabled"`
+	DouyinEnabled              bool                   `json:"douyinEnabled"`
+	DouyinPollSeconds          int                    `json:"douyinPollSeconds,omitempty"`
+	DouyinAccounts             []douyinAccountCommand `json:"douyinAccounts,omitempty"`
+	DouyinSpecialFollowEnabled bool                   `json:"douyinSpecialFollowEnabled"`
+	DouyinSpecialFollowMinutes int                    `json:"douyinSpecialFollowMinutes,omitempty"`
+	DouyinSpecialFollowIDs     []string               `json:"douyinSpecialFollowIds,omitempty"`
+	DouyinIMEnabled            bool                   `json:"douyinIMEnabled"`
+	DouyinIMPrivateEnabled     bool                   `json:"douyinIMPrivateEnabled"`
+	DouyinIMGroupName          string                 `json:"douyinIMGroupName,omitempty"`
+	DouyinIMGroupNumber        string                 `json:"douyinIMGroupNumber,omitempty"`
 }
 
 type WeiboAuthBridge struct {
@@ -56,6 +88,11 @@ type WeiboAuthBridge struct {
 	onQRCode  func(imageBase64 string, expiresIn int)
 	onStatus  func(status, message string)
 	onError   func(error)
+	onDouyin  func(douyinBrowserEvent)
+}
+
+func (b *WeiboAuthBridge) SetDouyinCallback(callback func(douyinBrowserEvent)) {
+	b.onDouyin = callback
 }
 
 func NewWeiboAuthBridge(cfg *config.Config) *WeiboAuthBridge {
@@ -123,7 +160,7 @@ func (b *WeiboAuthBridge) Start() error {
 	b.stopping = false
 	b.mu.Unlock()
 
-	parts, err := parseWeiboAuthCommand(b.cfg.WeiboBrowserAuthCmd)
+	parts, err := parseWeiboAuthCommand(b.cfg.BrowserSidecarCmd)
 	if err != nil {
 		b.reset()
 		return err
@@ -211,13 +248,24 @@ func (b *WeiboAuthBridge) Start() error {
 	go b.readLoop()
 
 	if err := b.send(weiboAuthCommand{
-		Cmd:            "start",
-		ProfileDir:     b.cfg.WeiboBrowserProfileDir,
-		Headless:       b.cfg.WeiboBrowserHeadless,
-		RefreshMinutes: b.cfg.WeiboBrowserRefreshMinutes,
-		WebCookie:      b.cfg.WeiboCookie,
-		MobileCookie:   b.cfg.WeiboMWeiboCookie,
-		AllowQRCode:    true,
+		Cmd:                        "start",
+		ProfileDir:                 b.cfg.BrowserProfileDir,
+		Headless:                   b.cfg.BrowserHeadless,
+		RefreshMinutes:             b.cfg.WeiboBrowserRefreshMinutes,
+		WebCookie:                  b.cfg.WeiboCookie,
+		MobileCookie:               b.cfg.WeiboMWeiboCookie,
+		AllowQRCode:                true,
+		WeiboEnabled:               b.cfg.WeiboBrowserAuthEnabled,
+		DouyinEnabled:              b.cfg.DouyinEnabled,
+		DouyinPollSeconds:          b.cfg.DouyinPollSeconds,
+		DouyinAccounts:             douyinAccountsFromConfig(b.cfg),
+		DouyinSpecialFollowEnabled: b.cfg.DouyinSpecialFollowEnabled,
+		DouyinSpecialFollowMinutes: b.cfg.DouyinSpecialFollowMinutes,
+		DouyinSpecialFollowIDs:     b.cfg.DouyinSpecialFollowIDs,
+		DouyinIMEnabled:            b.cfg.DouyinIMEnabled,
+		DouyinIMPrivateEnabled:     b.cfg.DouyinIMPrivateEnabled,
+		DouyinIMGroupName:          b.cfg.DouyinIMGroupName,
+		DouyinIMGroupNumber:        b.cfg.DouyinIMGroupNumber,
 	}); err != nil {
 		b.Stop()
 		return err
@@ -278,6 +326,21 @@ func (b *WeiboAuthBridge) readLoop() {
 			}
 		case "log":
 			log.Printf("[Weibo-auth] %s", event.Message)
+		case "douyin_account", "douyin_posts", "douyin_qrcode", "douyin_status", "douyin_account_error", "douyin_error", "douyin_special_follows", "douyin_im_group", "douyin_im_message", "douyin_im_status":
+			if b.onDouyin != nil {
+				b.onDouyin(douyinBrowserEvent{
+					Type: strings.TrimPrefix(event.Type, "douyin_"), SecUserID: event.SecUserID,
+					ProfileURL: event.ProfileURL, Nickname: event.Nickname, LiveID: event.LiveID,
+					Posts: event.Posts, ImageBase64: event.ImageBase64, ExpiresIn: event.ExpiresIn,
+					Status: event.Status, Message: event.Message,
+					Accounts: event.Accounts, GroupName: event.GroupName, GroupNumber: event.GroupNumber,
+					ConversationID: event.ConversationID, ConversationType: event.ConversationType,
+					OwnerUID: event.OwnerUID, SelfUID: event.SelfUID, SenderUID: event.SenderUID,
+					SenderSecUID: event.SenderSecUID, SenderName: event.SenderName,
+					ServerMessageID: event.ServerMessageID, MessageType: event.MessageType,
+					Text: event.Text, Link: event.Link, Index: event.Index,
+				})
+			}
 		}
 	}
 }
@@ -301,6 +364,81 @@ func (b *WeiboAuthBridge) send(command weiboAuthCommand) error {
 
 func (b *WeiboAuthBridge) RequestRefresh(reason string) error {
 	return b.send(weiboAuthCommand{Cmd: "refresh", AllowQRCode: true, Reason: reason})
+}
+
+func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
+	seen := make(map[string]douyinAccountCommand)
+	for _, group := range cfg.DouyinSubscriptions {
+		for key, item := range group {
+			if item == nil {
+				continue
+			}
+			sec := strings.TrimSpace(item.SecUserID)
+			if sec == "" {
+				sec = strings.TrimSpace(key)
+			}
+			if sec == "" {
+				continue
+			}
+			current := seen[sec]
+			current.SecUserID = sec
+			if current.ProfileURL == "" {
+				current.ProfileURL = item.ProfileURL
+			}
+			if current.Name == "" {
+				current.Name = item.Name
+			}
+			if current.LiveID == "" {
+				current.LiveID = item.LiveID
+			}
+			seen[sec] = current
+		}
+	}
+	result := make([]douyinAccountCommand, 0, len(seen))
+	for _, item := range seen {
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].SecUserID < result[j].SecUserID })
+	return result
+}
+
+func (b *WeiboAuthBridge) SyncDouyin() error {
+	return b.send(weiboAuthCommand{Cmd: "douyin_sync", DouyinEnabled: true, DouyinPollSeconds: b.cfg.DouyinPollSeconds, DouyinAccounts: douyinAccountsFromConfig(b.cfg)})
+}
+
+func (b *WeiboAuthBridge) ScanDouyin() error {
+	return b.send(weiboAuthCommand{Cmd: "douyin_scan"})
+}
+
+func (b *WeiboAuthBridge) RequestDouyinLogin() error {
+	return b.send(weiboAuthCommand{Cmd: "douyin_login"})
+}
+
+func (b *WeiboAuthBridge) IsStarted() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.started && b.conn != nil && !b.stopping
+}
+
+func (b *WeiboAuthBridge) EnsureStarted() error {
+	if b.IsStarted() {
+		return nil
+	}
+	err := b.Start()
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "already started") {
+		return err
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if b.IsStarted() {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("shared browser bridge startup timeout")
 }
 
 func (b *WeiboAuthBridge) Stop() {
@@ -343,8 +481,8 @@ func (b *WeiboAuthBridge) Stop() {
 
 func (b *Bot) startWeiboAuthBridge() {
 	if err := b.weiboAuth.Start(); err != nil {
-		log.Printf("[Weibo-auth] failed to start bridge: %v", err)
-		b.notifyAdmins(fmt.Sprintf("⚠️ 微博浏览器认证侧卡启动失败：%v\n请检查 Node.js、侧卡依赖和 Chromium 是否已安装。", err))
+		log.Printf("[Browser] failed to start bridge: %v", err)
+		b.notifyAdmins(fmt.Sprintf("⚠️ 平台浏览器侧卡启动失败：%v\n请检查 Node.js、侧卡依赖和 Chromium 是否已安装。", err))
 	}
 }
 

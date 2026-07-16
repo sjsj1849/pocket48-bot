@@ -202,13 +202,14 @@ type LiveGiftSession struct {
 }
 
 type Bot struct {
-	cfg          *config.Config
-	pocket       *pocket48.Client
-	napcat       *napcat.Client
-	weiboMonitor *monitor.WeiboMonitor
-	storage      *storage.Storage
-	nimDanmaku   *NimDanmakuBridge
-	weiboAuth    *WeiboAuthBridge
+	cfg           *config.Config
+	pocket        *pocket48.Client
+	napcat        *napcat.Client
+	weiboMonitor  *monitor.WeiboMonitor
+	storage       *storage.Storage
+	nimDanmaku    *NimDanmakuBridge
+	weiboAuth     *WeiboAuthBridge
+	douyinMonitor *DouyinMonitor
 
 	lastMsgTime            map[int64]int64
 	cursorLoaded           map[int64]bool
@@ -305,6 +306,9 @@ func NewBot(cfg *config.Config) *Bot {
 		pollingInterval:  interval,
 		fastInterval:     300 * time.Millisecond,
 	}
+	bot.douyinMonitor = NewDouyinMonitor(cfg, napcatClient, bot.notifyAdmins)
+	bot.douyinMonitor.SetBrowserBridge(bot.weiboAuth)
+	bot.weiboAuth.SetDouyinCallback(bot.douyinMonitor.HandleBrowserEvent)
 	weiboMon.OnCookieInvalid = bot.notifyWeiboCookieInvalid
 	bot.weiboAuth.SetCallbacks(
 		bot.handleWeiboAuthCookies,
@@ -451,8 +455,16 @@ func (b *Bot) Start() error {
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()
-	if b.cfg.WeiboBrowserAuthEnabled {
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
 		go b.startWeiboAuthBridge()
+	}
+	if b.cfg.DouyinEnabled {
+		go func() {
+			if err := b.douyinMonitor.Start(); err != nil {
+				log.Printf("[Douyin] monitor startup failed: %v", err)
+				b.notifyAdmins(fmt.Sprintf("⚠️ 抖音监控侧卡启动失败：%v", err))
+			}
+		}()
 	}
 
 	// Start Polling Loop
@@ -504,8 +516,11 @@ func (b *Bot) Start() error {
 	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
 		b.nimDanmaku.Stop()
 	}
-	if b.cfg.WeiboBrowserAuthEnabled {
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
 		b.weiboAuth.Stop()
+	}
+	if b.douyinMonitor != nil {
+		b.douyinMonitor.Stop()
 	}
 
 	return nil

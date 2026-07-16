@@ -25,6 +25,12 @@
 - **AppAuth 主动健康检查**（每 2 小时，失效/恢复自动通知管理员）
 - **Web Cookie 自动维护**：持久化浏览器 Profile，Cookie 失效时向管理员私聊登录二维码
 
+### 🎵 抖音监控
+- 指定账号的新视频、图文作品监控，自动过滤置顶旧作品
+- 持久化 Chromium Profile，可由管理员按需扫码登录
+- 开播、下播实时通知，直播结束汇总直播时长和最高在线人数
+- 多群独立订阅与作品游标，支持按群配置 `@全体成员`
+
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
 - 语音消息文件转发
@@ -79,7 +85,7 @@ cd ../..
 
 ### 🐼 微博 Web Cookie 自动维护（可选）
 
-项目内置 `sidecar/weibo-auth`。它只负责维护 `weibo.com` 与 `m.weibo.cn` 的浏览器登录态，不修改 AppAuth，也不替代现有微博监控逻辑：
+项目内置统一的 `sidecar/weibo-auth` 浏览器侧卡。微博认证和抖音作品监控共用一个 Chromium 进程与一个持久化 Profile，但使用不同页面；Cookie 仍由浏览器按域名隔离。微博部分不修改 AppAuth，也不替代现有微博监控逻辑：
 
 1. Chromium 使用固定 Profile，并额外保存 `storageState`，重启后复用登录态；
 2. 定期访问移动端和网页端完成 CookieJar 预热，将服务器下发的新 Cookie 热更新给 Go；
@@ -112,6 +118,59 @@ cd ../..
 - 微博强制风控、账号退出或要求额外验证时，无法保证完全无人值守；Bot 会重新发送二维码作为兜底。
 - 为避免管理员消息轰炸，登录二维码生成后有 2 小时冷却时间。
 - `WEIBO_BROWSER_REFRESH_MINUTES` 最小为 5 分钟，缺省为 30 分钟。侧卡只监听本机随机端口。
+
+### 🎵 抖音作品与直播监控（可选）
+
+抖音作品监控复用上面的统一浏览器侧卡，使用独立页面打开创作者主页，读取网页自身已经签名的作品接口响应；Bot 不保存或复用 `a_bogus`。首次扫描只建立作品游标，不会把已有作品全部刷到群里。
+
+Linux 安装浏览器侧卡：
+
+```bash
+cd sidecar/weibo-auth
+npm ci
+npx playwright install --with-deps chromium --no-shell
+cd ../..
+```
+
+直播实时链路使用独立的 [jwwsjlm/douyinLive](https://github.com/jwwsjlm/douyinLive) 本地 WebSocket 服务。可以把它作为 systemd/Docker 服务独立启动，也可以通过 `DOUYIN_LIVE_SIDECAR_CMD` 让 Bot 作为子进程启动；Bot 不直接链接其 Go 1.26 依赖。
+
+```json
+{
+  "DOUYIN_ENABLED": true,
+  "BROWSER_SIDECAR_CMD": "node ./sidecar/weibo-auth/index.mjs",
+  "BROWSER_PROFILE_DIR": "./storage/weibo-browser-profile",
+  "BROWSER_HEADLESS": true,
+  "DOUYIN_POLL_SECONDS": 60,
+  "DOUYIN_LIVE_WS_URL": "ws://127.0.0.1:1088/ws",
+  "DOUYIN_LIVE_SIDECAR_CMD": "",
+  "DOUYIN_SPECIAL_FOLLOW_ENABLED": true,
+  "DOUYIN_SPECIAL_FOLLOW_MINUTES": 30,
+  "DOUYIN_SPECIAL_FOLLOW_IDS": ["抖音号1", "抖音号2"],
+  "DOUYIN_IM_ENABLED": true,
+  "DOUYIN_IM_PRIVATE_ENABLED": true,
+  "DOUYIN_IM_GROUP_NAME": "目标群显示名",
+  "DOUYIN_IM_GROUP_NUMBER": "目标群号"
+}
+```
+
+- `DOUYIN_LIVE_SIDECAR_CMD` 留空时，Bot 连接已经运行的 `DOUYIN_LIVE_WS_URL`；连接断开会指数退避重试。
+- 如果填写命令，例如 `./douyinLive --port 1088 --log-level info`，Bot 启停时会一并管理该进程。
+- 浏览器只从被监控用户自己的资料接口提取直播状态和 `web_rid`，不会采用页面推荐区中其他主播的直播间。首次发现该用户开播后会保存 `live.douyin.com/<ID>`，以后 Bot 可在其离线期间保持本地直播 WebSocket 连接，并按 `ROOM_ONLINE`/`ROOM_ENDED` 通知群。
+- 最高在线人数来自 `WebcastRoomUserSeqMessage`/`WebcastRoomStatsMessage`。抖音未下发人数的场次不会显示该字段。
+- 公开主页通常可在未登录状态读取；需要登录时由管理员显式执行 `bot douyin login`，二维码只私聊超级管理员和管理员。
+- 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
+- `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
+- `DOUYIN_SPECIAL_FOLLOW_ENABLED` 启用后，侧卡每隔 `DOUYIN_SPECIAL_FOLLOW_MINUTES` 分钟按 `DOUYIN_SPECIAL_FOLLOW_IDS` 中配置的抖音号精确解析白名单，并自动同步到 `BOUND_GROUP_ID`。网页关注列表不提供可靠的“特别关注”标记，因此不会依据 `special_lock` 猜测；手工添加的订阅不会被删除。
+- IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
+- 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群。
+- 抖音 IM 模块没有创建会话、回复或发送消息的实现，也不会向抖音群或私聊主动发消息。首次启用只会建立当前消息基线，不转发历史消息。
+
+可在已经登录的机器上执行只读联调（只输出群名、群号和特别关注数量）：
+
+```bash
+cd sidecar/weibo-auth
+DOUYIN_SPECIAL_FOLLOW_IDS=抖音号1,抖音号2 npm run test:douyin-im
+```
 
 ## 快速开始
 
@@ -240,6 +299,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_ROOM_MESSAGE_POLL_FALLBACK` | QChat 不可用时继续 REST 轮询 |
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 | `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
+| `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
 
 `POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交。也可用短信登录：
 
@@ -264,6 +324,19 @@ bot code <验证码>          # 输入验证码完成登录
 | `WEIBO_BROWSER_PROFILE_DIR` | 持久化 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `WEIBO_BROWSER_HEADLESS` | 使用无头 Chromium | `true` |
 | `WEIBO_BROWSER_REFRESH_MINUTES` | 登录态预热与同步间隔（分钟） | `30` |
+| `BROWSER_SIDECAR_CMD` | 微博/抖音共用浏览器侧卡命令 | `"node ./sidecar/weibo-auth/index.mjs"` |
+| `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
+| `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
+| `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
+| `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |
+| `DOUYIN_LIVE_SIDECAR_CMD` | 可选的 douyinLive 启动命令 | `""` |
+| `DOUYIN_SPECIAL_FOLLOW_ENABLED` | 自动监控登录账号的特别关注作品与直播 | `false` |
+| `DOUYIN_SPECIAL_FOLLOW_MINUTES` | 特别关注列表同步间隔（分钟，最小 10） | `30` |
+| `DOUYIN_SPECIAL_FOLLOW_IDS` | 精确监控的特别关注抖音号白名单 | `[]` |
+| `DOUYIN_IM_ENABLED` | 启用抖音群聊/私聊只读实时连接 | `false` |
+| `DOUYIN_IM_PRIVATE_ENABLED` | 将收到的抖音私信仅转发给 Bot 管理员 | `false` |
+| `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |
+| `DOUYIN_IM_GROUP_NUMBER` | 目标抖音群号（优先精确匹配） | `""` |
 
 ### 🌍 随机地址生成器
 
@@ -483,6 +556,19 @@ bot weibo cookie check
 > - bot 每次拉取数据时会检查是否拿到精确数据（无"万"字样）
 > - 连续 5 天拿到精确数据后，**自动恢复自动签到**，日报也会使用精确值
 > - 此机制是自适应调整，无需手动干预
+
+### 🎵 抖音
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot douyin add <主页/分享链接或sec_user_id> [at_all]` | 添加作品与直播监控 |
+| `bot douyin del [sec_user_id]` | 删除指定账号；省略则清空本群 |
+| `bot douyin list` | 查看本群账号、昵称和直播 ID |
+| `bot douyin scan` | 立即执行一次作品检查 |
+| `bot douyin status` | 查看浏览器侧卡、账号和直播连接状态 |
+| `bot douyin login` | 生成抖音登录二维码并私聊管理员 |
+
+> 当前阶段不转发直播间全部弹幕、礼物或点赞，只发送作品、开播和下播通知。粉丝群指定用户消息转发将在后续个人账号 IM 侧卡中实现。
 
 ---
 

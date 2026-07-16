@@ -6,7 +6,9 @@
   "scripts": {
     "test": "node --test",
     "test:smoke": "node smoke.mjs",
-    "test:browser": "node browser-probe.mjs"
+    "test:browser": "node browser-probe.mjs",
+    "test:douyin-live": "node live-smoke.mjs",
+    "test:douyin-im": "node im-smoke.mjs"
   },
   "dependencies": {
     "playwright": "1.61.1",
