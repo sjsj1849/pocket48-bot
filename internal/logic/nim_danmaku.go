@@ -631,6 +631,7 @@ func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48
 		Body:        body,
 		Time:        normalizeMessageTimestampMs(m.Time),
 		RawExt:      string(m.Ext),
+		DirectMedia: true,
 	}
 	if len(m.Ext) > 0 {
 		var ext pocket48.ExtInfo
@@ -910,39 +911,6 @@ func hasQChatMediaURL(body string, keys []string) bool {
 	return strings.TrimSpace(findStringField(payload, keys)) != ""
 }
 
-func isRoomRealtimeMedia(msgType pocket48.MessageType) bool {
-	switch msgType {
-	case pocket48.MsgImage, pocket48.MsgExpressImage, pocket48.MsgAudio, pocket48.MsgVideo,
-		pocket48.MsgAudioGiftReply, pocket48.MsgFlipCardAudio, pocket48.MsgFlipCardVideo:
-		return true
-	default:
-		return false
-	}
-}
-
-func (b *Bot) prefetchRoomRealtimeMedia(msg *pocket48.Message) {
-	if msg == nil {
-		return
-	}
-	var mediaURL string
-	switch msg.Type {
-	case pocket48.MsgImage, pocket48.MsgExpressImage:
-		mediaURL = b.extractImageURL(msg.Body)
-	case pocket48.MsgAudio, pocket48.MsgFlipCardAudio:
-		mediaURL = b.extractAudioURL(msg.Body)
-	case pocket48.MsgVideo, pocket48.MsgFlipCardVideo:
-		mediaURL = b.extractVideoURL(msg.Body)
-	case pocket48.MsgAudioGiftReply:
-		_, mediaURL, _, _ = parseAudioGiftReplyMessage(msg.Body)
-	}
-	if mediaURL == "" {
-		return
-	}
-	if _, err := b.downloadMedia(mediaURL); err != nil {
-		log.Printf("[NIM-room] media prefetch failed id=%s type=%s: %v", msg.MsgIDServer, msg.Type, err)
-	}
-}
-
 func (b *Bot) enqueueRoomRealtimeTask(roomID int64, prepare, send func()) {
 	b.roomRealtimeOrderMu.Lock()
 	if b.roomRealtimeTails == nil {
@@ -989,21 +957,7 @@ func (b *Bot) processRoomRealtimeMessage(msg *pocket48.Message) {
 		return
 	}
 	started := time.Now()
-	var prepare func()
-	if isRoomRealtimeMedia(msg.Type) {
-		prepare = func() {
-			b.mu.Lock()
-			if b.roomMediaSem == nil {
-				b.roomMediaSem = make(chan struct{}, 4)
-			}
-			sem := b.roomMediaSem
-			b.mu.Unlock()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			b.prefetchRoomRealtimeMedia(msg)
-		}
-	}
-	b.enqueueRoomRealtimeTask(roomID, prepare, func() {
+	b.enqueueRoomRealtimeTask(roomID, nil, func() {
 		b.processSinglePocketMessage(msg, targetGroups)
 		log.Printf("[NIM-room] ordered message processed room=%d id=%s type=%s elapsed=%s", roomID, msg.MsgIDServer, msg.Type, time.Since(started).Round(time.Millisecond))
 	})

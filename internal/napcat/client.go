@@ -14,10 +14,11 @@ import (
 )
 
 type Client struct {
-	cfg      *config.Config
-	conn     *websocket.Conn
-	sendChan chan APIRequest
-	mu       sync.Mutex
+	cfg        *config.Config
+	conn       *websocket.Conn
+	sendChan   chan APIRequest
+	mu         sync.Mutex
+	writerOnce sync.Once
 
 	OnGroupMessage   func(event *Event)
 	OnPrivateMessage func(event *Event)
@@ -34,7 +35,7 @@ func NewClient(cfg *config.Config) *Client {
 }
 
 func (c *Client) Connect() error {
-	// Start the connection manager in a goroutine
+	c.writerOnce.Do(func() { go c.writeLoop() })
 	go c.manager()
 	return nil
 }
@@ -75,9 +76,9 @@ func (c *Client) connect() error {
 	c.conn = conn
 	log.Println("✅ Connected to NapCat successfully")
 
-	// Start loops
+	// The writer is client-scoped so reconnects cannot create competing queue
+	// consumers. A new reader is required for each websocket connection.
 	go c.readLoop()
-	go c.writeLoop()
 
 	return nil
 }
@@ -132,54 +133,43 @@ func (c *Client) handleEvent(event *Event) {
 }
 
 func (c *Client) writeLoop() {
-	// The actual WebSocket write is serialized by the mutex,
-	// so more workers mainly help keep channel consumption responsive.
-	const workerCount = 8
-	var wg sync.WaitGroup
+	// Keep API requests FIFO. Multiple workers still serialize on the websocket
+	// mutex but may acquire it out of order, which is visible for media bursts.
+	for req := range c.sendChan {
+		for {
+			c.mu.Lock()
+			conn := c.conn
+			c.mu.Unlock()
 
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for req := range c.sendChan {
-				for {
-					c.mu.Lock()
-					conn := c.conn
-					c.mu.Unlock()
-
-					if conn == nil {
-						time.Sleep(200 * time.Millisecond)
-						continue
-					}
-
-					c.mu.Lock()
-					if c.conn == nil {
-						c.mu.Unlock()
-						continue
-					}
-					c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-					err := c.conn.WriteJSON(req)
-					c.mu.Unlock()
-
-					if err != nil {
-						log.Printf("❌ NapCat write error: %v", err)
-						c.mu.Lock()
-						if c.conn != nil {
-							c.conn.Close()
-							c.conn = nil
-						}
-						c.mu.Unlock()
-						time.Sleep(200 * time.Millisecond)
-						continue
-					}
-
-					break
-				}
+			if conn == nil {
+				time.Sleep(200 * time.Millisecond)
+				continue
 			}
-		}()
-	}
 
-	wg.Wait()
+			c.mu.Lock()
+			if c.conn == nil {
+				c.mu.Unlock()
+				continue
+			}
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			err := c.conn.WriteJSON(req)
+			c.mu.Unlock()
+
+			if err != nil {
+				log.Printf("❌ NapCat write error: %v", err)
+				c.mu.Lock()
+				if c.conn != nil {
+					c.conn.Close()
+					c.conn = nil
+				}
+				c.mu.Unlock()
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+
+			break
+		}
+	}
 }
 
 func (c *Client) SendGroupMessage(groupID int64, message interface{}) {
