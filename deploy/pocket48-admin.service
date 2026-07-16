@@ -12,7 +12,7 @@ Environment=POCKET48_ADMIN_ADDR=127.0.0.1:8787
 Environment=POCKET48_CONFIG_PATH=/root/pocket48-bot/config.json
 Environment=POCKET48_LOG_PATH=/root/pocket48-bot/bot.log
 Environment=POCKET48_ADMIN_PASSWORD_FILE=/root/pocket48-bot/storage/admin-password
-Environment=POCKET48_ADMIN_COOKIE_PATH=/pocket48/
+Environment=POCKET48_ADMIN_COOKIE_PATH=/
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
