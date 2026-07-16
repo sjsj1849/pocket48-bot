@@ -1,0 +1,68 @@
+package logic
+
+import (
+	"context"
+	"testing"
+)
+
+func TestUnseenDouyinPosts(t *testing.T) {
+	posts := []douyinPost{{ID: "3"}, {ID: "2"}, {ID: "1"}}
+	got := unseenDouyinPosts(posts, "1")
+	if len(got) != 2 || got[0].ID != "2" || got[1].ID != "3" {
+		t.Fatalf("unexpected posts: %#v", got)
+	}
+	got = unseenDouyinPosts(posts, "missing")
+	if len(got) != 1 || got[0].ID != "3" {
+		t.Fatalf("missing cursor should only emit latest: %#v", got)
+	}
+}
+
+func TestExtractDouyinOnline(t *testing.T) {
+	body := map[string]interface{}{"payload": map[string]interface{}{"onlineUserForAnchor": "321"}}
+	if got := extractDouyinOnline(body); got != 321 {
+		t.Fatalf("online=%d", got)
+	}
+}
+
+func TestResolveDouyinTargetSecUserID(t *testing.T) {
+	sec, profile, err := ResolveDouyinTarget(context.Background(), "MS4wLjABAAAA_test-user")
+	if err != nil || sec != "MS4wLjABAAAA_test-user" || profile == "" {
+		t.Fatalf("resolve=(%q,%q,%v)", sec, profile, err)
+	}
+}
+
+func TestResolveDouyinTargetDirectProfileDoesNotNeedNetwork(t *testing.T) {
+	sec, _, err := ResolveDouyinTarget(context.Background(), "https://www.douyin.com/user/MS4wLjABAAAA_direct")
+	if err != nil || sec != "MS4wLjABAAAA_direct" {
+		t.Fatalf("resolve direct=(%q,%v)", sec, err)
+	}
+	if _, _, err := ResolveDouyinTarget(context.Background(), "https://example.com/user/MS4wLjABAAAA_direct"); err == nil {
+		t.Fatal("non-Douyin URL should be rejected")
+	}
+}
+
+func TestParseDouyinCommandLine(t *testing.T) {
+	got, err := parseDouyinCommandLine(`node "./sidecar/path with space/index.mjs"`, "")
+	if err != nil || len(got) != 2 || got[1] != "./sidecar/path with space/index.mjs" {
+		t.Fatalf("parse=%#v err=%v", got, err)
+	}
+}
+
+func TestClassifyDouyinIMEvent(t *testing.T) {
+	group := douyinBrowserEvent{ConversationType: 2, ConversationID: "target", SenderUID: "owner"}
+	if got := classifyDouyinIMEvent(group, "target", "owner", "self"); got != "group_owner" {
+		t.Fatalf("group owner classification=%q", got)
+	}
+	group.SenderUID = "member"
+	if got := classifyDouyinIMEvent(group, "target", "owner", "self"); got != "" {
+		t.Fatalf("ordinary group member must be ignored, got %q", got)
+	}
+	private := douyinBrowserEvent{ConversationType: 1, SenderUID: "peer"}
+	if got := classifyDouyinIMEvent(private, "target", "owner", "self"); got != "private_incoming" {
+		t.Fatalf("incoming private classification=%q", got)
+	}
+	private.SenderUID = "self"
+	if got := classifyDouyinIMEvent(private, "target", "owner", "self"); got != "" {
+		t.Fatalf("outgoing private message must be ignored, got %q", got)
+	}
+}

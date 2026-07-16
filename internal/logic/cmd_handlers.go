@@ -1,6 +1,7 @@
 package logic
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -132,6 +133,13 @@ func init() {
 			Category:  "微博功能",
 			AdminOnly: true,
 			Usage:     "weibo <add/del/list/cookie|super|superpost>",
+		},
+		"douyin": {
+			Handler:   cmdDouyin,
+			Help:      "抖音作品与直播监控",
+			Category:  "抖音功能",
+			AdminOnly: true,
+			Usage:     "douyin <add/del/list/login/scan/status>",
 		},
 		"archive": {
 			Handler:   cmdArchive,
@@ -533,6 +541,7 @@ func generateAutoHelp() string {
 		"房间管理",
 		"功能开关",
 		"微博功能",
+		"抖音功能",
 		"账号管理",
 		"其他",
 	}
@@ -620,6 +629,16 @@ func cmdHelp(b *Bot, event *napcat.Event, args []string) {
 				"【六、测试】\n" +
 				"  bot test weibo"
 			b.reply(event, helpText)
+			return
+		}
+		if cmdName == "douyin" {
+			b.reply(event, "📘 命令: douyin — 抖音作品与直播监控（管理员）\n"+
+				"  bot douyin add <主页/分享链接|sec_user_id> [at_all]\n"+
+				"  bot douyin del [sec_user_id]          # 省略则清空本群\n"+
+				"  bot douyin list                       # 查看本群监控\n"+
+				"  bot douyin scan                       # 立即检查作品\n"+
+				"  bot douyin status                     # 查看侧卡状态\n"+
+				"  bot douyin login                      # 私聊管理员抖音登录二维码")
 			return
 		}
 		var sb strings.Builder
@@ -829,6 +848,112 @@ func cmdWeibo(b *Bot, event *napcat.Event, args []string) {
 		}
 	default:
 		b.reply(event, "格式错误: weibo <add/del/list|cookie|super|superpost> [参数]")
+	}
+}
+
+func douyinTargetGroup(b *Bot, event *napcat.Event) int64 {
+	if event.GroupID != 0 {
+		return event.GroupID
+	}
+	return b.cfg.BoundGroupID
+}
+
+func cmdDouyin(b *Bot, event *napcat.Event, args []string) {
+	if len(args) < 2 {
+		b.reply(event, "用法: douyin <add/del/list/login/scan/status>")
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(args[1]))
+	groupID := douyinTargetGroup(b, event)
+	switch action {
+	case "add":
+		if len(args) < 3 {
+			b.reply(event, "用法: douyin add <主页/分享链接|sec_user_id> [at_all]")
+			return
+		}
+		if groupID == 0 {
+			b.reply(event, "请在群内执行，或先绑定默认群")
+			return
+		}
+		end := len(args)
+		atAll := false
+		if strings.EqualFold(args[end-1], "at_all") {
+			atAll = true
+			end--
+		}
+		target := strings.Join(args[2:end], " ")
+		eventCopy := *event
+		b.reply(event, "正在解析抖音账号并加入监控，请稍候…")
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			secUserID, profileURL, err := ResolveDouyinTarget(ctx, target)
+			if err != nil {
+				b.reply(&eventCopy, "[错误] "+err.Error())
+				return
+			}
+			b.cfg.DouyinEnabled = true
+			if err := b.douyinMonitor.Add(groupID, secUserID, profileURL, atAll); err != nil {
+				b.reply(&eventCopy, fmt.Sprintf("[错误] 添加抖音监控失败: %v", err))
+				return
+			}
+			b.reply(&eventCopy, fmt.Sprintf("[OK] 已添加抖音监控\nsec_user_id: %s\n@全体: %v", secUserID, atAll))
+		}()
+	case "del":
+		if groupID == 0 {
+			b.reply(event, "请在群内执行，或先绑定默认群")
+			return
+		}
+		secUserID := ""
+		if len(args) >= 3 {
+			secUserID = strings.TrimSpace(args[2])
+		}
+		if err := b.douyinMonitor.Remove(groupID, secUserID); err != nil {
+			b.reply(event, fmt.Sprintf("[错误] 删除失败: %v", err))
+			return
+		}
+		if secUserID == "" {
+			b.reply(event, "[OK] 已清空本群抖音监控")
+		} else {
+			b.reply(event, "[OK] 已删除抖音监控: "+secUserID)
+		}
+	case "list":
+		items := b.douyinMonitor.Snapshot(groupID)
+		if len(items) == 0 {
+			b.reply(event, "该群暂无抖音监控")
+			return
+		}
+		var lines []string
+		lines = append(lines, "抖音监控列表:")
+		for _, item := range items {
+			name := item.Name
+			if name == "" {
+				name = "待获取昵称"
+			}
+			live := item.LiveID
+			if live == "" {
+				live = "待发现"
+			}
+			lines = append(lines, fmt.Sprintf("- %s\n  sec_user_id=%s\n  live_id=%s", name, item.SecUserID, live))
+		}
+		b.reply(event, strings.Join(lines, "\n"))
+	case "scan":
+		if err := b.douyinMonitor.Scan(); err != nil {
+			b.reply(event, fmt.Sprintf("[错误] 触发检查失败: %v", err))
+			return
+		}
+		b.reply(event, "[OK] 已触发抖音作品检查")
+	case "login":
+		if err := b.douyinMonitor.RequestLogin(); err != nil {
+			b.reply(event, fmt.Sprintf("[错误] 无法启动抖音登录: %v", err))
+			return
+		}
+		b.reply(event, "[OK] 正在生成抖音登录二维码，生成后会私聊管理员")
+	case "status":
+		ready, accounts, lives, imConnected := b.douyinMonitor.Status()
+		b.reply(event, fmt.Sprintf("抖音监控状态\n浏览器侧卡: %v\n账号数: %d\n直播连接数: %d\n特别关注白名单: %v（%d 个）\nIM只读连接: %v\n直播服务: %s", ready, accounts, lives, b.cfg.DouyinSpecialFollowEnabled, len(b.cfg.DouyinSpecialFollowIDs), imConnected, b.cfg.DouyinLiveWSURL))
+	default:
+		b.reply(event, "用法: douyin <add/del/list/login/scan/status>")
 	}
 }
 

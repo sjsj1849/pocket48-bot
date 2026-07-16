@@ -54,6 +54,21 @@ type Config struct {
 	WeiboBrowserProfileDir            string                                             `json:"WEIBO_BROWSER_PROFILE_DIR"`
 	WeiboBrowserHeadless              bool                                               `json:"WEIBO_BROWSER_HEADLESS"`
 	WeiboBrowserRefreshMinutes        int                                                `json:"WEIBO_BROWSER_REFRESH_MINUTES"`
+	BrowserSidecarCmd                 string                                             `json:"BROWSER_SIDECAR_CMD"`
+	BrowserProfileDir                 string                                             `json:"BROWSER_PROFILE_DIR"`
+	BrowserHeadless                   bool                                               `json:"BROWSER_HEADLESS"`
+	DouyinEnabled                     bool                                               `json:"DOUYIN_ENABLED"`
+	DouyinPollSeconds                 int                                                `json:"DOUYIN_POLL_SECONDS"`
+	DouyinLiveWSURL                   string                                             `json:"DOUYIN_LIVE_WS_URL"`
+	DouyinLiveSidecarCmd              string                                             `json:"DOUYIN_LIVE_SIDECAR_CMD"`
+	DouyinSubscriptions               map[int64]map[string]*DouyinConfig                 `json:"DOUYIN_SUBSCRIPTIONS"`
+	DouyinSpecialFollowEnabled        bool                                               `json:"DOUYIN_SPECIAL_FOLLOW_ENABLED"`
+	DouyinSpecialFollowMinutes        int                                                `json:"DOUYIN_SPECIAL_FOLLOW_MINUTES"`
+	DouyinSpecialFollowIDs            []string                                           `json:"DOUYIN_SPECIAL_FOLLOW_IDS"`
+	DouyinIMEnabled                   bool                                               `json:"DOUYIN_IM_ENABLED"`
+	DouyinIMPrivateEnabled            bool                                               `json:"DOUYIN_IM_PRIVATE_ENABLED"`
+	DouyinIMGroupName                 string                                             `json:"DOUYIN_IM_GROUP_NAME"`
+	DouyinIMGroupNumber               string                                             `json:"DOUYIN_IM_GROUP_NUMBER"`
 	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
 	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
 	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
@@ -64,6 +79,19 @@ type WeiboConfig struct {
 	UID    string `json:"uid"`
 	AtAll  bool   `json:"at_all"`
 	LastID string `json:"last_id,omitempty"`
+}
+
+// DouyinConfig stores one creator subscription. SecUserID is the stable key
+// used by creator pages; LiveID is the live.douyin.com path discovered from
+// the creator page and can be reused while the creator is offline.
+type DouyinConfig struct {
+	SecUserID   string `json:"sec_user_id"`
+	ProfileURL  string `json:"profile_url,omitempty"`
+	Name        string `json:"name,omitempty"`
+	AtAll       bool   `json:"at_all"`
+	LastAwemeID string `json:"last_aweme_id,omitempty"`
+	LiveID      string `json:"live_id,omitempty"`
+	Auto        bool   `json:"auto,omitempty"`
 }
 
 type WeiboSuperTopic struct {
@@ -188,6 +216,27 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.WeiboBrowserRefreshMinutes < 5 {
 		cfg.WeiboBrowserRefreshMinutes = 30
+	}
+	if strings.TrimSpace(cfg.BrowserSidecarCmd) == "" {
+		cfg.BrowserSidecarCmd = cfg.WeiboBrowserAuthCmd
+	}
+	if strings.TrimSpace(cfg.BrowserProfileDir) == "" {
+		cfg.BrowserProfileDir = cfg.WeiboBrowserProfileDir
+	}
+	if _, ok := raw["BROWSER_HEADLESS"]; !ok {
+		cfg.BrowserHeadless = cfg.WeiboBrowserHeadless
+	}
+	if cfg.DouyinPollSeconds < 15 {
+		cfg.DouyinPollSeconds = 60
+	}
+	if strings.TrimSpace(cfg.DouyinLiveWSURL) == "" {
+		cfg.DouyinLiveWSURL = "ws://127.0.0.1:1088/ws"
+	}
+	if cfg.DouyinSubscriptions == nil {
+		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)
+	}
+	if cfg.DouyinSpecialFollowMinutes < 10 {
+		cfg.DouyinSpecialFollowMinutes = 30
 	}
 	if _, ok := raw["WEIBO_SUPERPOST_SUBSCRIPTIONS"]; !ok || cfg.WeiboSuperPostSubscriptions == nil {
 		cfg.WeiboSuperPostSubscriptions = make(map[int64]map[string]*WeiboSuperPostConfig)

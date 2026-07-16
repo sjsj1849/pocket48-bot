@@ -19,6 +19,43 @@ func loadTestConfig(t *testing.T, body string) *Config {
 	return cfg
 }
 
+func TestLoadConfigInitializesDouyinDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"NAPCAT_WS_URL":"ws://localhost"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BrowserSidecarCmd != "node ./sidecar/weibo-auth/index.mjs" {
+		t.Fatalf("unexpected browser command: %q", cfg.BrowserSidecarCmd)
+	}
+	if cfg.BrowserProfileDir != "./storage/weibo-browser-profile" || cfg.DouyinPollSeconds != 60 {
+		t.Fatalf("unexpected douyin defaults: profile=%q poll=%d", cfg.BrowserProfileDir, cfg.DouyinPollSeconds)
+	}
+	if cfg.DouyinLiveWSURL != "ws://127.0.0.1:1088/ws" || cfg.DouyinSubscriptions == nil {
+		t.Fatalf("unexpected douyin live/subscription defaults")
+	}
+	if cfg.DouyinSpecialFollowMinutes != 30 || cfg.DouyinIMGroupName != "" || cfg.DouyinIMGroupNumber != "" {
+		t.Fatalf("unexpected douyin special-follow/IM defaults: %#v", cfg)
+	}
+	if cfg.DouyinIMEnabled || cfg.DouyinSpecialFollowEnabled {
+		t.Fatal("privacy-sensitive Douyin account features must default to disabled")
+	}
+	if len(cfg.DouyinSpecialFollowIDs) != 0 {
+		t.Fatalf("special-follow ids must default empty: %#v", cfg.DouyinSpecialFollowIDs)
+	}
+}
+
+func TestLoadConfigKeepsConfiguredDouyinSpecialFollowIDs(t *testing.T) {
+	cfg := loadTestConfig(t, `{"DOUYIN_SPECIAL_FOLLOW_IDS":["123456789","example_account"]}`)
+	if len(cfg.DouyinSpecialFollowIDs) != 2 || cfg.DouyinSpecialFollowIDs[1] != "example_account" {
+		t.Fatalf("unexpected special-follow ids: %#v", cfg.DouyinSpecialFollowIDs)
+	}
+}
+
 func TestNIMSafeDefaults(t *testing.T) {
 	cfg := loadTestConfig(t, `{}`)
 	if !cfg.NIMRoomMessagePollFallback || !cfg.NIMLiveDanmakuEnabled {
