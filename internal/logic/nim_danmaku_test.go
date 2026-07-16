@@ -160,6 +160,65 @@ func TestRoomRealtimeMessageUsesSenderFieldsWithoutExt(t *testing.T) {
 	}
 }
 
+func TestRoomRealtimeImageMapsNumericTypeAndUsesAttachment(t *testing.T) {
+	raw := RoomRealtimeMessage{
+		ServerID:  11,
+		ChannelID: 22,
+		From:      "63559",
+		Type:      "1",
+		Time:      1710000000000,
+		IDServer:  "image-id",
+		Attach:    []byte(`{"url":"https://example.com/photo.jpg","w":1080,"h":1440}`),
+	}
+	msg, err := raw.toPocketMessage(nil)
+	if err != nil {
+		t.Fatalf("toPocketMessage() error = %v", err)
+	}
+	if msg.Type != pocket48.MsgImage || msg.Body != string(raw.Attach) || msg.ExtInfo.User.UserID != 63559 {
+		t.Fatalf("unexpected image message: %#v", msg)
+	}
+}
+
+func TestIncompleteRealtimeImageDefersWithoutPoisoningDedup(t *testing.T) {
+	bot := &Bot{
+		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
+		seenMessageIDs: make(map[string]time.Time),
+	}
+	msg := &pocket48.Message{
+		Room:        &pocket48.RoomInfo{ChannelID: 101},
+		MsgIDServer: "image-id",
+		Type:        pocket48.MsgImage,
+		ExtInfo:     pocket48.ExtInfo{User: pocket48.User{UserID: 63559}},
+	}
+	if !bot.shouldDeferRoomRealtimeToREST(msg) {
+		t.Fatal("image without a URL should defer to REST")
+	}
+	if len(bot.seenMessageIDs) != 0 {
+		t.Fatal("deferred image unexpectedly populated dedup state")
+	}
+}
+
+func TestRealtimeImageIgnoresNullAttachmentAndDefersInvalidPayload(t *testing.T) {
+	raw := RoomRealtimeMessage{
+		From:     "63559",
+		Type:     "1",
+		Body:     `{"not_a_url":"value"}`,
+		Attach:   []byte(`null`),
+		IDServer: "invalid-image",
+	}
+	msg, err := raw.toPocketMessage(&pocket48.RoomInfo{ChannelID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Body != raw.Body {
+		t.Fatalf("null attachment replaced original body: %q", msg.Body)
+	}
+	bot := &Bot{cfg: &config.Config{NIMRoomMessagePollFallback: true}}
+	if !bot.shouldDeferRoomRealtimeToREST(msg) {
+		t.Fatal("invalid image payload should defer to REST")
+	}
+}
+
 func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
 	bot := &Bot{
 		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
