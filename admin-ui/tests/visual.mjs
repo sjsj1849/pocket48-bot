@@ -1,6 +1,6 @@
 import { chromium } from '../../sidecar/weibo-auth/node_modules/playwright/index.mjs'
 
-const baseURL = process.env.POCKET48_CONSOLE_URL || 'https://jiufeng.cloud/pocket48/'
+const baseURL = process.env.POCKET48_CONSOLE_URL || 'https://pocket48.jiufeng.cloud/'
 const password = process.env.POCKET48_CONSOLE_PASSWORD
 const output = process.env.POCKET48_SCREENSHOT_DIR || '/tmp'
 if (!password) throw new Error('POCKET48_CONSOLE_PASSWORD is required')

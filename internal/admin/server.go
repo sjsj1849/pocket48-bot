@@ -68,8 +68,8 @@ func New(opts Options) (*Server, error) {
 		return nil, fmt.Errorf("read admin password: %w", err)
 	}
 	password = []byte(strings.TrimSpace(string(password)))
-	if len(password) < 16 {
-		return nil, errors.New("admin password must contain at least 16 characters")
+	if len(password) < 10 {
+		return nil, errors.New("admin password must contain at least 10 characters")
 	}
 	s := &Server{
 		opts:     opts,

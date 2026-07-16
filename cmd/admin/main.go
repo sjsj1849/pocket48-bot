@@ -13,7 +13,7 @@ func main() {
 		ConfigPath:   envOr("POCKET48_CONFIG_PATH", "/root/pocket48-bot/config.json"),
 		LogPath:      envOr("POCKET48_LOG_PATH", "/root/pocket48-bot/bot.log"),
 		PasswordPath: envOr("POCKET48_ADMIN_PASSWORD_FILE", "/root/pocket48-bot/storage/admin-password"),
-		CookiePath:   envOr("POCKET48_ADMIN_COOKIE_PATH", "/pocket48/"),
+		CookiePath:   envOr("POCKET48_ADMIN_COOKIE_PATH", "/"),
 	})
 	if err != nil {
 		log.Fatal(err)
