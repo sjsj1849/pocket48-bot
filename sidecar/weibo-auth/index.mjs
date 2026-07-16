@@ -98,7 +98,6 @@ async function startBrowser() {
   }
   context = await chromium.launchPersistentContext(profileDir, {
     headless: settings.headless,
-    channel: 'chromium',
     viewport: { width: 1280, height: 900 },
     args: chromiumArgs,
   });
@@ -145,11 +144,29 @@ async function findQRCode() {
     'img[src*="qr.weibo.cn"]',
     'img[src*="qrcode"]',
   ];
+  // Primary: extract <img src> and fetch via Playwright API request.
+  // This works even in headless shell where visibility checks fail.
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
     if (await locator.count() === 0) continue;
     try {
-      await locator.waitFor({ state: 'visible', timeout: 5_000 });
+      await locator.waitFor({ state: 'attached', timeout: 5_000 });
+      const src = await locator.getAttribute('src', { timeout: 3_000 });
+      if (src) {
+        const response = await page.request.get(src);
+        const buffer = await response.body();
+        if (buffer && buffer.length > 100) return buffer;
+      }
+    } catch {
+      // try next
+    }
+  }
+  // Fallback: screenshot the visible img element.
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.count() === 0) continue;
+    try {
+      await locator.waitFor({ state: 'attached', timeout: 5_000 });
       return await locator.screenshot({ type: 'png' });
     } catch {
       // Try the next known selector.
