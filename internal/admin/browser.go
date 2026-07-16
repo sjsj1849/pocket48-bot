@@ -75,6 +75,8 @@ func (s *Server) ensureVNC() (string, error) {
 		"rfbport="+strconv.Itoa(vncPort),
 		"SecurityTypes=None",
 		"AlwaysShared=1",
+		"FrameRate=24",
+		"CompareFB=1",
 	)
 	cmd.Env = append(os.Environ(), "DISPLAY="+display, "XAUTHORITY="+authority)
 	cmd.Stdout = os.Stdout

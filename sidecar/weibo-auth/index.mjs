@@ -132,14 +132,31 @@ async function startBrowser() {
     await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
     await fs.chmod(profileDir, 0o700).catch(() => {});
 
-    const chromiumArgs = ['--disable-dev-shm-usage'];
+    const chromiumArgs = [
+      '--disable-dev-shm-usage',
+      '--autoplay-policy=user-gesture-required',
+    ];
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
       chromiumArgs.push('--no-sandbox');
     }
     context = await launchPersistentBrowser(profileDir, {
       headless: settings.headless,
-      viewport: { width: 1280, height: 900 },
+      viewport: { width: 1280, height: 720 },
       args: chromiumArgs,
+    });
+    await context.addInitScript(() => {
+      let mediaGestureUntil = 0;
+      const allowMedia = () => { mediaGestureUntil = Date.now() + 1_500; };
+      window.addEventListener('pointerdown', allowMedia, true);
+      window.addEventListener('keydown', allowMedia, true);
+      const nativePlay = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function guardedPlay(...args) {
+        if (Date.now() > mediaGestureUntil) {
+          this.pause();
+          return Promise.resolve();
+        }
+        return nativePlay.apply(this, args);
+      };
     });
     await restoreStorageState();
     await seedConfiguredCookies();
