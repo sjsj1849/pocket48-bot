@@ -25,20 +25,20 @@ import (
 type NimDanmakuBridge struct {
 	cfg *config.Config
 
-	mu             sync.RWMutex
-	writeMu        sync.Mutex
-	cmd            *exec.Cmd
-	conn           *websocket.Conn
-	started        bool
-	stopping       bool
-	liveBindings   map[int64]int64 // NIM chatroom id -> Pocket48 channel id
-	connectedLives map[int64]bool
-	realtimeRooms  map[int64]int64 // QChat channel id -> Pocket48 channel id
-	qchatConnected bool
+	mu                sync.RWMutex
+	writeMu           sync.Mutex
+	cmd               *exec.Cmd
+	conn              *websocket.Conn
+	started           bool
+	stopping          bool
+	liveBindings      map[int64]int64 // NIM chatroom id -> Pocket48 channel id
+	connectedLives    map[int64]bool
+	realtimeRooms     map[int64]int64 // QChat channel id -> Pocket48 channel id
+	qchatConnected    bool
 	lastRealtimeMsgAt map[int64]time.Time // per-room last realtime message time (UTC)
-	stopCh         chan struct{}
-	stopOnce       sync.Once
-	wg             sync.WaitGroup
+	stopCh            chan struct{}
+	stopOnce          sync.Once
+	wg                sync.WaitGroup
 
 	onDanmaku    func(roomID int64, d *DanmakuMessage)
 	onGift       func(roomID int64, g *GiftMessage)
@@ -94,6 +94,8 @@ type MemberEvent struct {
 type RoomRealtimeMessage struct {
 	ServerID  int64           `json:"serverId"`
 	ChannelID int64           `json:"channelId"`
+	From      string          `json:"from,omitempty"`
+	FromNick  string          `json:"fromNick,omitempty"`
 	Type      string          `json:"type"`
 	Body      string          `json:"body,omitempty"`
 	Attach    json.RawMessage `json:"attach,omitempty"`
@@ -131,12 +133,12 @@ type sidecarCommand struct {
 
 func NewNimDanmakuBridge(cfg *config.Config) *NimDanmakuBridge {
 	return &NimDanmakuBridge{
-		cfg:            cfg,
-		liveBindings:   make(map[int64]int64),
-		connectedLives: make(map[int64]bool),
-		realtimeRooms:  make(map[int64]int64),
+		cfg:               cfg,
+		liveBindings:      make(map[int64]int64),
+		connectedLives:    make(map[int64]bool),
+		realtimeRooms:     make(map[int64]int64),
 		lastRealtimeMsgAt: make(map[int64]time.Time),
-		stopCh:         make(chan struct{}),
+		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -664,6 +666,15 @@ func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48
 			msg.NickName = ext.User.Nickname
 		}
 	}
+	if msg.ExtInfo.User.UserID == 0 {
+		if userID, err := strconv.ParseInt(strings.TrimSpace(m.From), 10, 64); err == nil {
+			msg.ExtInfo.User.UserID = userID
+		}
+	}
+	if msg.NickName == "" {
+		msg.NickName = strings.TrimSpace(m.FromNick)
+		msg.ExtInfo.User.Nickname = msg.NickName
+	}
 	return msg, nil
 }
 
@@ -868,6 +879,10 @@ func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket
 	}
 }
 
+func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
+	return msg != nil && msg.ExtInfo.User.UserID == 0 && b.cfg.NIMRoomMessagePollFallback
+}
+
 func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMessage) {
 	if raw == nil || raw.ChannelID == 0 || !b.cfg.NIMRoomMessageEnabled {
 		return
@@ -885,7 +900,12 @@ func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMes
 		log.Printf("[NIM-room] normalize room %d message: %v", pocketRoomID, err)
 		return
 	}
-	b.processMessages([]*pocket48.Message{msg})
+	log.Printf("[NIM-room] received room=%d channel=%d server=%d id=%s type=%s sender=%d from=%q nick=%q", pocketRoomID, raw.ChannelID, raw.ServerID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID, raw.From, raw.FromNick)
+	if b.shouldDeferRoomRealtimeToREST(msg) {
+		log.Printf("[NIM-room] defer unresolved sender to REST room=%d id=%s", pocketRoomID, msg.MsgIDServer)
+	} else {
+		b.processMessages([]*pocket48.Message{msg})
+	}
 	b.nimDanmaku.mu.Lock()
 	b.nimDanmaku.lastRealtimeMsgAt[pocketRoomID] = time.Now()
 	b.nimDanmaku.mu.Unlock()
