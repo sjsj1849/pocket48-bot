@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,7 +198,22 @@ func (c *Client) SendGroupMessage(groupID int64, message interface{}) {
 }
 
 func (c *Client) SendPrivateMessage(userID int64, message interface{}) {
-	log.Printf("[NAPCAT] Sending private message to %d: %+v", userID, message)
+	if segments, ok := message.([]MessageSegment); ok {
+		hasBase64Image := false
+		for _, segment := range segments {
+			if segment.Type == "image" && strings.HasPrefix(segment.Data["file"], "base64://") {
+				hasBase64Image = true
+				break
+			}
+		}
+		if hasBase64Image {
+			log.Printf("[NAPCAT] Sending private message to %d: %d segments (base64 image redacted)", userID, len(segments))
+		} else {
+			log.Printf("[NAPCAT] Sending private message to %d: %+v", userID, message)
+		}
+	} else {
+		log.Printf("[NAPCAT] Sending private message to %d: %+v", userID, message)
+	}
 	c.sendChan <- APIRequest{
 		Action: "send_private_msg",
 		Params: SendPrivateMsgParams{

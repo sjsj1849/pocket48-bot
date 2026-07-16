@@ -18,8 +18,16 @@ import (
 func (b *Bot) notifyWeiboCookieInvalid(uid string) {
 	webOK, webDetail, _ := b.weiboMonitor.CheckWebCookie(uid)
 	mwebOK, mwebDetail, _ := b.weiboMonitor.CheckMWeiboCookie(uid)
+	refreshHint := "建议先检查/更新 Cookie：bot weibo cookie set <Cookie>"
+	if b.cfg.WeiboBrowserAuthEnabled && b.weiboAuth != nil {
+		if err := b.weiboAuth.RequestRefresh("cookie_invalid"); err != nil {
+			log.Printf("[Weibo-auth] request refresh after cookie invalid: %v", err)
+		} else {
+			refreshHint = "已触发浏览器登录态恢复；如需重新登录，二维码会私聊发送给管理员"
+		}
+	}
 
-	msg := fmt.Sprintf("⚠️ 微博动态监控异常（UID=%s 连续3轮获取失败）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：监控优先走 weibo.com（web API），失败后回退到 m.weibo.cn；\n两条链路都不成功时触发此告警。\n建议先检查/更新 Cookie：bot weibo cookie set <Cookie>\n如需总检，也可执行：bot weibo cookie check", uid, webDetail, mwebDetail)
+	msg := fmt.Sprintf("⚠️ 微博动态监控异常（UID=%s 连续3轮获取失败）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：监控优先走 weibo.com（web API），失败后回退到 m.weibo.cn；\n两条链路都不成功时触发此告警。\n%s\n如需总检，也可执行：bot weibo cookie check", uid, webDetail, mwebDetail, refreshHint)
 	if webOK || mwebOK {
 		log.Printf("[Weibo] UID %s 触发监控异常告警：web=%v(%s) mweb=%v(%s)", uid, webOK, webDetail, mwebOK, mwebDetail)
 	}

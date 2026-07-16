@@ -3,6 +3,7 @@ config.json
 log/
 /storage/
 /sidecar/nim-bridge/node_modules/
+/sidecar/weibo-auth/node_modules/
 /sidecar/nim-android-bridge/
 data/
 .DS_Store
