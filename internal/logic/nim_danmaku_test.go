@@ -71,6 +71,29 @@ func TestBridgeTracksMultipleLiveBindings(t *testing.T) {
 	}
 }
 
+func TestRoomRealtimeActiveRequiresRecentMessageForPocketRoom(t *testing.T) {
+	bridge := &NimDanmakuBridge{
+		qchatConnected:    true,
+		lastRealtimeMsgAt: make(map[int64]time.Time),
+	}
+	if bridge.RoomRealtimeActive(101) {
+		t.Fatal("connected QChat without delivered messages must keep REST polling active")
+	}
+
+	bridge.lastRealtimeMsgAt[101] = time.Now()
+	if !bridge.RoomRealtimeActive(101) {
+		t.Fatal("recent realtime delivery for the Pocket48 room was not considered active")
+	}
+	if bridge.RoomRealtimeActive(202) {
+		t.Fatal("realtime activity leaked to a different Pocket48 room")
+	}
+
+	bridge.lastRealtimeMsgAt[101] = time.Now().Add(-6 * time.Minute)
+	if bridge.RoomRealtimeActive(101) {
+		t.Fatal("stale realtime delivery must fall back to REST polling")
+	}
+}
+
 func TestMessageDedupKeepsSameIDInDifferentRooms(t *testing.T) {
 	bot := &Bot{seenMessageIDs: make(map[string]time.Time)}
 	first := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 101}, MsgIDServer: "same-id"}

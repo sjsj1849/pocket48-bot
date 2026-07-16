@@ -501,7 +501,6 @@ func (b *Bot) handleWeiboAuthCookies(webCookie, mobileCookie, reason string) {
 		changed = true
 	}
 	if changed {
-		b.cfg.WeiboSuperLastRunDate = ""
 		if err := b.cfg.Save(); err != nil {
 			b.handleWeiboAuthError(fmt.Errorf("保存自动更新的微博 Cookie: %w", err))
 			return
