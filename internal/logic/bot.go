@@ -233,6 +233,8 @@ type Bot struct {
 	qchatIdentityLoaded    map[int64]bool
 	qchatPendingIdentities map[string]qchatPendingIdentity
 	qchatRESTIdentities    map[string]qchatRESTIdentity
+	roomMediaSem           chan struct{}
+	roomMediaWG            sync.WaitGroup
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
 	lastWeiboAuthErrorAt   time.Time
@@ -319,6 +321,7 @@ func NewBot(cfg *config.Config) *Bot {
 		qchatIdentityLoaded:    make(map[int64]bool),
 		qchatPendingIdentities: make(map[string]qchatPendingIdentity),
 		qchatRESTIdentities:    make(map[string]qchatRESTIdentity),
+		roomMediaSem:           make(chan struct{}, 4),
 		memberEnterTimes:       make(map[string]time.Time),
 		liveSessions:           make(map[int64]*LiveGiftSession),
 		isMonitoring:           true,
@@ -551,6 +554,7 @@ func (b *Bot) Start() error {
 	if b.douyinMonitor != nil {
 		b.douyinMonitor.Stop()
 	}
+	b.roomMediaWG.Wait()
 
 	return nil
 }

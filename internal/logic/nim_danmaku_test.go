@@ -270,6 +270,21 @@ func TestRoomRealtimeFlipCardPreservesPayloadAndValidatesMedia(t *testing.T) {
 	}
 }
 
+func TestRoomRealtimeMediaClassification(t *testing.T) {
+	mediaTypes := []pocket48.MessageType{
+		pocket48.MsgImage, pocket48.MsgExpressImage, pocket48.MsgAudio, pocket48.MsgVideo,
+		pocket48.MsgAudioGiftReply, pocket48.MsgFlipCardAudio, pocket48.MsgFlipCardVideo,
+	}
+	for _, msgType := range mediaTypes {
+		if !isRoomRealtimeMedia(msgType) {
+			t.Fatalf("%s should use asynchronous media processing", msgType)
+		}
+	}
+	if isRoomRealtimeMedia(pocket48.MsgText) || isRoomRealtimeMedia(pocket48.MsgFlipCard) {
+		t.Fatal("text-only messages should remain synchronous")
+	}
+}
+
 func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
 	bot := &Bot{
 		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
