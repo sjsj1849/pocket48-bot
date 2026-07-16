@@ -259,6 +259,8 @@ function normalizeQChatMessage(raw) {
   return {
     serverId: Number(firstValue(raw.serverId, raw.server_id_, 0)),
     channelId: Number(firstValue(raw.channelId, raw.channel_id_, 0)),
+    from: String(firstValue(raw.from, raw.fromAccount, '') || ''),
+    fromNick: String(firstValue(raw.fromNick, raw.fromNickname, '') || ''),
     type,
     body: typeof raw.body === 'string' ? raw.body : '',
     attach: parseJSON(attach) || attach || undefined,

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/pocket48"
 )
 
@@ -94,6 +95,18 @@ func TestRoomRealtimeActiveRequiresRecentMessageForPocketRoom(t *testing.T) {
 	}
 }
 
+func TestRealtimeMessageFallbackRemainsEnabledDuringQChatActivity(t *testing.T) {
+	bot := &Bot{
+		cfg: &config.Config{
+			NIMRoomMessageEnabled:      true,
+			NIMRoomMessagePollFallback: true,
+		},
+	}
+	if !bot.shouldPollRoomMessages() {
+		t.Fatal("REST fallback was disabled while QChat monitoring was active")
+	}
+}
+
 func TestMessageDedupKeepsSameIDInDifferentRooms(t *testing.T) {
 	bot := &Bot{seenMessageIDs: make(map[string]time.Time)}
 	first := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 101}, MsgIDServer: "same-id"}
@@ -122,6 +135,55 @@ func TestRoomRealtimeMessageToPocket(t *testing.T) {
 	}
 	if msg.Type != "REPLY" || msg.NickName != "测试成员" || msg.ExtInfo.User.UserID != 42 {
 		t.Fatalf("unexpected message: %#v", msg)
+	}
+}
+
+func TestRoomRealtimeMessageUsesSenderFieldsWithoutExt(t *testing.T) {
+	raw := RoomRealtimeMessage{
+		ServerID:  11,
+		ChannelID: 22,
+		From:      "63559",
+		FromNick:  "哼唧小虎",
+		Type:      "text",
+		Body:      "宝宝先吃",
+		Time:      1710000000000,
+		IDServer:  "server-id",
+	}
+
+	msg, err := raw.toPocketMessage(nil)
+	if err != nil {
+		t.Fatalf("toPocketMessage() error = %v", err)
+	}
+	if msg.ExtInfo.User.UserID != 63559 || msg.NickName != "哼唧小虎" {
+		t.Fatalf("sender fallback was not preserved: %#v", msg)
+	}
+}
+
+func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
+	bot := &Bot{
+		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
+		seenMessageIDs: make(map[string]time.Time),
+	}
+	qchat := &pocket48.Message{
+		Room:        &pocket48.RoomInfo{ChannelID: 101},
+		MsgIDServer: "same-id",
+	}
+	if !bot.shouldDeferRoomRealtimeToREST(qchat) {
+		t.Fatal("unresolved QChat sender was not deferred to REST")
+	}
+	if len(bot.seenMessageIDs) != 0 {
+		t.Fatal("unresolved QChat message unexpectedly populated dedup state")
+	}
+
+	rest := &pocket48.Message{
+		Room:        &pocket48.RoomInfo{ChannelID: 101},
+		MsgIDServer: "same-id",
+		ExtInfo: pocket48.ExtInfo{
+			User: pocket48.User{UserID: 63559},
+		},
+	}
+	if !bot.markMessageSeen(rest) {
+		t.Fatal("complete REST message was suppressed by unresolved QChat delivery")
 	}
 }
 

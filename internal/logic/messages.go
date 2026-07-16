@@ -14,6 +14,10 @@ import (
 	"pocket48-bot/internal/pocket48"
 )
 
+func (b *Bot) shouldPollRoomMessages() bool {
+	return !b.cfg.NIMRoomMessageEnabled || b.cfg.NIMRoomMessagePollFallback
+}
+
 func (b *Bot) pollLoop() {
 	sem := make(chan struct{}, 20)
 
@@ -73,13 +77,11 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 	if b.isPocketAuthExpired() {
 		return false
 	}
-	if b.cfg.NIMRoomMessageEnabled {
-		if b.nimDanmaku.RoomRealtimeActive(roomID) {
-			return false
-		}
-		if !b.cfg.NIMRoomMessagePollFallback {
-			return false
-		}
+	// QChat is the low-latency path, but it is not a delivery guarantee. When
+	// fallback is enabled, keep REST polling and let message-ID deduplication
+	// collapse events delivered by both paths.
+	if !b.shouldPollRoomMessages() {
+		return false
 	}
 
 	roomInfo, err := b.getCachedRoomInfo(roomID)
