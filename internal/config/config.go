@@ -82,13 +82,14 @@ type WeiboConfig struct {
 // used by creator pages; LiveID is the live.douyin.com path discovered from
 // the creator page and can be reused while the creator is offline.
 type DouyinConfig struct {
-	SecUserID   string `json:"sec_user_id"`
-	ProfileURL  string `json:"profile_url,omitempty"`
-	Name        string `json:"name,omitempty"`
-	AtAll       bool   `json:"at_all"`
-	LastAwemeID string `json:"last_aweme_id,omitempty"`
-	LiveID      string `json:"live_id,omitempty"`
-	Auto        bool   `json:"auto,omitempty"`
+	SecUserID     string `json:"sec_user_id"`
+	ProfileURL    string `json:"profile_url,omitempty"`
+	Name          string `json:"name,omitempty"`
+	AtAll         bool   `json:"at_all"`
+	LastAwemeID   string `json:"last_aweme_id,omitempty"`
+	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
+	LiveID        string `json:"live_id,omitempty"`
+	Auto          bool   `json:"auto,omitempty"`
 }
 
 type WeiboSuperTopic struct {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractProfileLive, findLiveID, normalizeAwemeList } from './douyin-parser.mjs';
+import { awemeCreateTime, extractProfileLive, findLiveID, normalizeAwemeList } from './douyin-parser.mjs';
 
 test('normalizes Douyin video and note posts', () => {
   const posts = normalizeAwemeList({ aweme_list: [
@@ -19,6 +19,11 @@ test('rejects recommended and advertising posts from other authors', () => {
     { aweme_id: 'unknown' },
   ] }, 'target-sec');
   assert.deepEqual(posts.map((post) => post.id), ['target']);
+});
+
+test('derives the publish time from a Douyin aweme id', () => {
+  assert.equal(awemeCreateTime('7280485100071046440'), 1695120031);
+  assert.equal(awemeCreateTime('invalid'), 0);
 });
 
 test('finds nested Douyin live id', () => {

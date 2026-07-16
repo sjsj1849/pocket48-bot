@@ -489,25 +489,37 @@ func (m *DouyinMonitor) handleAccount(event douyinBrowserEvent) {
 	}
 }
 
-func unseenDouyinPosts(posts []douyinPost, lastID string) []douyinPost {
-	if len(posts) == 0 || lastID == "" {
-		return nil
-	}
-	result := make([]douyinPost, 0)
-	found := false
+func latestTimestampedDouyinPost(posts []douyinPost, now time.Time) (douyinPost, bool) {
+	var latest douyinPost
+	maxTime := now.Add(5 * time.Minute).Unix()
 	for _, post := range posts {
-		if post.ID == lastID {
-			found = true
-			break
+		if post.CreateTime <= 0 || post.CreateTime > maxTime {
+			continue
 		}
+		if latest.CreateTime == 0 || post.CreateTime > latest.CreateTime {
+			latest = post
+		}
+	}
+	return latest, latest.CreateTime > 0
+}
+
+func unseenDouyinPosts(posts []douyinPost, lastTime int64, now time.Time) []douyinPost {
+	maxTime := now.Add(5 * time.Minute).Unix()
+	result := make([]douyinPost, 0)
+	seen := make(map[string]bool)
+	for _, post := range posts {
+		if post.ID == "" || seen[post.ID] || post.CreateTime <= lastTime || post.CreateTime > maxTime {
+			continue
+		}
+		seen[post.ID] = true
 		result = append(result, post)
 	}
-	if !found && len(result) > 1 {
-		return result[:1]
-	}
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].CreateTime == result[j].CreateTime {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].CreateTime < result[j].CreateTime
+	})
 	return result
 }
 
@@ -531,15 +543,24 @@ func (m *DouyinMonitor) handlePosts(event douyinBrowserEvent) {
 		if event.Nickname != "" {
 			item.Name = event.Nickname
 		}
-		if item.LastAwemeID == "" {
-			item.LastAwemeID = event.Posts[0].ID
+		now := time.Now()
+		latest, ok := latestTimestampedDouyinPost(event.Posts, now)
+		if !ok {
 			continue
 		}
-		posts := unseenDouyinPosts(event.Posts, item.LastAwemeID)
+		if item.LastAwemeTime == 0 {
+			item.LastAwemeID = latest.ID
+			item.LastAwemeTime = latest.CreateTime
+			continue
+		}
+		posts := unseenDouyinPosts(event.Posts, item.LastAwemeTime, now)
 		if len(posts) > 0 {
 			jobs = append(jobs, dispatch{groupID: groupID, cfg: *item, posts: posts})
 		}
-		item.LastAwemeID = event.Posts[0].ID
+		if latest.CreateTime > item.LastAwemeTime {
+			item.LastAwemeID = latest.ID
+			item.LastAwemeTime = latest.CreateTime
+		}
 	}
 	m.mu.Unlock()
 	if err := m.cfg.Save(); err != nil {
