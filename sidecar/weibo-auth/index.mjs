@@ -506,18 +506,55 @@ async function requestDouyinLoginQRCode() {
   for (const selector of ['text=登录', '[data-e2e="login-button"]']) {
     try { await targetPage.locator(selector).first().click({ timeout: 3_000 }); break; } catch {}
   }
-  const qr = targetPage.locator('#animate_qrcode_container img, img[src*="qrcode"], img[src*="passport"]').first();
-  await qr.waitFor({ state: 'visible', timeout: 15_000 });
-  const image = await qr.screenshot({ type: 'png' });
+  for (const label of ['扫码登录', '扫码']) {
+    try { await targetPage.getByText(label, { exact: true }).last().click({ timeout: 3_000 }); break; } catch {}
+  }
+  await targetPage.waitForTimeout(1_000);
+  const selectors = [
+    '#animate_qrcode_container img',
+    '[class*="qrcode" i] img',
+    '[class*="qr-code" i] img',
+    '[class*="scan" i] img',
+    'img[src*="qrcode"]',
+    'img[src*="passport"]',
+    'img[src^="data:image"]',
+    'canvas',
+  ];
+  let image;
+  const deadline = Date.now() + 15_000;
+  while (!image && Date.now() < deadline) {
+    for (const selector of selectors) {
+      const candidates = targetPage.locator(selector);
+      const count = Math.min(await candidates.count(), 10);
+      for (let i = 0; i < count; i += 1) {
+        const candidate = candidates.nth(i);
+        try {
+          if (!await candidate.isVisible()) continue;
+          const box = await candidate.boundingBox();
+          if (!box || box.width < 100 || box.height < 100) continue;
+          image = await candidate.screenshot({ type: 'png' });
+          break;
+        } catch {}
+      }
+      if (image) break;
+    }
+    if (!image) await targetPage.waitForTimeout(500);
+  }
+  if (!image) {
+    image = await targetPage.screenshot({ type: 'png' });
+    emit('douyin_status', { status: 'qrcode_fallback', message: '未定位到独立二维码元素，已发送抖音登录页截图' });
+  }
   emit('douyin_qrcode', { imageBase64: image.toString('base64'), expiresIn: 300 });
-  const deadline = Date.now() + 5 * 60_000;
-  while (!shuttingDown && Date.now() < deadline) {
+  const loginDeadline = Date.now() + 5 * 60_000;
+  while (!shuttingDown && Date.now() < loginDeadline) {
     await targetPage.waitForTimeout(2_000);
     cookies = new Map((await context.cookies()).map((cookie) => [cookie.name, cookie.value]));
     if (cookies.get('LOGIN_STATUS') === '1' || cookies.get('sessionid') || cookies.get('sessionid_ss')) {
       await persistStorageState();
       emit('douyin_status', { status: 'healthy', message: '抖音浏览器登录成功' });
       void scanAllDouyin();
+      void scanDouyinSpecialFollows();
+      void startDouyinIM();
       return;
     }
   }
@@ -730,7 +767,11 @@ wss.on('connection', (socket) => {
           void scanAllDouyin();
           break;
         case 'douyin_login':
-          await requestDouyinLoginQRCode();
+          try {
+            await requestDouyinLoginQRCode();
+          } catch (error) {
+            emit('douyin_status', { status: 'login_error', message: error.message });
+          }
           break;
         case 'shutdown':
           await shutdown();
