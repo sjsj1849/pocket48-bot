@@ -16,3 +16,7 @@ bot48
 bot
 dist/
 *.bak
+debug_*
+sidecar/nim-bridge/probe-*
+sidecar/nim-bridge/scripts/probe-*
+sidecar/weibo-auth/storage/
