@@ -2,14 +2,17 @@ package logic
 
 import (
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,11 +22,87 @@ const (
 	mediaCleanupIntv = 5 * time.Minute
 )
 
-var mediaHTTPClient = &http.Client{
-	Timeout: 20 * time.Second,
-	Transport: &http.Transport{
-		DisableKeepAlives: false,
-	},
+var mediaHTTPClient = newMediaHTTPClient()
+
+func newMediaHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 8
+	transport.ForceAttemptHTTP2 = true
+	return &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: transport,
+	}
+}
+
+type mediaDownloadTrace struct {
+	mu sync.Mutex
+
+	dnsStarted     time.Time
+	connectStarted time.Time
+	tlsStarted     time.Time
+	dnsElapsed     time.Duration
+	connectElapsed time.Duration
+	tlsElapsed     time.Duration
+	firstByte      time.Duration
+	reused         bool
+}
+
+func (t *mediaDownloadTrace) clientTrace(started time.Time) *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) {
+			t.mu.Lock()
+			t.dnsStarted = time.Now()
+			t.mu.Unlock()
+		},
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			t.mu.Lock()
+			if !t.dnsStarted.IsZero() {
+				t.dnsElapsed = time.Since(t.dnsStarted)
+			}
+			t.mu.Unlock()
+		},
+		ConnectStart: func(_, _ string) {
+			t.mu.Lock()
+			t.connectStarted = time.Now()
+			t.mu.Unlock()
+		},
+		ConnectDone: func(_, _ string, _ error) {
+			t.mu.Lock()
+			if !t.connectStarted.IsZero() {
+				t.connectElapsed = time.Since(t.connectStarted)
+			}
+			t.mu.Unlock()
+		},
+		TLSHandshakeStart: func() {
+			t.mu.Lock()
+			t.tlsStarted = time.Now()
+			t.mu.Unlock()
+		},
+		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+			t.mu.Lock()
+			if !t.tlsStarted.IsZero() {
+				t.tlsElapsed = time.Since(t.tlsStarted)
+			}
+			t.mu.Unlock()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.mu.Lock()
+			t.reused = info.Reused
+			t.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			t.mu.Lock()
+			t.firstByte = time.Since(started)
+			t.mu.Unlock()
+		},
+	}
+}
+
+func (t *mediaDownloadTrace) snapshot() (time.Duration, time.Duration, time.Duration, time.Duration, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.firstByte, t.dnsElapsed, t.connectElapsed, t.tlsElapsed, t.reused
 }
 
 func init() {
@@ -50,8 +129,16 @@ func (b *Bot) downloadMedia(url string) (string, error) {
 		return localPath, nil
 	}
 
-	// Download
-	resp, err := mediaHTTPClient.Get(url)
+	// Download and retain enough timing detail to distinguish CDN latency from
+	// local processing when a media message is slow.
+	started := time.Now()
+	downloadTrace := &mediaDownloadTrace{}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build download request failed: %w", err)
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), downloadTrace.clientTrace(started)))
+	resp, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
 	}
@@ -89,7 +176,17 @@ func (b *Bot) downloadMedia(url string) (string, error) {
 		return "", fmt.Errorf("write file failed: %w", err)
 	}
 
-	log.Printf("[Media] Cached %s → %s (%d bytes)", url, localPath, written)
+	elapsed := time.Since(started)
+	firstByte, dnsElapsed, connectElapsed, tlsElapsed, reused := downloadTrace.snapshot()
+	rateMiB := 0.0
+	if elapsed > 0 {
+		rateMiB = float64(written) / (1024 * 1024) / elapsed.Seconds()
+	}
+	log.Printf(
+		"[Media] Cached %s → %s (%d bytes, total=%s, ttfb=%s, dns=%s, connect=%s, tls=%s, reused=%t, rate=%.2f MiB/s)",
+		url, localPath, written, elapsed.Round(time.Millisecond), firstByte.Round(time.Millisecond),
+		dnsElapsed.Round(time.Millisecond), connectElapsed.Round(time.Millisecond), tlsElapsed.Round(time.Millisecond), reused, rateMiB,
+	)
 	return localPath, nil
 }
 
