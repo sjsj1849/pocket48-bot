@@ -45,7 +45,7 @@ type NimDanmakuBridge struct {
 	onMember     func(roomID int64, m *MemberEvent)
 	onLiveUpdate func(roomID int64, update *LiveUpdate)
 	onLiveEnded  func(roomID int64, ended *LiveEnded)
-	onRoom       func(m *RoomRealtimeMessage)
+	onRoom       func(pocketRoomID int64, m *RoomRealtimeMessage)
 	onConnected  func(roomID int64)
 	onError      func(err error)
 }
@@ -146,7 +146,7 @@ func (b *NimDanmakuBridge) SetCallbacks(
 	onMember func(roomID int64, m *MemberEvent),
 	onLiveUpdate func(roomID int64, update *LiveUpdate),
 	onLiveEnded func(roomID int64, ended *LiveEnded),
-	onRoom func(m *RoomRealtimeMessage),
+	onRoom func(pocketRoomID int64, m *RoomRealtimeMessage),
 	onConnected func(roomID int64),
 	onError func(err error),
 ) {
@@ -550,7 +550,7 @@ func (b *NimDanmakuBridge) readLoop() {
 				continue
 			}
 			if b.onRoom != nil {
-				b.onRoom(&msg)
+				b.onRoom(evt.RoomID, &msg)
 			}
 		case "error":
 			b.reportError(fmt.Errorf("sidecar error: %s (code=%d)", evt.Msg, evt.Code))
@@ -868,30 +868,27 @@ func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket
 	}
 }
 
-func (b *Bot) handleRoomRealtimeMessage(raw *RoomRealtimeMessage) {
+func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMessage) {
 	if raw == nil || raw.ChannelID == 0 || !b.cfg.NIMRoomMessageEnabled {
 		return
 	}
-	if len(b.getTargetGroupsForRoom(raw.ChannelID)) == 0 {
+	if len(b.getTargetGroupsForRoom(pocketRoomID)) == 0 {
 		return
 	}
-	room, err := b.getCachedRoomInfo(raw.ChannelID)
+	room, err := b.getCachedRoomInfo(pocketRoomID)
 	if err != nil {
-		log.Printf("[NIM-room] resolve channel %d: %v", raw.ChannelID, err)
+		log.Printf("[NIM-room] resolve room %d: %v", pocketRoomID, err)
 		return
 	}
 	msg, err := raw.toPocketMessage(room)
 	if err != nil {
-		log.Printf("[NIM-room] normalize channel %d message: %v", raw.ChannelID, err)
+		log.Printf("[NIM-room] normalize room %d message: %v", pocketRoomID, err)
 		return
 	}
 	b.processMessages([]*pocket48.Message{msg})
-	b.mu.Lock()
-	if msg.Time > b.lastMsgTime[raw.ChannelID] {
-		b.lastMsgTime[raw.ChannelID] = msg.Time
-	}
-	b.nimDanmaku.lastRealtimeMsgAt[raw.ChannelID] = time.Now()
-	b.mu.Unlock()
+	b.nimDanmaku.mu.Lock()
+	b.nimDanmaku.lastRealtimeMsgAt[pocketRoomID] = time.Now()
+	b.nimDanmaku.mu.Unlock()
 }
 
 func (b *Bot) handleDanmakuMessage(roomID int64, d *DanmakuMessage) {
