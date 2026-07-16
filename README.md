@@ -23,6 +23,7 @@
 - **超话签到人数**查询与日排行
 - **三套认证**独立维护：AppAuth / weibo.com Cookie / m.weibo.cn Cookie
 - **AppAuth 主动健康检查**（每 2 小时，失效/恢复自动通知管理员）
+- **Web Cookie 自动维护**：持久化浏览器 Profile，Cookie 失效时向管理员私聊登录二维码
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -75,6 +76,42 @@ cd ../..
 - `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开直播间的事件，并在同时收到进出事件时计算停留时长；NIM 未广播或断线期间的事件无法补齐。
 - 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
 - 侧卡仅监听 `127.0.0.1` 的随机端口，不对局域网或公网开放。
+
+### 🐼 微博 Web Cookie 自动维护（可选）
+
+项目内置 `sidecar/weibo-auth`。它只负责维护 `weibo.com` 与 `m.weibo.cn` 的浏览器登录态，不修改 AppAuth，也不替代现有微博监控逻辑：
+
+1. Chromium 使用固定 Profile，并额外保存 `storageState`，重启后复用登录态；
+2. 定期访问移动端和网页端完成 CookieJar 预热，将服务器下发的新 Cookie 热更新给 Go；
+3. 登录彻底失效时生成微博登录二维码，通过 NapCat 私聊发送给超级管理员和管理员；
+4. 扫码成功后自动更新两套 Cookie，无需重启 Bot。
+
+Linux 首次部署需要安装侧卡依赖和 Chromium：
+
+```bash
+cd sidecar/weibo-auth
+npm ci
+npx playwright install --with-deps chromium --no-shell
+cd ../..
+```
+
+在 `config.json` 中启用：
+
+```json
+{
+  "WEIBO_BROWSER_AUTH_ENABLED": true,
+  "WEIBO_BROWSER_AUTH_CMD": "node ./sidecar/weibo-auth/index.mjs",
+  "WEIBO_BROWSER_PROFILE_DIR": "./storage/weibo-browser-profile",
+  "WEIBO_BROWSER_HEADLESS": true,
+  "WEIBO_BROWSER_REFRESH_MINUTES": 30
+}
+```
+
+- 首次启用且没有有效登录态时，Bot 会自动私聊二维码；使用微博 App 扫码即可。
+- Profile 和 `storageState` 位于 `storage/`，该目录已被 Git 忽略。目录权限会设置为 `0700`，状态文件权限设置为 `0600`；仍应像保护账号密码一样保护服务器文件。
+- 微博强制风控、账号退出或要求额外验证时，无法保证完全无人值守；Bot 会重新发送二维码作为兜底。
+- 为避免管理员消息轰炸，登录二维码生成后有 2 小时冷却时间。
+- `WEIBO_BROWSER_REFRESH_MINUTES` 最小为 5 分钟，缺省为 30 分钟。侧卡只监听本机随机端口。
 
 ## 快速开始
 
@@ -202,6 +239,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_ROOM_MESSAGE_ENABLED` | 启用普通房间 QChat 实时监控 |
 | `NIM_ROOM_MESSAGE_POLL_FALLBACK` | QChat 不可用时继续 REST 轮询 |
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
+| `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
 
 `POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交。也可用短信登录：
 
@@ -221,6 +259,11 @@ bot code <验证码>          # 输入验证码完成登录
 | `ADMIN_QQ` | 管理员 QQ 号列表 | `[]` |
 | `GROUP_SUBSCRIPTIONS` | 群→房间监控列表 | `{}` |
 | `WEIBO_COOKIE` | 微博认证（建议通过命令设置） | `""` |
+| `WEIBO_MWEIBO_COOKIE` | 微博移动网页 Cookie（启用浏览器侧卡后自动维护） | `""` |
+| `WEIBO_BROWSER_AUTH_CMD` | 微博认证侧卡启动命令 | `"node ./sidecar/weibo-auth/index.mjs"` |
+| `WEIBO_BROWSER_PROFILE_DIR` | 持久化 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
+| `WEIBO_BROWSER_HEADLESS` | 使用无头 Chromium | `true` |
+| `WEIBO_BROWSER_REFRESH_MINUTES` | 登录态预热与同步间隔（分钟） | `30` |
 
 ### 🌍 随机地址生成器
 
@@ -313,6 +356,7 @@ bot weibo cookie check
 > - **weibo.com Cookie**（`bot weibo cookie set` 设置）— 浏览器端长期认证，用于动态监控
 > - 两者**各自独立维护**。gsid（App 用）和 Cookie（浏览器用）混合会导致签名不匹配，签到必失败。
 > - `bot weibo cookie import` 只导入 AppAuth，不再自动推导 Cookie。如需 Cookie，请单独使用 `bot weibo cookie set` 设置。
+> - 启用 `WEIBO_BROWSER_AUTH_ENABLED` 后，Web Cookie 由浏览器 Profile 自动维护；AppAuth 仍需独立维护。
 >
 > 过期后 bot 会自动通知：
 > - AppAuth 失效 → 每 2 小时自动健康检查，检测到后发送通知到群

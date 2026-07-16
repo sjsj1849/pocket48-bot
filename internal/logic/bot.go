@@ -208,6 +208,7 @@ type Bot struct {
 	weiboMonitor *monitor.WeiboMonitor
 	storage      *storage.Storage
 	nimDanmaku   *NimDanmakuBridge
+	weiboAuth    *WeiboAuthBridge
 
 	lastMsgTime            map[int64]int64
 	cursorLoaded           map[int64]bool
@@ -218,6 +219,7 @@ type Bot struct {
 	seenMessageIDs         map[string]time.Time
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
+	lastWeiboAuthErrorAt   time.Time
 	mu                     sync.RWMutex
 
 	isMonitoring      bool
@@ -288,6 +290,7 @@ func NewBot(cfg *config.Config) *Bot {
 		weiboMonitor:     weiboMon,
 		storage:          botStorage,
 		nimDanmaku:       NewNimDanmakuBridge(cfg),
+		weiboAuth:        NewWeiboAuthBridge(cfg),
 		lastMsgTime:      make(map[int64]int64),
 		cursorLoaded:     make(map[int64]bool),
 		onMicState:       make(map[int64]bool),
@@ -303,6 +306,12 @@ func NewBot(cfg *config.Config) *Bot {
 		fastInterval:     300 * time.Millisecond,
 	}
 	weiboMon.OnCookieInvalid = bot.notifyWeiboCookieInvalid
+	bot.weiboAuth.SetCallbacks(
+		bot.handleWeiboAuthCookies,
+		bot.handleWeiboAuthQRCode,
+		bot.handleWeiboAuthStatus,
+		bot.handleWeiboAuthError,
+	)
 
 	// Set up welcome new member callback
 	napcatClient.OnMemberJoin = bot.handleMemberJoin
@@ -442,6 +451,9 @@ func (b *Bot) Start() error {
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()
+	if b.cfg.WeiboBrowserAuthEnabled {
+		go b.startWeiboAuthBridge()
+	}
 
 	// Start Polling Loop
 	go b.pollLoop()
@@ -491,6 +503,9 @@ func (b *Bot) Start() error {
 	b.cfg.Save()
 	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
 		b.nimDanmaku.Stop()
+	}
+	if b.cfg.WeiboBrowserAuthEnabled {
+		b.weiboAuth.Stop()
 	}
 
 	return nil

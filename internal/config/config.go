@@ -49,9 +49,14 @@ type Config struct {
 	BilibiliSubscriptions             map[int64]map[string]*BilibiliConfig               `json:"BILIBILI_SUBSCRIPTIONS"`        // GroupID -> RoomID -> BilibiliConfig
 	WeiboCookie                       string                                             `json:"WEIBO_COOKIE"`                  // Weibo web Cookie
 	WeiboMWeiboCookie                 string                                             `json:"WEIBO_MWEIBO_COOKIE,omitempty"` // mweibo.com / m.weibo.cn Cookie
-	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"`        // Disable command handling in groups
-	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`               // GroupID -> WelcomeConfig
-	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`                // GroupID -> WeidianOrderConfig
+	WeiboBrowserAuthEnabled           bool                                               `json:"WEIBO_BROWSER_AUTH_ENABLED"`
+	WeiboBrowserAuthCmd               string                                             `json:"WEIBO_BROWSER_AUTH_CMD"`
+	WeiboBrowserProfileDir            string                                             `json:"WEIBO_BROWSER_PROFILE_DIR"`
+	WeiboBrowserHeadless              bool                                               `json:"WEIBO_BROWSER_HEADLESS"`
+	WeiboBrowserRefreshMinutes        int                                                `json:"WEIBO_BROWSER_REFRESH_MINUTES"`
+	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
+	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
+	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
 	filePath                          string
 }
 
@@ -172,6 +177,18 @@ func LoadConfig(path string) (*Config, error) {
 	if _, ok := raw["WEIBO_SUPER_COUNT_ENABLED"]; !ok {
 		cfg.WeiboSuperCountEnabled = false
 	}
+	if _, ok := raw["WEIBO_BROWSER_HEADLESS"]; !ok {
+		cfg.WeiboBrowserHeadless = true
+	}
+	if strings.TrimSpace(cfg.WeiboBrowserAuthCmd) == "" {
+		cfg.WeiboBrowserAuthCmd = "node ./sidecar/weibo-auth/index.mjs"
+	}
+	if strings.TrimSpace(cfg.WeiboBrowserProfileDir) == "" {
+		cfg.WeiboBrowserProfileDir = "./storage/weibo-browser-profile"
+	}
+	if cfg.WeiboBrowserRefreshMinutes < 5 {
+		cfg.WeiboBrowserRefreshMinutes = 30
+	}
 	if _, ok := raw["WEIBO_SUPERPOST_SUBSCRIPTIONS"]; !ok || cfg.WeiboSuperPostSubscriptions == nil {
 		cfg.WeiboSuperPostSubscriptions = make(map[int64]map[string]*WeiboSuperPostConfig)
 	}
@@ -216,7 +233,10 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.filePath, data, 0644)
+	if err := os.WriteFile(c.filePath, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(c.filePath, 0600)
 }
 
 func (c *Config) UpdateToken(token string) {

@@ -36,6 +36,12 @@
     "WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS": {},
     "BILIBILI_SUBSCRIPTIONS": {},
     "WEIBO_COOKIE": "",
+    "WEIBO_MWEIBO_COOKIE": "",
+    "WEIBO_BROWSER_AUTH_ENABLED": false,
+    "WEIBO_BROWSER_AUTH_CMD": "node ./sidecar/weibo-auth/index.mjs",
+    "WEIBO_BROWSER_PROFILE_DIR": "./storage/weibo-browser-profile",
+    "WEIBO_BROWSER_HEADLESS": true,
+    "WEIBO_BROWSER_REFRESH_MINUTES": 30,
     "DISABLE_GROUP_COMMANDS": false,
     "WELCOME_CONFIGS": {},
     "WEIDIAN_ORDERS": {}
