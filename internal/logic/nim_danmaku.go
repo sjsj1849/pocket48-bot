@@ -910,6 +910,44 @@ func hasQChatMediaURL(body string, keys []string) bool {
 	return strings.TrimSpace(findStringField(payload, keys)) != ""
 }
 
+func isRoomRealtimeMedia(msgType pocket48.MessageType) bool {
+	switch msgType {
+	case pocket48.MsgImage, pocket48.MsgExpressImage, pocket48.MsgAudio, pocket48.MsgVideo,
+		pocket48.MsgAudioGiftReply, pocket48.MsgFlipCardAudio, pocket48.MsgFlipCardVideo:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bot) processRoomRealtimeMedia(msg *pocket48.Message) {
+	if msg == nil || !b.markMessageSeen(msg) {
+		return
+	}
+	roomID := int64(0)
+	if msg.Room != nil {
+		roomID = msg.Room.ChannelID
+	}
+	targetGroups := b.getTargetGroupsForRoom(roomID)
+	if len(targetGroups) == 0 {
+		return
+	}
+	sem := b.roomMediaSem
+	if sem == nil {
+		sem = make(chan struct{}, 4)
+		b.roomMediaSem = sem
+	}
+	b.roomMediaWG.Add(1)
+	go func() {
+		defer b.roomMediaWG.Done()
+		sem <- struct{}{}
+		defer func() { <-sem }()
+		started := time.Now()
+		b.processSinglePocketMessage(msg, targetGroups)
+		log.Printf("[NIM-room] media processed room=%d id=%s type=%s elapsed=%s", roomID, msg.MsgIDServer, msg.Type, time.Since(started).Round(time.Millisecond))
+	}()
+}
+
 func qchatIdentityMessageKey(roomID int64, serverID, clientID string) string {
 	id := strings.TrimSpace(serverID)
 	if id == "" {
@@ -1097,6 +1135,8 @@ func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMes
 	log.Printf("[NIM-room] received room=%d channel=%d server=%d id=%s type=%s sender=%d from=%q nick=%q", pocketRoomID, raw.ChannelID, raw.ServerID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID, raw.From, raw.FromNick)
 	if b.shouldDeferRoomRealtimeToREST(msg) {
 		log.Printf("[NIM-room] defer incomplete message to REST room=%d id=%s type=%s sender=%d", pocketRoomID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID)
+	} else if isRoomRealtimeMedia(msg.Type) {
+		b.processRoomRealtimeMedia(msg)
 	} else {
 		b.processMessages([]*pocket48.Message{msg})
 	}
