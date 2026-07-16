@@ -3,6 +3,7 @@ package logic
 import (
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,6 +283,46 @@ func TestRoomRealtimeMediaClassification(t *testing.T) {
 	}
 	if isRoomRealtimeMedia(pocket48.MsgText) || isRoomRealtimeMedia(pocket48.MsgFlipCard) {
 		t.Fatal("text-only messages should remain synchronous")
+	}
+}
+
+func TestRoomRealtimeTasksPrepareConcurrentlyAndSendInOrder(t *testing.T) {
+	bot := &Bot{roomRealtimeTails: make(map[int64]chan struct{})}
+	firstPrepared := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondPrepared := make(chan struct{})
+	var mu sync.Mutex
+	var sent []int
+
+	bot.enqueueRoomRealtimeTask(101, func() {
+		close(firstPrepared)
+		<-releaseFirst
+	}, func() {
+		mu.Lock()
+		sent = append(sent, 1)
+		mu.Unlock()
+	})
+	<-firstPrepared
+	bot.enqueueRoomRealtimeTask(101, func() {
+		close(secondPrepared)
+	}, func() {
+		mu.Lock()
+		sent = append(sent, 2)
+		mu.Unlock()
+	})
+
+	select {
+	case <-secondPrepared:
+	case <-time.After(time.Second):
+		t.Fatal("second task did not prepare while the first was blocked")
+	}
+	close(releaseFirst)
+	bot.roomMediaWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(sent, []int{1, 2}) {
+		t.Fatalf("tasks sent out of order: %v", sent)
 	}
 }
 

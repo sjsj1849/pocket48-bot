@@ -128,6 +128,16 @@ func (b *Bot) downloadMedia(url string) (string, error) {
 	if _, err := os.Stat(localPath); err == nil {
 		return localPath, nil
 	}
+	// Extension-less CDN URLs are initially guessed as .dat, then saved using
+	// their response Content-Type. A realtime prefetch must find that refined
+	// path without issuing another request just to rediscover the extension.
+	if matches, err := filepath.Glob(filepath.Join(mediaCacheDir, filename[:32]+".*")); err == nil {
+		for _, match := range matches {
+			if info, statErr := os.Stat(match); statErr == nil && !info.IsDir() {
+				return match, nil
+			}
+		}
+	}
 
 	// Download and retain enough timing detail to distinguish CDN latency from
 	// local processing when a media message is slow.
