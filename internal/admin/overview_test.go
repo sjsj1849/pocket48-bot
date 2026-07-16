@@ -26,3 +26,19 @@ func TestCleanLogMessageTruncatesLongContent(t *testing.T) {
 		t.Fatalf("message length = %d, want at most 121", len([]rune(message)))
 	}
 }
+
+func TestDouyinInitMissingIsConnectingNotLoginRequired(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/16 12:00:02 [Douyin-IM] status=init_missing message=retrying",
+	})
+	for _, state := range states {
+		if state.ID != "douyin_im" {
+			continue
+		}
+		if state.StatusText != "未连接" || state.LastEvent != "新版网页未提供 IM 初始化接口" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("Douyin state not found")
+}

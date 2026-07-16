@@ -66,8 +66,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	services := buildServiceStates(lines)
 	attentionItems := make([]attention, 0, 2)
 	for _, item := range services {
-		if item.ID == "douyin" && item.Status != "healthy" {
-			attentionItems = append(attentionItems, attention{ID: "douyin-auth", Title: "Douyin IM 需要浏览器验证", Description: "完成验证后恢复肥家群主消息转发", Action: "打开浏览器", Target: "browser"})
+		if item.ID == "douyin_im" && item.Status != "healthy" {
+			attentionItems = append(attentionItems, attention{ID: "douyin-im", Title: "Douyin 网页 IM 尚未连接", Description: "账号已经登录；新版网页未开放群聊初始化接口，侧卡会继续低频探测", Action: "查看浏览器", Target: "browser"})
 		}
 	}
 	writeJSON(w, http.StatusOK, overviewResponse{
@@ -86,7 +86,8 @@ func buildServiceStates(lines []string) []serviceState {
 		{ID: "qchat", Name: "QChat", Subtitle: "口袋48实时消息", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "WebSocket", LastEvent: "等待连接状态"},
 		{ID: "napcat", Name: "NapCat", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
-		{ID: "douyin", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "待验证", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待浏览器验证"},
+		{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
+		{ID: "douyin_im", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "未连接", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待网页 IM 初始化"},
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
@@ -110,10 +111,20 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("napcat", "healthy", "运行中", "消息发送链路正常")
 		case strings.Contains(line, "[Weibo-auth] status=healthy"):
 			setLatest("weibo", "healthy", "已认证", "认证状态已刷新")
+		case strings.Contains(line, "[Douyin] status=healthy"):
+			setLatest("douyin", "healthy", "已登录", "浏览器账号登录态有效")
+		case strings.Contains(line, "[Douyin] status=login_required"):
+			setLatest("douyin", "attention", "待登录", "浏览器账号需要登录")
 		case strings.Contains(line, "[Douyin-IM] status=connected"):
-			setLatest("douyin", "healthy", "运行中", "群聊只读连接已建立")
+			setLatest("douyin_im", "healthy", "运行中", "群聊只读连接已建立")
 		case strings.Contains(line, "[Douyin-IM] status=init_missing"):
-			setLatest("douyin", "attention", "待验证", "需要手动完成浏览器验证")
+			setLatest("douyin_im", "attention", "未连接", "新版网页未提供 IM 初始化接口")
+		case strings.Contains(line, "[Douyin-IM] status=disconnected"):
+			setLatest("douyin_im", "attention", "重连中", "群聊连接已断开，正在自动重连")
+		case strings.Contains(line, "[Douyin-IM] status=group_not_found"), strings.Contains(line, "[Douyin-IM] status=group_ambiguous"):
+			setLatest("douyin_im", "attention", "待配置", "未唯一匹配目标群聊")
+		case strings.Contains(line, "[Douyin-IM] status=error"):
+			setLatest("douyin_im", "down", "连接异常", "群聊连接发生错误")
 		}
 	}
 	return states

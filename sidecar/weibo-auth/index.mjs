@@ -24,11 +24,13 @@ let refreshTimer;
 let douyinTimer;
 let douyinSpecialFollowTimer;
 let douyinIMReconnectTimer;
+let douyinIMInitRetryTimer;
 let douyinIMSocket;
 let refreshRunning = false;
 let douyinScanning = false;
 let douyinSpecialFollowScanning = false;
 let douyinIMStarting = false;
+let douyinIMInitRunning = false;
 let qrRunning = false;
 let shuttingDown = false;
 let lastQRCodeAt = 0;
@@ -201,6 +203,8 @@ async function getDouyinIMPage() {
 function stopDouyinIM() {
   clearTimeout(douyinIMReconnectTimer);
   douyinIMReconnectTimer = undefined;
+  clearTimeout(douyinIMInitRetryTimer);
+  douyinIMInitRetryTimer = undefined;
   if (douyinIMSocket) {
     const socket = douyinIMSocket;
     douyinIMSocket = undefined;
@@ -208,6 +212,15 @@ function stopDouyinIM() {
     socket.close();
   }
   douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '' };
+}
+
+function scheduleDouyinIMInitRetry() {
+  clearTimeout(douyinIMInitRetryTimer);
+  if (shuttingDown || !settings.douyinIMEnabled || douyinIMIdentity.selfUid) return;
+  douyinIMInitRetryTimer = setTimeout(() => {
+    douyinIMInitRetryTimer = undefined;
+    void startDouyinIM();
+  }, 60_000);
 }
 
 function scheduleDouyinIMReconnect() {
@@ -298,17 +311,22 @@ async function connectDouyinIM() {
 }
 
 async function startDouyinIM() {
-  if (!settings.douyinIMEnabled || shuttingDown || douyinIMStarting) return;
-  const targetPage = await getDouyinIMPage();
+  if (!settings.douyinIMEnabled || shuttingDown || douyinIMInitRunning || douyinIMIdentity.selfUid) return;
+  douyinIMInitRunning = true;
+  clearTimeout(douyinIMInitRetryTimer);
+  douyinIMInitRetryTimer = undefined;
+  let targetPage;
   const targetGroupName = String(settings.douyinIMGroupName || '').trim();
   const targetGroupNumber = String(settings.douyinIMGroupNumber || '').trim();
   let initSeen = false;
+  let initReady = false;
   const onResponse = async (response) => {
     if (!response.url().includes('get_message_by_init')) return;
     initSeen = true;
     try {
       const decoded = decodeDouyinIMInit(await response.body());
       if (!decoded.selfUid || decoded.groups.length === 0) return;
+      initReady = true;
       const nameMatches = targetGroupName
         ? decoded.groups.filter((item) => item.name === targetGroupName || item.name.includes(targetGroupName))
         : [];
@@ -341,18 +359,28 @@ async function startDouyinIM() {
       log(`Douyin IM init decode failed: ${error.message}`);
     }
   };
-  targetPage.on('response', onResponse);
   try {
+    targetPage = await getDouyinIMPage();
+    const loggedIn = await douyinBrowserLoggedIn();
+    emit('douyin_status', {
+      status: loggedIn ? 'healthy' : 'login_required',
+      message: loggedIn ? '抖音浏览器已登录' : '抖音浏览器需要登录',
+    });
+    context.on('response', onResponse);
     await targetPage.goto('https://www.douyin.com/follow', { waitUntil: 'domcontentloaded', timeout: 45_000 });
     await targetPage.waitForTimeout(8_000);
     if (!initSeen) {
       emit('douyin_im_status', {
         status: 'init_missing',
-        message: `抖音消息初始化接口未触发，当前页面：${targetPage.url()}`,
+        message: `抖音网页 IM 初始化接口未出现，60 秒后自动探测；当前页面：${targetPage.url()}`,
       });
     }
+  } catch (error) {
+    emit('douyin_im_status', { status: 'error', message: `群聊初始化失败：${error.message}` });
   } finally {
-    targetPage.off('response', onResponse);
+    context?.off('response', onResponse);
+    douyinIMInitRunning = false;
+    if (!initReady) scheduleDouyinIMInitRetry();
   }
 }
 
@@ -512,14 +540,20 @@ function scheduleDouyin() {
   douyinTimer = setInterval(() => void scanAllDouyin(), seconds * 1000);
 }
 
+async function douyinBrowserLoggedIn() {
+  await startBrowser();
+  const cookies = new Map((await context.cookies()).map((cookie) => [cookie.name, cookie.value]));
+  return cookies.get('LOGIN_STATUS') === '1' || Boolean(cookies.get('sessionid') || cookies.get('sessionid_ss'));
+}
+
 async function requestDouyinLoginQRCode() {
   const targetPage = await getDouyinPage();
   await targetPage.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-  let cookies = new Map((await context.cookies()).map((cookie) => [cookie.name, cookie.value]));
-  if (cookies.get('LOGIN_STATUS') === '1' || cookies.get('sessionid') || cookies.get('sessionid_ss')) {
+  if (await douyinBrowserLoggedIn()) {
     emit('douyin_status', { status: 'healthy', message: '抖音浏览器已登录' });
     return;
   }
+  let cookies = new Map((await context.cookies()).map((cookie) => [cookie.name, cookie.value]));
   for (const selector of ['text=登录', '[data-e2e="login-button"]']) {
     try { await targetPage.locator(selector).first().click({ timeout: 3_000 }); break; } catch {}
   }
