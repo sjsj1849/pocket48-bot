@@ -24,6 +24,15 @@ func TestUnseenDouyinPosts(t *testing.T) {
 	}
 }
 
+func TestCanonicalDouyinPostURL(t *testing.T) {
+	if got := canonicalDouyinPostURL(douyinPost{ID: "123", Type: "note", URL: "https://example.com/long"}); got != "https://www.douyin.com/note/123" {
+		t.Fatalf("note URL=%q", got)
+	}
+	if got := canonicalDouyinPostURL(douyinPost{ID: "456", Type: "video"}); got != "https://www.douyin.com/video/456" {
+		t.Fatalf("video URL=%q", got)
+	}
+}
+
 func TestExtractDouyinOnline(t *testing.T) {
 	body := map[string]interface{}{"payload": map[string]interface{}{"onlineUserForAnchor": "321"}}
 	if got := extractDouyinOnline(body); got != 321 {

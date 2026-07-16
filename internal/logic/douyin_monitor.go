@@ -582,6 +582,17 @@ func truncateRunes(text string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
+func canonicalDouyinPostURL(post douyinPost) string {
+	if post.ID == "" {
+		return post.URL
+	}
+	kind := "video"
+	if post.Type == "note" {
+		kind = "note"
+	}
+	return fmt.Sprintf("https://www.douyin.com/%s/%s", kind, post.ID)
+}
+
 func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, post douyinPost) {
 	name := strings.TrimSpace(post.Nickname)
 	if name == "" {
@@ -598,15 +609,12 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 	if post.Desc != "" {
 		lines = append(lines, truncateRunes(post.Desc, 600))
 	}
-	if post.CreateTime > 0 {
-		lines = append(lines, time.Unix(post.CreateTime, 0).Format("2006-01-02 15:04:05"))
-	}
-	lines = append(lines, post.URL)
-	segments := make([]interface{}, 0, 3)
+	lines = append(lines, "", "抖音链接："+canonicalDouyinPostURL(post))
+	segments := make([]interface{}, 0, 12)
 	if item.AtAll {
 		segments = append(segments, napcat.AtSegment("all"))
 	}
-	segments = append(segments, napcat.TextSegment(strings.Join(lines, "\n")))
+	segments = append(segments, napcat.TextSegment(strings.Join(lines, "\n")+"\n"))
 	images := post.Images
 	if len(images) == 0 && post.Cover != "" {
 		images = []string{post.Cover}
@@ -616,6 +624,9 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 			break
 		}
 		segments = append(segments, napcat.ImageSegment(image))
+	}
+	if post.CreateTime > 0 {
+		segments = append(segments, napcat.TextSegment("\n"+time.Unix(post.CreateTime, 0).Format("2006-01-02 15:04:05")))
 	}
 	m.napcat.SendGroupMessage(groupID, segments)
 }
