@@ -221,6 +221,7 @@ type Bot struct {
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
 	lastWeiboAuthErrorAt   time.Time
+	weiboAutoSignMu        sync.Mutex
 	mu                     sync.RWMutex
 
 	isMonitoring      bool
@@ -446,11 +447,6 @@ func (b *Bot) Start() error {
 			}
 		}
 		b.weiboMonitor.Start()
-	}
-	// 启动时强制重试自动签到：清除上次运行日期标记，让 runWeiboSuperAutoSignLoop()
-	// 启动后立即调用 tryWeiboSuperAutoSign() 时不会因同一天而跳过
-	if b.cfg.WeiboSuperAutoEnabled {
-		b.cfg.WeiboSuperLastRunDate = ""
 	}
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()

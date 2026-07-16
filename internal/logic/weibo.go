@@ -391,9 +391,6 @@ func (b *Bot) updateWeiboAppAuth(appCfg *config.WeiboAppConfig) error {
 	copied := *appCfg
 	b.cfg.WeiboApp = &copied
 
-	// 导入新 AppAuth 后重置自动签到日期，让下一个 15 分钟 tick 重试自动签到
-	b.cfg.WeiboSuperLastRunDate = ""
-
 	// 注意：不再自动从 gsid 推导 weibo.com Cookie。
 	// gsid（App 用）与 weibo.com Cookie（浏览器用）分属不同认证体系，
 	// 混合字段会导致签名不匹配，签到必失败。Cookie 需要单独导入。
@@ -541,9 +538,6 @@ func (b *Bot) updateWeiboCookie(operatorID int64, rawCookie string) (string, err
 	b.cfg.WeiboCookie = cookie
 	b.weiboMonitor.SetCookie(cookie)
 
-	// 导入新 Cookie 后重置自动签到日期，让下一个 15 分钟 tick 重试自动签到
-	b.cfg.WeiboSuperLastRunDate = ""
-
 	// 自动同步到 MWeiboCookie（同一个 SUB token 可同时用于两个域名）
 	if b.cfg.WeiboMWeiboCookie == "" || b.cfg.WeiboMWeiboCookie != cookie {
 		b.cfg.WeiboMWeiboCookie = cookie
@@ -643,6 +637,9 @@ func (b *Bot) runWeiboSuperAutoSignLoop() {
 
 // tryWeiboSuperAutoSign 单次自动签到尝试，提取为独立方法供启动立即调用
 func (b *Bot) tryWeiboSuperAutoSign() {
+	b.weiboAutoSignMu.Lock()
+	defer b.weiboAutoSignMu.Unlock()
+
 	if !b.cfg.WeiboSuperAutoEnabled {
 		return
 	}
@@ -2283,9 +2280,6 @@ func (b *Bot) handleWeiboSuperCommand(event *napcat.Event, args []string) string
 			return "格式错误: weibo super auto <on/off>"
 		}
 		b.cfg.WeiboSuperAutoEnabled = toggle == "on"
-		if b.cfg.WeiboSuperAutoEnabled {
-			b.cfg.WeiboSuperLastRunDate = ""
-		}
 		if err := b.cfg.Save(); err != nil {
 			return fmt.Sprintf("保存失败: %v", err)
 		}
