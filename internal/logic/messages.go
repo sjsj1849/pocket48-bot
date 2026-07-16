@@ -74,7 +74,7 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 		return false
 	}
 	if b.cfg.NIMRoomMessageEnabled {
-		if b.nimDanmaku.RoomRealtimeAvailable(roomID) {
+		if b.nimDanmaku.RoomRealtimeActive(roomID) {
 			return false
 		}
 		if !b.cfg.NIMRoomMessagePollFallback {
