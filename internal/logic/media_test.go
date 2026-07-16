@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"pocket48-bot/internal/pocket48"
 )
 
 func TestDownloadMediaFindsRefinedExtensionCache(t *testing.T) {
@@ -23,5 +25,13 @@ func TestDownloadMediaFindsRefinedExtensionCache(t *testing.T) {
 	}
 	if got != cached {
 		t.Fatalf("downloadMedia returned %q, want %q", got, cached)
+	}
+}
+
+func TestQChatMediaUsesDirectNapCatURL(t *testing.T) {
+	url := "https://invalid.example/qchat-direct-media-test.jpg"
+	msg := &pocket48.Message{MsgIDServer: "direct", Type: pocket48.MsgImage, DirectMedia: true}
+	if got := (&Bot{}).mediaPathForMessage(msg, url); got != url {
+		t.Fatalf("mediaPathForMessage returned %q, want direct URL %q", got, url)
 	}
 }

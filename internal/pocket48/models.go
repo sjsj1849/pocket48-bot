@@ -84,6 +84,7 @@ type Message struct {
 	Body        string      `json:"body"`
 	Time        int64       `json:"time"`
 	RawExt      string      `json:"-"`
+	DirectMedia bool        `json:"-"`
 	ExtInfo     ExtInfo     `json:"extInfo,omitempty"`
 }
 

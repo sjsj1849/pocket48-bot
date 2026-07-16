@@ -14,6 +14,18 @@ import (
 	"pocket48-bot/internal/pocket48"
 )
 
+func (b *Bot) mediaPathForMessage(msg *pocket48.Message, mediaURL string) string {
+	mediaURL = normalizeMediaURL(strings.TrimSpace(mediaURL))
+	if mediaURL == "" {
+		return ""
+	}
+	if msg != nil && msg.DirectMedia && (strings.HasPrefix(mediaURL, "https://") || strings.HasPrefix(mediaURL, "http://")) {
+		log.Printf("[Media] Direct URL via NapCat id=%s type=%s url=%s", msg.MsgIDServer, msg.Type, mediaURL)
+		return mediaURL
+	}
+	return b.localMediaPath(mediaURL)
+}
+
 func (b *Bot) shouldPollRoomMessages() bool {
 	return !b.cfg.NIMRoomMessageEnabled || b.cfg.NIMRoomMessagePollFallback
 }
@@ -467,7 +479,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 			segments = appendTextWithQQFaces(segments, prefix+displayText+"\n")
 			break
 		}
-		voiceURL = b.localMediaPath(voiceURL)
+		voiceURL = b.mediaPathForMessage(msg, voiceURL)
 		textSegments := append([]interface{}{}, segments...)
 		if giftText != "" {
 			textSegments = appendTextWithQQFaces(textSegments, giftText+"\n")
@@ -502,14 +514,14 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		}
 
 	case pocket48.MsgImage, pocket48.MsgExpressImage:
-		imageURL := b.localMediaPath(b.extractImageURL(msg.Body))
+		imageURL := b.mediaPathForMessage(msg, b.extractImageURL(msg.Body))
 		if imageURL != "" {
 			segments = append(segments, napcat.TextSegment(prefix))
 			segments = append(segments, napcat.ImageSegment(imageURL))
 		}
 
 	case pocket48.MsgVideo:
-		videoURL := b.localMediaPath(b.extractVideoURL(msg.Body))
+		videoURL := b.mediaPathForMessage(msg, b.extractVideoURL(msg.Body))
 		if videoURL != "" {
 			segments = append(segments, napcat.VideoSegment(videoURL, ""))
 		}
@@ -544,7 +556,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		if title == "" {
 			title = "直播开始了"
 		}
-		cover = b.localMediaPath(normalizeMediaURL(cover))
+		cover = b.mediaPathForMessage(msg, cover)
 		segments = []interface{}{
 			napcat.AtSegment("all"),
 			napcat.TextSegment(fmt.Sprintf("\n%s直播啦！—— %s\n", room.OwnerName, title)),
@@ -558,7 +570,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		return
 
 	case pocket48.MsgAudio:
-		audioURL := b.localMediaPath(b.extractAudioURL(msg.Body))
+		audioURL := b.mediaPathForMessage(msg, b.extractAudioURL(msg.Body))
 		if audioURL != "" {
 			segments = []interface{}{
 				napcat.TextSegment("【语音消息】"),
@@ -569,7 +581,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 	case pocket48.MsgFlipCardAudio:
 		question, _, _, _ := parseFlipCardBody(msg.Body)
 		idolName := room.OwnerName
-		audioURL := b.localMediaPath(b.extractAudioURL(msg.Body))
+		audioURL := b.mediaPathForMessage(msg, b.extractAudioURL(msg.Body))
 		if audioURL == "" {
 			return
 		}
@@ -583,7 +595,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		if idolName == "" {
 			idolName = "成员"
 		}
-		videoURL := b.localMediaPath(b.extractVideoURL(msg.Body))
+		videoURL := b.mediaPathForMessage(msg, b.extractVideoURL(msg.Body))
 		if videoURL != "" {
 			flipText := ""
 			if ok && question != "" {
@@ -834,7 +846,7 @@ func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr 
 			cover = extCover
 		}
 	}
-	cover = b.localMediaPath(normalizeMediaURL(cover))
+	cover = b.mediaPathForMessage(msg, cover)
 	if title == "" {
 		title = "直播开始了"
 	}

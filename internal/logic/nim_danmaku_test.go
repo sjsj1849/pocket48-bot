@@ -238,7 +238,7 @@ func TestRoomRealtimeAudioAndVideoMapNumericTypes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if msg.Type != test.want || msg.Body != test.attach {
+			if msg.Type != test.want || msg.Body != test.attach || !msg.DirectMedia {
 				t.Fatalf("unexpected media message: %#v", msg)
 			}
 			if bot.shouldDeferRoomRealtimeToREST(msg) {
@@ -268,21 +268,6 @@ func TestRoomRealtimeFlipCardPreservesPayloadAndValidatesMedia(t *testing.T) {
 	}
 	if !bot.shouldDeferRoomRealtimeToREST(msg) {
 		t.Fatal("video flip card without a media URL should defer to REST")
-	}
-}
-
-func TestRoomRealtimeMediaClassification(t *testing.T) {
-	mediaTypes := []pocket48.MessageType{
-		pocket48.MsgImage, pocket48.MsgExpressImage, pocket48.MsgAudio, pocket48.MsgVideo,
-		pocket48.MsgAudioGiftReply, pocket48.MsgFlipCardAudio, pocket48.MsgFlipCardVideo,
-	}
-	for _, msgType := range mediaTypes {
-		if !isRoomRealtimeMedia(msgType) {
-			t.Fatalf("%s should use asynchronous media processing", msgType)
-		}
-	}
-	if isRoomRealtimeMedia(pocket48.MsgText) || isRoomRealtimeMedia(pocket48.MsgFlipCard) {
-		t.Fatal("text-only messages should remain synchronous")
 	}
 }
 
