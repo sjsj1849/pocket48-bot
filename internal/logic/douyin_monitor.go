@@ -380,6 +380,9 @@ func (m *DouyinMonitor) HandleBrowserEvent(event douyinBrowserEvent) {
 		log.Printf("[Douyin] %s %s: %s", event.Type, event.SecUserID, event.Message)
 	case "status":
 		log.Printf("[Douyin] status=%s message=%s", event.Status, event.Message)
+		if event.Status == "login_error" {
+			m.notifyAdmins("⚠️ 抖音登录二维码生成失败：" + event.Message)
+		}
 	}
 }
 
