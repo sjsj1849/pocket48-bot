@@ -630,6 +630,23 @@ func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48
 	}
 	msgType := strings.ToUpper(strings.TrimSpace(m.Type))
 	body := m.Body
+	switch msgType {
+	case "0":
+		msgType = string(pocket48.MsgText)
+	case "1":
+		msgType = string(pocket48.MsgImage)
+	case "2":
+		msgType = string(pocket48.MsgAudio)
+	case "3":
+		msgType = string(pocket48.MsgVideo)
+	}
+	if msgType == string(pocket48.MsgImage) && hasQChatMediaURL(string(m.Attach), []string{"url", "image", "img", "pic", "path", "originUrl", "sourceUrl", "thumbUrl"}) {
+		body = string(m.Attach)
+	} else if msgType == string(pocket48.MsgAudio) && hasQChatMediaURL(string(m.Attach), []string{"url", "audio", "voice", "path", "originUrl", "sourceUrl"}) {
+		body = string(m.Attach)
+	} else if msgType == string(pocket48.MsgVideo) && hasQChatMediaURL(string(m.Attach), []string{"url", "video", "videoUrl", "path", "originUrl", "sourceUrl", "playUrl"}) {
+		body = string(m.Attach)
+	}
 	if strings.EqualFold(m.Type, "custom") {
 		attach, err := decodeRawObject(m.Attach)
 		if err != nil {
@@ -881,7 +898,46 @@ func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket
 }
 
 func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
-	return msg != nil && msg.ExtInfo.User.UserID == 0 && b.cfg.NIMRoomMessagePollFallback
+	if msg == nil || !b.cfg.NIMRoomMessagePollFallback {
+		return false
+	}
+	if msg.ExtInfo.User.UserID == 0 {
+		return true
+	}
+	switch msg.Type {
+	case pocket48.MsgText:
+		return strings.TrimSpace(msg.Body) == ""
+	case pocket48.MsgImage, pocket48.MsgExpressImage:
+		return !hasQChatMediaURL(msg.Body, []string{"url", "image", "img", "pic", "path", "originUrl", "sourceUrl", "thumbUrl"})
+	case pocket48.MsgAudio:
+		return !hasQChatMediaURL(msg.Body, []string{"url", "audio", "voice", "path", "originUrl", "sourceUrl"})
+	case pocket48.MsgVideo:
+		return !hasQChatMediaURL(msg.Body, []string{"url", "video", "videoUrl", "path", "originUrl", "sourceUrl", "playUrl"})
+	case pocket48.MsgReply, pocket48.MsgGiftReply, pocket48.MsgAudioGiftReply,
+		pocket48.MsgGiftText, pocket48.MsgFlipCard, pocket48.MsgFlipCardAudio,
+		pocket48.MsgFlipCardVideo, pocket48.MsgLivePush:
+		return strings.TrimSpace(msg.Body) == ""
+	default:
+		return true
+	}
+}
+
+func hasQChatMediaURL(body string, keys []string) bool {
+	body = strings.TrimSpace(body)
+	if body == "" || body == "null" {
+		return false
+	}
+	if strings.HasPrefix(body, "http://") || strings.HasPrefix(body, "https://") || strings.HasPrefix(body, "//") || strings.HasPrefix(body, "/") {
+		return true
+	}
+	if !strings.HasPrefix(body, "{") && !strings.HasPrefix(body, "[") {
+		return false
+	}
+	var payload interface{}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return false
+	}
+	return strings.TrimSpace(findStringField(payload, keys)) != ""
 }
 
 func qchatIdentityMessageKey(roomID int64, serverID, clientID string) string {
@@ -1070,7 +1126,7 @@ func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMes
 	b.resolveQChatOwnerIdentity(room, raw, msg)
 	log.Printf("[NIM-room] received room=%d channel=%d server=%d id=%s type=%s sender=%d from=%q nick=%q", pocketRoomID, raw.ChannelID, raw.ServerID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID, raw.From, raw.FromNick)
 	if b.shouldDeferRoomRealtimeToREST(msg) {
-		log.Printf("[NIM-room] defer unresolved sender to REST room=%d id=%s", pocketRoomID, msg.MsgIDServer)
+		log.Printf("[NIM-room] defer incomplete message to REST room=%d id=%s type=%s sender=%d", pocketRoomID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID)
 	} else {
 		b.processMessages([]*pocket48.Message{msg})
 	}
