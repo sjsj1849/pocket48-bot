@@ -35,6 +35,7 @@ type NimDanmakuBridge struct {
 	connectedLives map[int64]bool
 	realtimeRooms  map[int64]int64 // QChat channel id -> Pocket48 channel id
 	qchatConnected bool
+	lastRealtimeMsgAt map[int64]time.Time // per-room last realtime message time (UTC)
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
@@ -134,6 +135,7 @@ func NewNimDanmakuBridge(cfg *config.Config) *NimDanmakuBridge {
 		liveBindings:   make(map[int64]int64),
 		connectedLives: make(map[int64]bool),
 		realtimeRooms:  make(map[int64]int64),
+		lastRealtimeMsgAt: make(map[int64]time.Time),
 		stopCh:         make(chan struct{}),
 	}
 }
@@ -430,6 +432,23 @@ func (b *NimDanmakuBridge) RoomRealtimeAvailable(pocketRoomID int64) bool {
 		}
 	}
 	return false
+}
+
+// RoomRealtimeActive returns true only if QChat is connected AND we have
+// received a realtime message for this room within the last 5 minutes.
+// Unlike RoomRealtimeAvailable which only checks the connection state,
+// this ensures we skip polling only when QChat is actually delivering messages.
+func (b *NimDanmakuBridge) RoomRealtimeActive(pocketRoomID int64) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if !b.qchatConnected {
+		return false
+	}
+	lastAt, ok := b.lastRealtimeMsgAt[pocketRoomID]
+	if !ok {
+		return false
+	}
+	return time.Since(lastAt) < 5*time.Minute
 }
 
 func (b *NimDanmakuBridge) HasLiveBinding(pocketRoomID, nimRoomID int64) bool {
@@ -735,6 +754,7 @@ func (b *Bot) refreshNIMRoomSubscriptions() {
 			log.Printf("[NIM-room] cannot resolve room %d for subscription: %v", roomID, err)
 			continue
 		}
+		log.Printf("[NIM-room] resolved room %d: serverId=%d channelId=%d owner=%s", roomID, info.ServerID, info.ChannelID, info.OwnerName)
 		subscriptions = append(subscriptions, RoomSubscription{
 			ServerID: info.ServerID, ChannelID: info.ChannelID, PocketRoomID: roomID,
 		})
@@ -870,10 +890,8 @@ func (b *Bot) handleRoomRealtimeMessage(raw *RoomRealtimeMessage) {
 	if msg.Time > b.lastMsgTime[raw.ChannelID] {
 		b.lastMsgTime[raw.ChannelID] = msg.Time
 	}
+	b.nimDanmaku.lastRealtimeMsgAt[raw.ChannelID] = time.Now()
 	b.mu.Unlock()
-	if b.storage != nil {
-		_ = b.storage.SaveCursor(raw.ChannelID, msg.MsgIDServer, msg.Time)
-	}
 }
 
 func (b *Bot) handleDanmakuMessage(roomID int64, d *DanmakuMessage) {
