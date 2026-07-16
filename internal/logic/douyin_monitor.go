@@ -42,38 +42,31 @@ type douyinPost struct {
 	Images     []string `json:"images"`
 }
 
-type douyinSpecialAccount struct {
-	SecUserID  string `json:"secUserId"`
-	Name       string `json:"name"`
-	ProfileURL string `json:"profileUrl"`
-}
-
 type douyinBrowserEvent struct {
-	Type             string                 `json:"type"`
-	SecUserID        string                 `json:"secUserId"`
-	ProfileURL       string                 `json:"profileUrl"`
-	Nickname         string                 `json:"nickname"`
-	LiveID           string                 `json:"liveId"`
-	Posts            []douyinPost           `json:"posts"`
-	ImageBase64      string                 `json:"imageBase64"`
-	ExpiresIn        int                    `json:"expiresIn"`
-	Status           string                 `json:"status"`
-	Message          string                 `json:"message"`
-	Accounts         []douyinSpecialAccount `json:"accounts"`
-	GroupName        string                 `json:"groupName"`
-	GroupNumber      string                 `json:"groupNumber"`
-	ConversationID   string                 `json:"conversationId"`
-	ConversationType int                    `json:"conversationType"`
-	OwnerUID         string                 `json:"ownerUid"`
-	SelfUID          string                 `json:"selfUid"`
-	SenderUID        string                 `json:"senderUid"`
-	SenderSecUID     string                 `json:"senderSecUid"`
-	SenderName       string                 `json:"senderName"`
-	ServerMessageID  string                 `json:"serverMessageId"`
-	MessageType      int                    `json:"messageType"`
-	Text             string                 `json:"text"`
-	Link             string                 `json:"link"`
-	Index            string                 `json:"index"`
+	Type             string       `json:"type"`
+	SecUserID        string       `json:"secUserId"`
+	ProfileURL       string       `json:"profileUrl"`
+	Nickname         string       `json:"nickname"`
+	LiveID           string       `json:"liveId"`
+	Posts            []douyinPost `json:"posts"`
+	ImageBase64      string       `json:"imageBase64"`
+	ExpiresIn        int          `json:"expiresIn"`
+	Status           string       `json:"status"`
+	Message          string       `json:"message"`
+	GroupName        string       `json:"groupName"`
+	GroupNumber      string       `json:"groupNumber"`
+	ConversationID   string       `json:"conversationId"`
+	ConversationType int          `json:"conversationType"`
+	OwnerUID         string       `json:"ownerUid"`
+	SelfUID          string       `json:"selfUid"`
+	SenderUID        string       `json:"senderUid"`
+	SenderSecUID     string       `json:"senderSecUid"`
+	SenderName       string       `json:"senderName"`
+	ServerMessageID  string       `json:"serverMessageId"`
+	MessageType      int          `json:"messageType"`
+	Text             string       `json:"text"`
+	Link             string       `json:"link"`
+	Index            string       `json:"index"`
 }
 
 type douyinLiveState struct {
@@ -365,8 +358,6 @@ func (m *DouyinMonitor) HandleBrowserEvent(event douyinBrowserEvent) {
 		m.handlePosts(event)
 	case "qrcode":
 		m.handleQRCode(event)
-	case "special_follows":
-		m.handleSpecialFollows(event.Accounts)
 	case "im_group":
 		m.handleIMGroup(event)
 	case "im_message":
@@ -455,70 +446,6 @@ func classifyDouyinIMEvent(event douyinBrowserEvent, conversationID, ownerUID, s
 		}
 	}
 	return ""
-}
-
-func (m *DouyinMonitor) handleSpecialFollows(accounts []douyinSpecialAccount) {
-	if !m.cfg.DouyinSpecialFollowEnabled || m.cfg.BoundGroupID == 0 {
-		return
-	}
-	desired := make(map[string]douyinSpecialAccount, len(accounts))
-	for _, account := range accounts {
-		sec := strings.TrimSpace(account.SecUserID)
-		if sec != "" {
-			account.SecUserID = sec
-			desired[sec] = account
-		}
-	}
-	m.mu.Lock()
-	if m.cfg.DouyinSubscriptions == nil {
-		m.cfg.DouyinSubscriptions = make(map[int64]map[string]*config.DouyinConfig)
-	}
-	group := m.cfg.DouyinSubscriptions[m.cfg.BoundGroupID]
-	if group == nil {
-		group = make(map[string]*config.DouyinConfig)
-		m.cfg.DouyinSubscriptions[m.cfg.BoundGroupID] = group
-	}
-	changed := false
-	for sec, item := range group {
-		if item != nil && item.Auto {
-			if _, ok := desired[sec]; !ok {
-				delete(group, sec)
-				changed = true
-			}
-		}
-	}
-	for sec, account := range desired {
-		item := group[sec]
-		if item == nil {
-			group[sec] = &config.DouyinConfig{
-				SecUserID: sec, ProfileURL: account.ProfileURL, Name: account.Name, Auto: true,
-			}
-			changed = true
-			continue
-		}
-		if item.Auto && (item.Name != account.Name || item.ProfileURL != account.ProfileURL) {
-			item.Name = account.Name
-			item.ProfileURL = account.ProfileURL
-			changed = true
-		}
-	}
-	if len(group) == 0 {
-		delete(m.cfg.DouyinSubscriptions, m.cfg.BoundGroupID)
-	}
-	m.mu.Unlock()
-	if !changed {
-		return
-	}
-	if err := m.cfg.Save(); err != nil {
-		log.Printf("[Douyin] save special-follow subscriptions: %v", err)
-		return
-	}
-	log.Printf("[Douyin] synchronized %d special-follow accounts", len(desired))
-	go func() {
-		if err := m.Sync(); err != nil {
-			log.Printf("[Douyin] resync after special-follow update: %v", err)
-		}
-	}()
 }
 
 func (m *DouyinMonitor) handleAccount(event douyinBrowserEvent) {

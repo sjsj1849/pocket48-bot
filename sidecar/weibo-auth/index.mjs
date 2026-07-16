@@ -17,18 +17,15 @@ let context;
 let browserStartPromise;
 let page;
 let douyinPage;
-let douyinFollowPage;
 let douyinIMPage;
 let statePath;
 let refreshTimer;
 let douyinTimer;
-let douyinSpecialFollowTimer;
 let douyinIMReconnectTimer;
 let douyinIMInitRetryTimer;
 let douyinIMSocket;
 let refreshRunning = false;
 let douyinScanning = false;
-let douyinSpecialFollowScanning = false;
 let douyinIMStarting = false;
 let douyinIMInitRunning = false;
 let qrRunning = false;
@@ -45,9 +42,6 @@ let settings = {
   douyinEnabled: false,
   douyinPollSeconds: 60,
   douyinAccounts: [],
-  douyinSpecialFollowEnabled: false,
-  douyinSpecialFollowMinutes: 30,
-  douyinSpecialFollowIds: [],
   douyinIMEnabled: false,
   douyinIMPrivateEnabled: false,
   douyinIMGroupName: '',
@@ -180,15 +174,6 @@ async function getDouyinPage() {
     douyinPage.setDefaultTimeout(15_000);
   }
   return douyinPage;
-}
-
-async function getDouyinFollowPage() {
-  await startBrowser();
-  if (!douyinFollowPage || douyinFollowPage.isClosed()) {
-    douyinFollowPage = await context.newPage();
-    douyinFollowPage.setDefaultTimeout(15_000);
-  }
-  return douyinFollowPage;
 }
 
 async function getDouyinIMPage() {
@@ -342,6 +327,7 @@ async function startDouyinIM() {
         ownerUid: group?.ownerUid || '',
         groupName: group?.name || targetGroupName,
       };
+      await persistStorageState();
       if (group) {
         emit('douyin_im_group', {
           groupName: group.name,
@@ -385,71 +371,6 @@ async function startDouyinIM() {
     douyinIMInitRunning = false;
     if (!initReady) scheduleDouyinIMInitRetry();
   }
-}
-
-async function scanDouyinSpecialFollows() {
-  if (douyinSpecialFollowScanning || shuttingDown || !settings.douyinSpecialFollowEnabled) return;
-  douyinSpecialFollowScanning = true;
-  const accounts = new Map();
-  const matchedIdentifiers = new Set();
-  const targetPage = await getDouyinFollowPage();
-  const identifiers = [...new Set((settings.douyinSpecialFollowIds || [])
-    .map((item) => String(item || '').trim()).filter(Boolean))];
-  const wanted = new Map(identifiers.map((item) => [item.toLowerCase(), item]));
-  let followingResponses = 0;
-  const onResponse = async (response) => {
-    if (!response.url().includes('/aweme/v1/web/user/following/list/')) return;
-    try {
-      const body = await response.json();
-      followingResponses += 1;
-      for (const user of body?.followings || []) {
-        const candidateIds = [user?.unique_id, user?.short_id, user?.uid]
-          .map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
-        const matched = candidateIds.find((item) => wanted.has(item));
-        if (!matched || !user?.sec_uid) continue;
-        matchedIdentifiers.add(wanted.get(matched));
-        accounts.set(String(user.sec_uid), {
-          secUserId: String(user.sec_uid),
-          name: String(user.nickname || ''),
-          profileUrl: `https://www.douyin.com/user/${encodeURIComponent(user.sec_uid)}`,
-        });
-      }
-    } catch {}
-  };
-  targetPage.on('response', onResponse);
-  try {
-    if (identifiers.length === 0) throw new Error('未配置 DOUYIN_SPECIAL_FOLLOW_IDS');
-    await targetPage.goto('https://www.douyin.com/user/self', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    await targetPage.waitForTimeout(3_000);
-    await targetPage.locator('[data-e2e="user-info-follow"]').first().click({ timeout: 8_000 });
-    let unchanged = 0;
-    let previousResponses = -1;
-    for (let index = 0; index < 30 && unchanged < 4 && matchedIdentifiers.size < identifiers.length; index += 1) {
-      await targetPage.mouse.wheel(0, 8_000);
-      await targetPage.waitForTimeout(1_000);
-      if (followingResponses === previousResponses) unchanged += 1;
-      else unchanged = 0;
-      previousResponses = followingResponses;
-    }
-    if (followingResponses === 0) throw new Error('未收到关注列表接口响应');
-    if (matchedIdentifiers.size !== identifiers.length || accounts.size !== identifiers.length) {
-      throw new Error(`特别关注白名单只匹配到 ${matchedIdentifiers.size}/${identifiers.length} 个账号`);
-    }
-    emit('douyin_special_follows', { accounts: [...accounts.values()] });
-  } catch (error) {
-    emit('douyin_status', { status: 'special_follow_error', message: `特别关注同步失败: ${error.message}` });
-  } finally {
-    targetPage.off('response', onResponse);
-    douyinSpecialFollowScanning = false;
-  }
-}
-
-function scheduleDouyinSpecialFollows() {
-  clearInterval(douyinSpecialFollowTimer);
-  if (!settings.douyinSpecialFollowEnabled) return;
-  const minutes = Math.max(10, Number(settings.douyinSpecialFollowMinutes) || 30);
-  douyinSpecialFollowTimer = setInterval(() => void scanDouyinSpecialFollows(), minutes * 60_000);
-  void scanDouyinSpecialFollows();
 }
 
 async function douyinPageSnapshot(targetPage, secUserId) {
@@ -607,7 +528,6 @@ async function requestDouyinLoginQRCode() {
       await persistStorageState();
       emit('douyin_status', { status: 'healthy', message: '抖音浏览器登录成功' });
       void scanAllDouyin();
-      void scanDouyinSpecialFollows();
       void startDouyinIM();
       return;
     }
@@ -757,7 +677,6 @@ async function shutdown() {
   shuttingDown = true;
   clearInterval(refreshTimer);
   clearInterval(douyinTimer);
-  clearInterval(douyinSpecialFollowTimer);
   stopDouyinIM();
   try {
     await persistStorageState();
@@ -785,9 +704,6 @@ wss.on('connection', (socket) => {
             douyinEnabled: command.douyinEnabled === true,
             douyinPollSeconds: command.douyinPollSeconds || settings.douyinPollSeconds,
             douyinAccounts: Array.isArray(command.douyinAccounts) ? command.douyinAccounts : [],
-            douyinSpecialFollowEnabled: command.douyinSpecialFollowEnabled === true,
-            douyinSpecialFollowMinutes: command.douyinSpecialFollowMinutes || settings.douyinSpecialFollowMinutes,
-            douyinSpecialFollowIds: Array.isArray(command.douyinSpecialFollowIds) ? command.douyinSpecialFollowIds : [],
             douyinIMEnabled: command.douyinIMEnabled === true,
             douyinIMPrivateEnabled: command.douyinIMPrivateEnabled === true,
             douyinIMGroupName: command.douyinIMGroupName || '',
@@ -800,7 +716,6 @@ wss.on('connection', (socket) => {
             clearInterval(refreshTimer);
           }
           scheduleDouyin();
-          scheduleDouyinSpecialFollows();
           if (settings.douyinIMEnabled) void startDouyinIM().catch((error) => {
             if (!shuttingDown) emit('douyin_im_status', { status: 'error', message: error.message });
           });

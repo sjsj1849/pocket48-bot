@@ -6,8 +6,6 @@ import WebSocket from 'ws';
 const profileDir = process.env.DOUYIN_PROFILE_DIR || path.resolve('../../storage/weibo-browser-profile');
 const groupNumber = String(process.env.DOUYIN_IM_GROUP_NUMBER || '').trim();
 const groupName = String(process.env.DOUYIN_IM_GROUP_NAME || '').trim();
-const specialFollowIds = String(process.env.DOUYIN_SPECIAL_FOLLOW_IDS || '')
-  .split(',').map((item) => item.trim()).filter(Boolean);
 if (!groupNumber) throw new Error('DOUYIN_IM_GROUP_NUMBER is required');
 const child = spawn(process.execPath, ['index.mjs', '--wsPort=0'], {
   cwd: path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1')),
@@ -17,7 +15,6 @@ const child = spawn(process.execPath, ['index.mjs', '--wsPort=0'], {
 let socket;
 let groupReady = false;
 let imReady = false;
-let specialReady = false;
 const timeout = setTimeout(() => finish(new Error('Douyin IM smoke test timed out')), 120_000);
 
 function finish(error) {
@@ -31,7 +28,7 @@ function finish(error) {
 }
 
 function maybeFinish() {
-  if (!groupReady || !imReady || !specialReady) return;
+  if (!groupReady || !imReady) return;
   process.stdout.write('douyin IM read-only smoke test passed\n');
   finish();
 }
@@ -44,8 +41,6 @@ child.stdout.on('data', (chunk) => {
     socket.on('open', () => socket.send(JSON.stringify({
       cmd: 'start', profileDir, headless: true, weiboEnabled: false,
       douyinEnabled: true, douyinAccounts: [], douyinPollSeconds: 300,
-      douyinSpecialFollowEnabled: true, douyinSpecialFollowMinutes: 30,
-      douyinSpecialFollowIds: specialFollowIds,
       douyinIMEnabled: true, douyinIMPrivateEnabled: true,
       douyinIMGroupName: groupName, douyinIMGroupNumber: groupNumber,
     })));
@@ -58,19 +53,11 @@ child.stdout.on('data', (chunk) => {
       } else if (event.type === 'douyin_im_status' && event.status === 'connected') {
         imReady = true;
         process.stdout.write('douyin IM websocket connected\n');
-      } else if (event.type === 'douyin_special_follows') {
-        if (event.accounts?.length !== specialFollowIds.length) {
-          return finish(new Error(`expected ${specialFollowIds.length} configured Douyin accounts, got ${event.accounts?.length || 0}`));
-        }
-        specialReady = true;
-        process.stdout.write(`douyin special follows: ${event.accounts?.length || 0}\n`);
-      } else if (event.type === 'douyin_status' && event.status === 'special_follow_error') {
-        return finish(new Error(event.message || 'Douyin special-follow sync failed'));
       }
       maybeFinish();
     });
   }
 });
 child.on('exit', (code) => {
-  if (!groupReady || !imReady || !specialReady) finish(new Error(`sidecar exited before smoke test completed (${code})`));
+  if (!groupReady || !imReady) finish(new Error(`sidecar exited before smoke test completed (${code})`));
 });
