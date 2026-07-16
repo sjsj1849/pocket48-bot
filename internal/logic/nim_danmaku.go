@@ -563,6 +563,45 @@ func decodeRawObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
+// extractQChatCustomBody extracts a human-readable body from a QChat custom
+// message's attach JSON. QChat delivers structured JSON for each message type
+// (GIFT_TEXT, REPLY, IMAGE, etc.) rather than pre-formatted text like the
+// REST API. This function extracts the relevant display text.
+func extractQChatCustomBody(attach json.RawMessage, msgType string) string {
+	raw := string(attach)
+	if !strings.HasPrefix(raw, "{") {
+		return raw
+	}
+	// Try to extract text/content from giftInfo or direct text fields
+	var generic struct {
+		GiftInfo *struct {
+			Name string `json:"giftName"`
+			Num  int    `json:"giftNum"`
+		} `json:"giftInfo"`
+		Text    string `json:"text"`
+		Content string `json:"content"`
+		Message string `json:"message"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
+		return raw
+	}
+	// Gift notification
+	if generic.GiftInfo != nil && generic.GiftInfo.Name != "" {
+		if generic.GiftInfo.Num <= 1 {
+			return fmt.Sprintf("🎁 送了一个%s", generic.GiftInfo.Name)
+		}
+		return fmt.Sprintf("🎁 送了%d个%s", generic.GiftInfo.Num, generic.GiftInfo.Name)
+	}
+	// Fallback: any text-like field
+	for _, s := range []string{generic.Text, generic.Content, generic.Message, generic.Msg} {
+		if strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return raw
+}
+
 func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48.Message, error) {
 	if room == nil {
 		room = &pocket48.RoomInfo{ServerID: m.ServerID, ChannelID: m.ChannelID}
@@ -577,8 +616,11 @@ func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48
 		if rawType := attach["messageType"]; len(rawType) > 0 {
 			_ = json.Unmarshal(rawType, &msgType)
 		}
+		// Extract human-readable body from QChat custom message attach.
+		// Unlike the REST API which returns formatted text, QChat carries
+		// raw JSON with fields nested inside giftInfo / reply / text etc.
 		if len(m.Attach) > 0 {
-			body = string(m.Attach)
+			body = extractQChatCustomBody(m.Attach, msgType)
 		}
 	}
 
