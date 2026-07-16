@@ -104,6 +104,7 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 		}
 		return false
 	}
+	b.observeRESTQChatIdentities(roomInfo, msgs)
 
 	// Filter by time logic
 	b.mu.RLock()

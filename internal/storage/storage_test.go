@@ -18,3 +18,18 @@ func TestCursorRoundTripAndOverwrite(t *testing.T) {
 		t.Fatalf("unexpected cursor: %#v", cursor)
 	}
 }
+
+func TestQChatIdentityRoundTrip(t *testing.T) {
+	store := NewStorage(t.TempDir(), "")
+	want := QChatIdentity{Account: "opaque-accid", UserID: 63559, Nickname: "owner", UpdatedAt: 1234}
+	if err := store.SaveQChatIdentity(1279287, want); err != nil {
+		t.Fatalf("SaveQChatIdentity() error = %v", err)
+	}
+	got, err := store.GetQChatIdentity(1279287)
+	if err != nil {
+		t.Fatalf("GetQChatIdentity() error = %v", err)
+	}
+	if got == nil || *got != want {
+		t.Fatalf("GetQChatIdentity() = %#v, want %#v", got, want)
+	}
+}

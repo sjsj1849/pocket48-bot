@@ -16,6 +16,7 @@ import (
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/pocket48"
+	"pocket48-bot/internal/storage"
 
 	"github.com/gorilla/websocket"
 )
@@ -883,6 +884,172 @@ func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
 	return msg != nil && msg.ExtInfo.User.UserID == 0 && b.cfg.NIMRoomMessagePollFallback
 }
 
+func qchatIdentityMessageKey(roomID int64, serverID, clientID string) string {
+	id := strings.TrimSpace(serverID)
+	if id == "" {
+		id = strings.TrimSpace(clientID)
+	}
+	if roomID == 0 || id == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s", roomID, id)
+}
+
+func (b *Bot) loadQChatOwnerIdentity(roomID int64) {
+	b.mu.Lock()
+	if b.qchatIdentityLoaded == nil {
+		b.qchatIdentityLoaded = make(map[int64]bool)
+	}
+	if b.qchatIdentityLoaded[roomID] {
+		b.mu.Unlock()
+		return
+	}
+	b.qchatIdentityLoaded[roomID] = true
+	b.mu.Unlock()
+
+	if b.storage == nil {
+		return
+	}
+	identity, err := b.storage.GetQChatIdentity(roomID)
+	if err != nil {
+		log.Printf("[NIM-room] load QChat identity room=%d: %v", roomID, err)
+		return
+	}
+	if identity == nil || strings.TrimSpace(identity.Account) == "" || identity.UserID == 0 {
+		return
+	}
+	b.mu.Lock()
+	if b.qchatOwnerIdentities == nil {
+		b.qchatOwnerIdentities = make(map[int64]storage.QChatIdentity)
+	}
+	b.qchatOwnerIdentities[roomID] = *identity
+	b.mu.Unlock()
+	log.Printf("[NIM-room] loaded owner identity room=%d user=%d account=%q", roomID, identity.UserID, identity.Account)
+}
+
+func (b *Bot) saveQChatOwnerIdentity(roomID int64, identity storage.QChatIdentity) {
+	if b.storage == nil {
+		return
+	}
+	if err := b.storage.SaveQChatIdentity(roomID, identity); err != nil {
+		log.Printf("[NIM-room] save QChat identity room=%d: %v", roomID, err)
+	}
+}
+
+func (b *Bot) resolveQChatOwnerIdentity(room *pocket48.RoomInfo, raw *RoomRealtimeMessage, msg *pocket48.Message) bool {
+	if room == nil || raw == nil || msg == nil || msg.ExtInfo.User.UserID != 0 {
+		return msg != nil && msg.ExtInfo.User.UserID != 0
+	}
+	account := strings.TrimSpace(raw.From)
+	if account == "" {
+		return false
+	}
+	b.loadQChatOwnerIdentity(room.ChannelID)
+	key := qchatIdentityMessageKey(room.ChannelID, raw.IDServer, raw.IDClient)
+	now := time.Now()
+	var learned *storage.QChatIdentity
+	newlyLearned := false
+
+	b.mu.Lock()
+	if b.qchatOwnerIdentities == nil {
+		b.qchatOwnerIdentities = make(map[int64]storage.QChatIdentity)
+	}
+	if b.qchatPendingIdentities == nil {
+		b.qchatPendingIdentities = make(map[string]qchatPendingIdentity)
+	}
+	if b.qchatRESTIdentities == nil {
+		b.qchatRESTIdentities = make(map[string]qchatRESTIdentity)
+	}
+	identity, known := b.qchatOwnerIdentities[room.ChannelID]
+	if known && identity.UserID == room.OwnerID && identity.Account == account {
+		learned = &identity
+	} else if rest, ok := b.qchatRESTIdentities[key]; ok && rest.UserID == room.OwnerID {
+		identity = storage.QChatIdentity{Account: account, UserID: rest.UserID, Nickname: rest.Nickname, UpdatedAt: now.Unix()}
+		b.qchatOwnerIdentities[room.ChannelID] = identity
+		delete(b.qchatRESTIdentities, key)
+		learned = &identity
+		newlyLearned = true
+	} else if key != "" {
+		b.qchatPendingIdentities[key] = qchatPendingIdentity{Account: account, SeenAt: now}
+	}
+	b.pruneQChatIdentityCachesLocked(now)
+	b.mu.Unlock()
+
+	if learned == nil {
+		return false
+	}
+	msg.ExtInfo.User.UserID = learned.UserID
+	msg.ExtInfo.ChannelRole = "2"
+	if msg.NickName == "" {
+		msg.NickName = learned.Nickname
+		if msg.NickName == "" {
+			msg.NickName = room.OwnerName
+		}
+		msg.ExtInfo.User.Nickname = msg.NickName
+	}
+	if newlyLearned {
+		b.saveQChatOwnerIdentity(room.ChannelID, *learned)
+		log.Printf("[NIM-room] learned owner identity room=%d user=%d account=%q", room.ChannelID, learned.UserID, learned.Account)
+	}
+	return true
+}
+
+func (b *Bot) observeRESTQChatIdentities(room *pocket48.RoomInfo, msgs []*pocket48.Message) {
+	if room == nil || room.OwnerID == 0 {
+		return
+	}
+	now := time.Now()
+	var learned []storage.QChatIdentity
+	b.mu.Lock()
+	if b.qchatOwnerIdentities == nil {
+		b.qchatOwnerIdentities = make(map[int64]storage.QChatIdentity)
+	}
+	if b.qchatPendingIdentities == nil {
+		b.qchatPendingIdentities = make(map[string]qchatPendingIdentity)
+	}
+	if b.qchatRESTIdentities == nil {
+		b.qchatRESTIdentities = make(map[string]qchatRESTIdentity)
+	}
+	for _, msg := range msgs {
+		if msg == nil || msg.ExtInfo.User.UserID != room.OwnerID {
+			continue
+		}
+		key := qchatIdentityMessageKey(room.ChannelID, msg.MsgIDServer, msg.MsgIDClient)
+		if key == "" {
+			continue
+		}
+		rest := qchatRESTIdentity{UserID: msg.ExtInfo.User.UserID, Nickname: msg.NickName, SeenAt: now}
+		b.qchatRESTIdentities[key] = rest
+		if pending, ok := b.qchatPendingIdentities[key]; ok && pending.Account != "" {
+			identity := storage.QChatIdentity{Account: pending.Account, UserID: rest.UserID, Nickname: rest.Nickname, UpdatedAt: now.Unix()}
+			b.qchatOwnerIdentities[room.ChannelID] = identity
+			delete(b.qchatPendingIdentities, key)
+			delete(b.qchatRESTIdentities, key)
+			learned = append(learned, identity)
+		}
+	}
+	b.pruneQChatIdentityCachesLocked(now)
+	b.mu.Unlock()
+	for _, identity := range learned {
+		b.saveQChatOwnerIdentity(room.ChannelID, identity)
+		log.Printf("[NIM-room] learned owner identity room=%d user=%d account=%q", room.ChannelID, identity.UserID, identity.Account)
+	}
+}
+
+func (b *Bot) pruneQChatIdentityCachesLocked(now time.Time) {
+	cutoff := now.Add(-10 * time.Minute)
+	for key, pending := range b.qchatPendingIdentities {
+		if pending.SeenAt.Before(cutoff) {
+			delete(b.qchatPendingIdentities, key)
+		}
+	}
+	for key, recent := range b.qchatRESTIdentities {
+		if recent.SeenAt.Before(cutoff) {
+			delete(b.qchatRESTIdentities, key)
+		}
+	}
+}
+
 func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMessage) {
 	if raw == nil || raw.ChannelID == 0 || !b.cfg.NIMRoomMessageEnabled {
 		return
@@ -900,6 +1067,7 @@ func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMes
 		log.Printf("[NIM-room] normalize room %d message: %v", pocketRoomID, err)
 		return
 	}
+	b.resolveQChatOwnerIdentity(room, raw, msg)
 	log.Printf("[NIM-room] received room=%d channel=%d server=%d id=%s type=%s sender=%d from=%q nick=%q", pocketRoomID, raw.ChannelID, raw.ServerID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID, raw.From, raw.FromNick)
 	if b.shouldDeferRoomRealtimeToREST(msg) {
 		log.Printf("[NIM-room] defer unresolved sender to REST room=%d id=%s", pocketRoomID, msg.MsgIDServer)

@@ -22,6 +22,13 @@ type Cursor struct {
 	LastMsgTime int64  `json:"last_msg_time"`
 }
 
+type QChatIdentity struct {
+	Account   string `json:"account"`
+	UserID    int64  `json:"user_id"`
+	Nickname  string `json:"nickname,omitempty"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
 type Storage struct {
 	dir    string
 	cosDir string
@@ -75,6 +82,45 @@ func (s *Storage) SaveCursor(roomID int64, messageID string, messageTime int64) 
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Storage) qchatIdentityPath(roomID int64) string {
+	return filepath.Join(s.dir, "qchat-identities", fmt.Sprintf("%d.json", roomID))
+}
+
+func (s *Storage) GetQChatIdentity(roomID int64) (*QChatIdentity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.qchatIdentityPath(roomID))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var identity QChatIdentity
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return nil, err
+	}
+	return &identity, nil
+}
+
+func (s *Storage) SaveQChatIdentity(roomID int64, identity QChatIdentity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.qchatIdentityPath(roomID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
