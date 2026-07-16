@@ -31,7 +31,12 @@ export function normalizeAwemeList(body, secUserId = '') {
   const list = body?.aweme_list || body?.awemeList || [];
   if (!Array.isArray(list)) return [];
   const seen = new Set();
-  return list.map((item) => normalizeAweme(item, secUserId)).filter((item) => {
+  return list.filter((item) => {
+    if (!secUserId) return true;
+    const author = item?.author || {};
+    const authorSecUserId = String(author.sec_uid || author.secUserId || '').trim();
+    return authorSecUserId === secUserId;
+  }).map((item) => normalizeAweme(item, secUserId)).filter((item) => {
     if (!item || seen.has(item.id)) return false;
     seen.add(item.id);
     return true;

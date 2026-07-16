@@ -380,10 +380,10 @@ async function douyinPageSnapshot(targetPage, secUserId) {
       document.querySelector('[data-e2e="user-post-list"]'),
       document.querySelector('[data-e2e="user-post-list-container"]'),
     ].filter(Boolean);
-    const root = roots.find((candidate) => candidate.querySelector(postSelector)) || document;
+    const root = roots.find((candidate) => candidate.querySelector(postSelector));
     const cards = [];
     const seen = new Set();
-    for (const anchor of root.querySelectorAll(postSelector)) {
+    for (const anchor of root?.querySelectorAll(postSelector) || []) {
       const match = anchor.href.match(/\/(video|note)\/(\d+)/);
       if (!match || seen.has(match[2])) continue;
       seen.add(match[2]);
@@ -418,7 +418,9 @@ async function scanDouyinAccount(account) {
     try {
       const body = await response.json();
       if (response.url().includes('/aweme/v1/web/aweme/post/')) {
-        if (Array.isArray(body?.aweme_list) && body.aweme_list.length > 0) apiBody = body;
+        const responseSecUserId = new URL(response.url()).searchParams.get('sec_user_id') || '';
+        const matchingPosts = responseSecUserId === secUserId ? normalizeAwemeList(body, secUserId) : [];
+        if (matchingPosts.length > 0) apiBody = body;
       } else if (response.url().includes('/aweme/v1/web/user/profile/other/')) {
         profileBody = body;
       }
