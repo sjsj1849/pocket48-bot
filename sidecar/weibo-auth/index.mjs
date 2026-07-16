@@ -321,11 +321,14 @@ async function startDouyinIM() {
   let initSeen = false;
   let initReady = false;
   const onResponse = async (response) => {
-    if (!response.url().includes('get_message_by_init')) return;
-    initSeen = true;
+    const responseURL = response.url();
+    const isLegacyInit = responseURL.includes('get_message_by_init');
+    const isIMAPI = responseURL.includes('imapi.douyin.com');
+    if (!isLegacyInit && !isIMAPI) return;
     try {
       const decoded = decodeDouyinIMInit(await response.body());
       if (!decoded.selfUid || decoded.groups.length === 0) return;
+      initSeen = true;
       initReady = true;
       const nameMatches = targetGroupName
         ? decoded.groups.filter((item) => item.name === targetGroupName || item.name.includes(targetGroupName))
@@ -367,8 +370,8 @@ async function startDouyinIM() {
       message: loggedIn ? '抖音浏览器已登录' : '抖音浏览器需要登录',
     });
     context.on('response', onResponse);
-    await targetPage.goto('https://www.douyin.com/follow', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    await targetPage.waitForTimeout(8_000);
+    await targetPage.goto('https://www.douyin.com/chat', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await targetPage.waitForTimeout(12_000);
     if (!initSeen) {
       emit('douyin_im_status', {
         status: 'init_missing',
