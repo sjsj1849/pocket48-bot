@@ -585,45 +585,6 @@ func decodeRawObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
-// extractQChatCustomBody extracts a human-readable body from a QChat custom
-// message's attach JSON. QChat delivers structured JSON for each message type
-// (GIFT_TEXT, REPLY, IMAGE, etc.) rather than pre-formatted text like the
-// REST API. This function extracts the relevant display text.
-func extractQChatCustomBody(attach json.RawMessage, msgType string) string {
-	raw := string(attach)
-	if !strings.HasPrefix(raw, "{") {
-		return raw
-	}
-	// Try to extract text/content from giftInfo or direct text fields
-	var generic struct {
-		GiftInfo *struct {
-			Name string `json:"giftName"`
-			Num  int    `json:"giftNum"`
-		} `json:"giftInfo"`
-		Text    string `json:"text"`
-		Content string `json:"content"`
-		Message string `json:"message"`
-		Msg     string `json:"msg"`
-	}
-	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
-		return raw
-	}
-	// Gift notification
-	if generic.GiftInfo != nil && generic.GiftInfo.Name != "" {
-		if generic.GiftInfo.Num <= 1 {
-			return fmt.Sprintf("🎁 送了一个%s", generic.GiftInfo.Name)
-		}
-		return fmt.Sprintf("🎁 送了%d个%s", generic.GiftInfo.Num, generic.GiftInfo.Name)
-	}
-	// Fallback: any text-like field
-	for _, s := range []string{generic.Text, generic.Content, generic.Message, generic.Msg} {
-		if strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
-		}
-	}
-	return raw
-}
-
 func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48.Message, error) {
 	if room == nil {
 		room = &pocket48.RoomInfo{ServerID: m.ServerID, ChannelID: m.ChannelID}
@@ -655,11 +616,10 @@ func (m RoomRealtimeMessage) toPocketMessage(room *pocket48.RoomInfo) (*pocket48
 		if rawType := attach["messageType"]; len(rawType) > 0 {
 			_ = json.Unmarshal(rawType, &msgType)
 		}
-		// Extract human-readable body from QChat custom message attach.
-		// Unlike the REST API which returns formatted text, QChat carries
-		// raw JSON with fields nested inside giftInfo / reply / text etc.
+		// Preserve the complete structured payload. Downstream parsers need fields
+		// such as flipCardInfo, replyInfo and media URLs.
 		if len(m.Attach) > 0 {
-			body = extractQChatCustomBody(m.Attach, msgType)
+			body = string(m.Attach)
 		}
 	}
 
@@ -913,10 +873,20 @@ func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
 		return !hasQChatMediaURL(msg.Body, []string{"url", "audio", "voice", "path", "originUrl", "sourceUrl"})
 	case pocket48.MsgVideo:
 		return !hasQChatMediaURL(msg.Body, []string{"url", "video", "videoUrl", "path", "originUrl", "sourceUrl", "playUrl"})
-	case pocket48.MsgReply, pocket48.MsgGiftReply, pocket48.MsgAudioGiftReply,
-		pocket48.MsgGiftText, pocket48.MsgFlipCard, pocket48.MsgFlipCardAudio,
-		pocket48.MsgFlipCardVideo, pocket48.MsgLivePush:
+	case pocket48.MsgReply, pocket48.MsgGiftReply, pocket48.MsgGiftText, pocket48.MsgLivePush:
 		return strings.TrimSpace(msg.Body) == ""
+	case pocket48.MsgAudioGiftReply:
+		_, voiceURL, _, ok := parseAudioGiftReplyMessage(msg.Body)
+		return !ok || voiceURL == ""
+	case pocket48.MsgFlipCard:
+		_, _, _, ok := parseFlipCardBody(msg.Body)
+		return !ok
+	case pocket48.MsgFlipCardAudio:
+		_, _, _, ok := parseFlipCardBody(msg.Body)
+		return !ok || !hasQChatMediaURL(msg.Body, []string{"url", "audio", "voice", "voiceUrl", "path", "originUrl", "sourceUrl"})
+	case pocket48.MsgFlipCardVideo:
+		_, _, _, ok := parseFlipCardBody(msg.Body)
+		return !ok || !hasQChatMediaURL(msg.Body, []string{"url", "video", "videoUrl", "path", "originUrl", "sourceUrl", "playUrl"})
 	default:
 		return true
 	}

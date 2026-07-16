@@ -219,6 +219,57 @@ func TestRealtimeImageIgnoresNullAttachmentAndDefersInvalidPayload(t *testing.T)
 	}
 }
 
+func TestRoomRealtimeAudioAndVideoMapNumericTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawType string
+		attach  string
+		want    pocket48.MessageType
+	}{
+		{name: "audio", rawType: "2", attach: `{"url":"https://example.com/voice.aac","dur":4}`, want: pocket48.MsgAudio},
+		{name: "video", rawType: "3", attach: `{"url":"https://example.com/video.mp4"}`, want: pocket48.MsgVideo},
+	}
+	bot := &Bot{cfg: &config.Config{NIMRoomMessagePollFallback: true}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := RoomRealtimeMessage{From: "63559", Type: test.rawType, Attach: []byte(test.attach), IDServer: test.name}
+			msg, err := raw.toPocketMessage(&pocket48.RoomInfo{ChannelID: 101})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type != test.want || msg.Body != test.attach {
+				t.Fatalf("unexpected media message: %#v", msg)
+			}
+			if bot.shouldDeferRoomRealtimeToREST(msg) {
+				t.Fatal("complete media message unexpectedly deferred")
+			}
+		})
+	}
+}
+
+func TestRoomRealtimeFlipCardPreservesPayloadAndValidatesMedia(t *testing.T) {
+	bot := &Bot{cfg: &config.Config{NIMRoomMessagePollFallback: true}}
+	textPayload := `{"messageType":"FLIPCARD","flipCardInfo":{"question":"今天吃什么？","answer":"火锅","answerType":"TEXT"}}`
+	raw := RoomRealtimeMessage{From: "63559", Type: "custom", Attach: []byte(textPayload), IDServer: "flip-text"}
+	msg, err := raw.toPocketMessage(&pocket48.RoomInfo{ChannelID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Type != pocket48.MsgFlipCard || msg.Body != textPayload || bot.shouldDeferRoomRealtimeToREST(msg) {
+		t.Fatalf("valid text flip card was not preserved: %#v", msg)
+	}
+
+	videoPayload := `{"messageType":"FLIPCARD_VIDEO","flipCardInfo":{"question":"看看视频","answerType":"VIDEO"}}`
+	raw = RoomRealtimeMessage{From: "63559", Type: "custom", Attach: []byte(videoPayload), IDServer: "flip-video"}
+	msg, err = raw.toPocketMessage(&pocket48.RoomInfo{ChannelID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bot.shouldDeferRoomRealtimeToREST(msg) {
+		t.Fatal("video flip card without a media URL should defer to REST")
+	}
+}
+
 func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
 	bot := &Bot{
 		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
