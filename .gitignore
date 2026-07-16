@@ -4,6 +4,10 @@ log/
 /storage/
 /sidecar/nim-bridge/node_modules/
 /sidecar/weibo-auth/node_modules/
+/admin-ui/node_modules/
+/admin-ui/*.tsbuildinfo
+/admin-ui/vite.config.js
+/admin-ui/vite.config.d.ts
 /sidecar/nim-android-bridge/
 data/
 .DS_Store
@@ -11,7 +15,11 @@ data/
 *.swo
 /tmp/bot48/
 *.html
+!/internal/admin/web/index.html
+!/internal/admin/web/assets/
+!/internal/admin/web/assets/*
 pocket48-bot
+pocket48-admin
 bot48
 bot
 dist/
