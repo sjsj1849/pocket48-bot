@@ -322,8 +322,8 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 	room := msg.Room
 	roomIDStr := strconv.FormatInt(room.ChannelID, 10)
 
-	// Filter: GiftReply
-	if msg.Type == pocket48.MsgGiftReply || msg.Type == pocket48.MsgAudioGiftReply {
+	// Filter: GiftReply — gift replies and gift notifications
+	if msg.Type == pocket48.MsgGiftReply || msg.Type == pocket48.MsgAudioGiftReply || msg.Type == pocket48.MsgGiftText {
 		allowed := false
 		if b.cfg.GiftSpecific != nil {
 			if val, ok := b.cfg.GiftSpecific[roomIDStr]; ok {
@@ -357,6 +357,16 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 	channelRole := msg.ExtInfo.ChannelRole
 	senderUserID := msg.ExtInfo.User.UserID
 	isOwnerMessage := channelRole == "2" || (senderUserID != 0 && senderUserID == room.OwnerID)
+
+	// Filter: only forward messages from room owner or other idols, skip fans.
+	if !isOwnerMessage {
+		if senderUserID == 0 {
+			return // cannot determine sender, skip
+		}
+		if !b.isKnownStar(senderUserID) {
+			return // not a known star (idol), skip fan message
+		}
+	}
 
 	if isOwnerMessage {
 		realName = room.OwnerName
@@ -414,7 +424,14 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 
 	switch msg.Type {
 	case pocket48.MsgText, pocket48.MsgGiftText:
-		displayText := b.extractTextBody(msg.Body)
+		body := msg.Body
+		// QChat GIFT_TEXT messages carry raw JSON — extract gift name for display.
+		if msg.Type == pocket48.MsgGiftText && strings.HasPrefix(strings.TrimSpace(body), "{") {
+			if formatted := formatGiftTextBody(body); formatted != "" {
+				body = formatted
+			}
+		}
+		displayText := b.extractTextBody(body)
 		if quotedText, answerText, ok := parseEmbeddedReplyMessage(msg.Body); ok {
 			if quotedText != "" {
 				segments = appendTextWithQQFaces(segments, quotedText+"\n")
@@ -634,6 +651,32 @@ func (b *Bot) extractTextBody(body string) string {
 	}
 
 	return normalizePocketText(body)
+}
+
+// formatGiftTextBody tries to parse QChat GIFT_TEXT JSON into a human-readable
+// gift notification. Returns empty string if body is not gift JSON.
+func formatGiftTextBody(body string) string {
+	body = strings.TrimSpace(body)
+	if !strings.HasPrefix(body, "{") {
+		return ""
+	}
+	var raw struct {
+		GiftInfo struct {
+			Name string `json:"giftName"`
+			Num  int    `json:"giftNum"`
+		} `json:"giftInfo"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return ""
+	}
+	if raw.GiftInfo.Name == "" {
+		return ""
+	}
+	num := raw.GiftInfo.Num
+	if num <= 1 {
+		return fmt.Sprintf("🎁 送了一个%s", raw.GiftInfo.Name)
+	}
+	return fmt.Sprintf("🎁 送了%d个%s", num, raw.GiftInfo.Name)
 }
 
 func (b *Bot) getTargetGroupsForRoom(roomID int64) []int64 {

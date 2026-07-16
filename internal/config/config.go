@@ -30,7 +30,6 @@ type Config struct {
 	NIMRoomMessagePollFallback        bool                                               `json:"NIM_ROOM_MESSAGE_POLL_FALLBACK"`
 	NIMLiveDanmakuEnabled             bool                                               `json:"NIM_LIVE_DANMAKU_ENABLED"`
 	NIMViewerEventEnabled             bool                                               `json:"NIM_VIEWER_EVENT_ENABLED"`
-	CrossRoomIdolSpeak                bool                                               `json:"CROSS_ROOM_IDOL_SPEAK"`
 	PollingInterval                   int                                                `json:"POLLING_INTERVAL"`                     // Seconds
 	LastStartupTime                   int64                                              `json:"LAST_STARTUP_TIME"`                    // Unix Timestamp
 	WeiboSubscriptions                map[int64]map[string]*WeiboConfig                  `json:"WEIBO_SUBSCRIPTIONS"`                  // GroupID -> UID -> WeiboConfig
