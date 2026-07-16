@@ -8,6 +8,7 @@ import (
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/pocket48"
+	"pocket48-bot/internal/storage"
 )
 
 func TestParseSidecarCommand(t *testing.T) {
@@ -184,6 +185,62 @@ func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
 	}
 	if !bot.markMessageSeen(rest) {
 		t.Fatal("complete REST message was suppressed by unresolved QChat delivery")
+	}
+}
+
+func newQChatIdentityTestBot() *Bot {
+	return &Bot{
+		cfg:                    &config.Config{NIMRoomMessagePollFallback: true},
+		qchatOwnerIdentities:   make(map[int64]storage.QChatIdentity),
+		qchatIdentityLoaded:    make(map[int64]bool),
+		qchatPendingIdentities: make(map[string]qchatPendingIdentity),
+		qchatRESTIdentities:    make(map[string]qchatRESTIdentity),
+	}
+}
+
+func TestQChatOwnerIdentityLearnsWhenQChatArrivesFirst(t *testing.T) {
+	bot := newQChatIdentityTestBot()
+	room := &pocket48.RoomInfo{ChannelID: 101, OwnerID: 63559, OwnerName: "胡晓慧"}
+	raw := &RoomRealtimeMessage{From: "opaque-owner-accid", IDServer: "first"}
+	qchat := &pocket48.Message{Room: room, MsgIDServer: "first"}
+	if bot.resolveQChatOwnerIdentity(room, raw, qchat) {
+		t.Fatal("unconfirmed QChat account unexpectedly resolved")
+	}
+	rest := &pocket48.Message{Room: room, MsgIDServer: "first", NickName: "哼唧小虎", ExtInfo: pocket48.ExtInfo{User: pocket48.User{UserID: 63559}}}
+	bot.observeRESTQChatIdentities(room, []*pocket48.Message{rest})
+
+	next := &pocket48.Message{Room: room, MsgIDServer: "second"}
+	if !bot.resolveQChatOwnerIdentity(room, &RoomRealtimeMessage{From: raw.From, IDServer: "second"}, next) {
+		t.Fatal("learned QChat owner account was not resolved")
+	}
+	if next.ExtInfo.User.UserID != 63559 || next.ExtInfo.ChannelRole != "2" || next.NickName != "哼唧小虎" {
+		t.Fatalf("unexpected resolved owner message: %#v", next)
+	}
+}
+
+func TestQChatOwnerIdentityLearnsWhenRESTArrivesFirst(t *testing.T) {
+	bot := newQChatIdentityTestBot()
+	room := &pocket48.RoomInfo{ChannelID: 101, OwnerID: 63559, OwnerName: "胡晓慧"}
+	rest := &pocket48.Message{Room: room, MsgIDServer: "same", ExtInfo: pocket48.ExtInfo{User: pocket48.User{UserID: 63559}}}
+	bot.observeRESTQChatIdentities(room, []*pocket48.Message{rest})
+	qchat := &pocket48.Message{Room: room, MsgIDServer: "same"}
+	if !bot.resolveQChatOwnerIdentity(room, &RoomRealtimeMessage{From: "opaque-owner-accid", IDServer: "same"}, qchat) {
+		t.Fatal("QChat message did not correlate with earlier REST delivery")
+	}
+	if qchat.ExtInfo.User.UserID != 63559 {
+		t.Fatalf("resolved user ID = %d, want 63559", qchat.ExtInfo.User.UserID)
+	}
+}
+
+func TestQChatOwnerIdentityRejectsNonOwnerRESTSender(t *testing.T) {
+	bot := newQChatIdentityTestBot()
+	room := &pocket48.RoomInfo{ChannelID: 101, OwnerID: 63559, OwnerName: "胡晓慧"}
+	bot.resolveQChatOwnerIdentity(room, &RoomRealtimeMessage{From: "fan-accid", IDServer: "same"}, &pocket48.Message{Room: room, MsgIDServer: "same"})
+	bot.observeRESTQChatIdentities(room, []*pocket48.Message{
+		{Room: room, MsgIDServer: "same", ExtInfo: pocket48.ExtInfo{User: pocket48.User{UserID: 999}}},
+	})
+	if _, exists := bot.qchatOwnerIdentities[room.ChannelID]; exists {
+		t.Fatal("non-owner REST sender polluted the QChat owner identity")
 	}
 }
 

@@ -201,6 +201,17 @@ type LiveGiftSession struct {
 	Ended         bool
 }
 
+type qchatPendingIdentity struct {
+	Account string
+	SeenAt  time.Time
+}
+
+type qchatRESTIdentity struct {
+	UserID   int64
+	Nickname string
+	SeenAt   time.Time
+}
+
 type Bot struct {
 	cfg           *config.Config
 	pocket        *pocket48.Client
@@ -218,6 +229,10 @@ type Bot struct {
 	userDetailCache        map[int64]cachedUserDetail
 	roomInfoCache          map[int64]cachedRoomInfo
 	seenMessageIDs         map[string]time.Time
+	qchatOwnerIdentities   map[int64]storage.QChatIdentity
+	qchatIdentityLoaded    map[int64]bool
+	qchatPendingIdentities map[string]qchatPendingIdentity
+	qchatRESTIdentities    map[string]qchatRESTIdentity
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
 	lastWeiboAuthErrorAt   time.Time
@@ -286,26 +301,30 @@ func NewBot(cfg *config.Config) *Bot {
 		log.Println("⚠️ COS not available, running in degraded mode")
 	}
 	bot := &Bot{
-		cfg:              cfg,
-		pocket:           pocket48.NewClient(cfg),
-		napcat:           napcatClient,
-		weiboMonitor:     weiboMon,
-		storage:          botStorage,
-		nimDanmaku:       NewNimDanmakuBridge(cfg),
-		weiboAuth:        NewWeiboAuthBridge(cfg),
-		lastMsgTime:      make(map[int64]int64),
-		cursorLoaded:     make(map[int64]bool),
-		onMicState:       make(map[int64]bool),
-		onMicLastCheck:   make(map[int64]time.Time),
-		userDetailCache:  make(map[int64]cachedUserDetail),
-		roomInfoCache:    make(map[int64]cachedRoomInfo),
-		seenMessageIDs:   make(map[string]time.Time),
-		memberEnterTimes: make(map[string]time.Time),
-		liveSessions:     make(map[int64]*LiveGiftSession),
-		isMonitoring:     true,
-		isLiveMonitoring: cfg.LiveMonitoring,
-		pollingInterval:  interval,
-		fastInterval:     300 * time.Millisecond,
+		cfg:                    cfg,
+		pocket:                 pocket48.NewClient(cfg),
+		napcat:                 napcatClient,
+		weiboMonitor:           weiboMon,
+		storage:                botStorage,
+		nimDanmaku:             NewNimDanmakuBridge(cfg),
+		weiboAuth:              NewWeiboAuthBridge(cfg),
+		lastMsgTime:            make(map[int64]int64),
+		cursorLoaded:           make(map[int64]bool),
+		onMicState:             make(map[int64]bool),
+		onMicLastCheck:         make(map[int64]time.Time),
+		userDetailCache:        make(map[int64]cachedUserDetail),
+		roomInfoCache:          make(map[int64]cachedRoomInfo),
+		seenMessageIDs:         make(map[string]time.Time),
+		qchatOwnerIdentities:   make(map[int64]storage.QChatIdentity),
+		qchatIdentityLoaded:    make(map[int64]bool),
+		qchatPendingIdentities: make(map[string]qchatPendingIdentity),
+		qchatRESTIdentities:    make(map[string]qchatRESTIdentity),
+		memberEnterTimes:       make(map[string]time.Time),
+		liveSessions:           make(map[int64]*LiveGiftSession),
+		isMonitoring:           true,
+		isLiveMonitoring:       cfg.LiveMonitoring,
+		pollingInterval:        interval,
+		fastInterval:           300 * time.Millisecond,
 	}
 	bot.douyinMonitor = NewDouyinMonitor(cfg, napcatClient, bot.notifyAdmins)
 	bot.douyinMonitor.SetBrowserBridge(bot.weiboAuth)
@@ -317,6 +336,17 @@ func NewBot(cfg *config.Config) *Bot {
 		bot.handleWeiboAuthStatus,
 		bot.handleWeiboAuthError,
 	)
+	if cfg.NIMRoomMessageEnabled {
+		roomIDs := make(map[int64]struct{})
+		for _, rooms := range cfg.GroupSubscriptions {
+			for _, roomID := range rooms {
+				roomIDs[roomID] = struct{}{}
+			}
+		}
+		for roomID := range roomIDs {
+			bot.loadQChatOwnerIdentity(roomID)
+		}
+	}
 
 	// Set up welcome new member callback
 	napcatClient.OnMemberJoin = bot.handleMemberJoin
