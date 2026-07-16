@@ -391,7 +391,7 @@ async function douyinPageSnapshot(targetPage, secUserId) {
       cards.push({
         id: match[2], secUserId: fallbackSecUserId, nickname: '',
         desc: anchor.getAttribute('aria-label') || anchor.getAttribute('title') || image?.alt || anchor.textContent?.trim() || '',
-        createTime: 0, type: match[1], url: anchor.href,
+        createTime: Number(BigInt(match[2]) >> 32n), type: match[1], url: anchor.href,
         cover: image?.currentSrc || image?.src || '', images: [],
       });
     }

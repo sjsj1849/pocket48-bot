@@ -3,17 +3,24 @@ package logic
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestUnseenDouyinPosts(t *testing.T) {
-	posts := []douyinPost{{ID: "3"}, {ID: "2"}, {ID: "1"}}
-	got := unseenDouyinPosts(posts, "1")
+	now := time.Unix(1_000, 0)
+	posts := []douyinPost{
+		{ID: "pinned-old", CreateTime: 100},
+		{ID: "3", CreateTime: 900},
+		{ID: "2", CreateTime: 800},
+		{ID: "future", CreateTime: 2_000},
+	}
+	got := unseenDouyinPosts(posts, 700, now)
 	if len(got) != 2 || got[0].ID != "2" || got[1].ID != "3" {
 		t.Fatalf("unexpected posts: %#v", got)
 	}
-	got = unseenDouyinPosts(posts, "missing")
-	if len(got) != 1 || got[0].ID != "3" {
-		t.Fatalf("missing cursor should only emit latest: %#v", got)
+	latest, ok := latestTimestampedDouyinPost(posts, now)
+	if !ok || latest.ID != "3" {
+		t.Fatalf("latest timestamped post: %#v, ok=%v", latest, ok)
 	}
 }
 

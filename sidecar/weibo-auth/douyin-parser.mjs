@@ -5,6 +5,15 @@ function firstURL(value) {
   return Array.isArray(list) ? String(list[0] || '') : '';
 }
 
+export function awemeCreateTime(id) {
+  try {
+    const seconds = Number(BigInt(String(id || '')) >> 32n);
+    return seconds >= 1_450_000_000 ? seconds : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export function normalizeAweme(item, secUserId = '') {
   if (!item || typeof item !== 'object') return null;
   const id = String(item.aweme_id || item.awemeId || item.id || '').trim();
@@ -19,7 +28,7 @@ export function normalizeAweme(item, secUserId = '') {
     secUserId: String(author.sec_uid || author.secUserId || secUserId || ''),
     nickname: String(author.nickname || ''),
     desc: String(item.desc || item.title || '').trim(),
-    createTime: Number(item.create_time || item.createTime || 0),
+    createTime: Number(item.create_time || item.createTime || awemeCreateTime(id)),
     type,
     url: String(item.share_url || `https://www.douyin.com/${type}/${id}`),
     cover,
