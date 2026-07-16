@@ -3,6 +3,10 @@ package logic
 import (
 	"reflect"
 	"testing"
+
+	"github.com/gorilla/websocket"
+
+	"pocket48-bot/internal/config"
 )
 
 func TestParseWeiboAuthCommand(t *testing.T) {
@@ -32,5 +36,23 @@ func TestParseWeiboAuthCommand(t *testing.T) {
 func TestParseWeiboAuthCommandRejectsUnclosedQuote(t *testing.T) {
 	if _, err := parseWeiboAuthCommand(`node "broken`); err == nil {
 		t.Fatal("expected an unclosed quote error")
+	}
+}
+
+func TestWeiboAuthBridgeBeginStopSuppressesAvailabilityWithoutSkippingStop(t *testing.T) {
+	b := NewWeiboAuthBridge(&config.Config{})
+	b.started = true
+	b.conn = &websocket.Conn{}
+
+	b.BeginStop()
+
+	if b.IsStarted() {
+		t.Fatal("bridge should no longer report as started after shutdown begins")
+	}
+	if !b.stopping {
+		t.Fatal("bridge should suppress disconnect errors after shutdown begins")
+	}
+	if b.stopRun {
+		t.Fatal("BeginStop must not consume the subsequent Stop call")
 	}
 }

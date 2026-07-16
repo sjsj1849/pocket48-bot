@@ -495,6 +495,9 @@ func (b *Bot) Start() error {
 
 	sig := <-stopChan
 	b.LogInfo("Received signal: %v. Shutting down...", sig)
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
+		b.weiboAuth.BeginStop()
+	}
 
 	// Runtime Calculation
 	runTime := time.Since(startTime)

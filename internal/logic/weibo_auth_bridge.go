@@ -82,6 +82,7 @@ type WeiboAuthBridge struct {
 	conn     *websocket.Conn
 	started  bool
 	stopping bool
+	stopRun  bool
 	wg       sync.WaitGroup
 
 	onCookies func(webCookie, mobileCookie, reason string)
@@ -158,6 +159,7 @@ func (b *WeiboAuthBridge) Start() error {
 	}
 	b.started = true
 	b.stopping = false
+	b.stopRun = false
 	b.mu.Unlock()
 
 	parts, err := parseWeiboAuthCommand(b.cfg.BrowserSidecarCmd)
@@ -441,13 +443,24 @@ func (b *WeiboAuthBridge) EnsureStarted() error {
 	return fmt.Errorf("shared browser bridge startup timeout")
 }
 
+// BeginStop suppresses disconnect errors as soon as process shutdown starts.
+// systemd may terminate child processes before the bridge reaches Stop.
+func (b *WeiboAuthBridge) BeginStop() {
+	b.mu.Lock()
+	if b.started {
+		b.stopping = true
+	}
+	b.mu.Unlock()
+}
+
 func (b *WeiboAuthBridge) Stop() {
 	b.mu.Lock()
-	if !b.started || b.stopping {
+	if !b.started || b.stopRun {
 		b.mu.Unlock()
 		return
 	}
 	b.stopping = true
+	b.stopRun = true
 	conn := b.conn
 	cmd := b.cmd
 	b.conn = nil
