@@ -100,6 +100,14 @@ func TestFormatDouyinIMNotification(t *testing.T) {
 	}
 }
 
+func TestFormatDouyinPrivateNotification(t *testing.T) {
+	got := formatDouyinPrivateNotification("测试昵称", "消息正文", "2026-07-17 10:00:00")
+	want := "【抖音私信|测试昵称】\n消息正文\n2026-07-17 10:00:00"
+	if got != want {
+		t.Fatalf("notification=%q", got)
+	}
+}
+
 func TestFormatDouyinReplyText(t *testing.T) {
 	got := formatDouyinReplyText("发送人", "回复内容", "原发送人", "原消息")
 	if got != "原发送人:原消息\n发送人:回复内容" {

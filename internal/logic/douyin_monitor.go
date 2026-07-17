@@ -440,7 +440,7 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
 		text = formatDouyinReplyText(name, text, event.QuotedName, event.QuotedText)
-		m.notifyAdmins(formatDouyinIMNotification("【抖音私信】", name, text, timeText))
+		m.notifyAdmins(formatDouyinPrivateNotification(name, text, timeText))
 	}
 }
 
@@ -459,6 +459,10 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 
 func formatDouyinIMNotification(title, name, text, timeText string) string {
 	return fmt.Sprintf("%s\n来自：%s\n%s\n%s", title, name, text, timeText)
+}
+
+func formatDouyinPrivateNotification(name, text, timeText string) string {
+	return fmt.Sprintf("【抖音私信|%s】\n%s\n%s", name, text, timeText)
 }
 
 func formatDouyinIMTime(createTime, receivedAt int64) string {

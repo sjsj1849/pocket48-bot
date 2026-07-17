@@ -18,6 +18,7 @@ let browserStartPromise;
 let page;
 let douyinPage;
 let douyinIMPage;
+let douyinLookupPage;
 let statePath;
 let refreshTimer;
 let douyinTimer;
@@ -186,6 +187,15 @@ async function getDouyinIMPage() {
   return douyinIMPage;
 }
 
+async function getDouyinLookupPage() {
+  await startBrowser();
+  if (!douyinLookupPage || douyinLookupPage.isClosed()) {
+    douyinLookupPage = await context.newPage();
+    douyinLookupPage.setDefaultTimeout(15_000);
+  }
+  return douyinLookupPage;
+}
+
 function stopDouyinIM() {
   clearTimeout(douyinIMReconnectTimer);
   douyinIMReconnectTimer = undefined;
@@ -267,30 +277,55 @@ async function resolveDouyinNickname(secUserId, userId) {
   if (douyinNicknameCache.has(cacheKey)) return douyinNicknameCache.get(cacheKey);
   try {
     const targetPage = await getDouyinIMPage();
-    const cachedNickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
+    const cachedIdentity = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
       const nicknameKeys = ['nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname', 'remark_name', 'remarkName'];
-      const findDisplayName = (root, depth = 0) => {
-        if (!root || typeof root !== 'object' || depth > 7) return '';
+      const findIdentity = (root, depth = 0) => {
+        if (!root || typeof root !== 'object' || depth > 7) return { nickname: '', accountID: '' };
+        let accountID = String(root.unique_id || root.uniqueId || root.short_id || root.shortId || '').trim();
         for (const key of nicknameKeys) {
-          if (typeof root[key] === 'string' && root[key].trim()) return root[key].trim();
+          if (typeof root[key] === 'string' && root[key].trim()) {
+            return { nickname: root[key].trim(), accountID };
+          }
         }
         for (const child of Object.values(root)) {
-          const found = findDisplayName(child, depth + 1);
-          if (found) return found;
+          const found = findIdentity(child, depth + 1);
+          if (found.nickname) return found;
+          if (!accountID && found.accountID) accountID = found.accountID;
         }
-        const accountID = String(root.unique_id || root.uniqueId || root.short_id || root.shortId || '').trim();
-        if (accountID) return `抖音号 ${accountID}`;
-        return '';
+        return { nickname: '', accountID };
+      };
+      const findTargetIdentity = (root, depth = 0) => {
+        if (!root || typeof root !== 'object' || depth > 10) return { nickname: '', accountID: '' };
+        const objectUID = String(root.uid || root.user_id || root.userId || '').trim();
+        const objectSecUID = String(root.sec_uid || root.sec_user_id || root.secUserId || '').trim();
+        if ((uidValue && objectUID === uidValue) || (secValue && objectSecUID === secValue)) {
+          return findIdentity(root);
+        }
+        let accountID = '';
+        for (const child of Object.values(root)) {
+          const found = findTargetIdentity(child, depth + 1);
+          if (found.nickname) return found;
+          if (!accountID && found.accountID) accountID = found.accountID;
+        }
+        return { nickname: '', accountID };
+      };
+      const matchesTarget = (value) => {
+        try {
+          const serialized = JSON.stringify(value);
+          return (uidValue && serialized.includes(uidValue)) || (secValue && serialized.includes(secValue));
+        } catch { return false; }
       };
       const readRequest = (request) => new Promise((resolve) => {
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => resolve(undefined);
       });
+      let accountID = '';
       for (const value of Object.values(localStorage)) {
         if (!String(value).includes(uidValue) && (!secValue || !String(value).includes(secValue))) continue;
         try {
-          const found = findDisplayName(JSON.parse(value));
-          if (found) return found;
+          const found = findTargetIdentity(JSON.parse(value));
+          if (found.nickname) return found;
+          if (!accountID) accountID = found.accountID;
         } catch {}
       }
       for (const databaseInfo of await indexedDB.databases()) {
@@ -306,18 +341,37 @@ async function resolveDouyinNickname(secUserId, userId) {
             try {
               const transaction = database.transaction(storeName, 'readonly');
               const value = await readRequest(transaction.objectStore(storeName).get(key));
-              const found = findDisplayName(value);
-              if (found) { database.close(); return found; }
+              const found = findTargetIdentity(value);
+              if (found.nickname) { database.close(); return found; }
+              if (!accountID) accountID = found.accountID;
             } catch {}
           }
+          try {
+            const transaction = database.transaction(storeName, 'readonly');
+            const store = transaction.objectStore(storeName);
+            const found = await new Promise((resolve) => {
+              let visited = 0;
+              const request = store.openCursor();
+              request.onerror = () => resolve(undefined);
+              request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor || visited >= 20_000) return resolve(undefined);
+                visited += 1;
+                if (matchesTarget(cursor.value)) return resolve(findTargetIdentity(cursor.value));
+                cursor.continue();
+              };
+            });
+            if (found?.nickname) { database.close(); return found; }
+            if (!accountID && found?.accountID) accountID = found.accountID;
+          } catch {}
         }
         database.close();
       }
-      return '';
+      return { nickname: '', accountID };
     }, { secUserId: sec, userId: uid });
-    if (cachedNickname) {
-      douyinNicknameCache.set(cacheKey, cachedNickname);
-      return cachedNickname;
+    if (cachedIdentity.nickname) {
+      douyinNicknameCache.set(cacheKey, cachedIdentity.nickname);
+      return cachedIdentity.nickname;
     }
     const nickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
       const params = new URLSearchParams();
@@ -328,8 +382,39 @@ async function resolveDouyinNickname(secUserId, userId) {
       const body = await response.json();
       return String(body?.user?.nickname || body?.user_info?.nickname || body?.data?.user?.nickname || '');
     }, { secUserId: sec, userId: uid });
-    if (nickname) douyinNicknameCache.set(cacheKey, nickname);
-    return nickname;
+    if (nickname) {
+      douyinNicknameCache.set(cacheKey, nickname);
+      return nickname;
+    }
+    if (sec) {
+      const lookupPage = await getDouyinLookupPage();
+      const profileResponse = lookupPage.waitForResponse(
+        (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
+        { timeout: 15_000 },
+      ).catch(() => undefined);
+      await lookupPage.goto(`https://www.douyin.com/user/${encodeURIComponent(sec)}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000,
+      }).catch(() => {});
+      const response = await profileResponse;
+      const profileNickname = await response?.json().then((body) => String(
+        body?.user?.nickname || body?.user_info?.nickname || body?.data?.user?.nickname || '',
+      )).catch(() => '');
+      const renderedNickname = profileNickname || await lookupPage.locator('[data-e2e="user-title"], h1')
+        .first().textContent({ timeout: 5_000 }).then((value) => String(value || '').trim()).catch(() => '');
+      const pageTitleNickname = await lookupPage.title().then((value) => {
+        const match = String(value || '').trim().match(/^(.+?)的抖音(?:主页)?/);
+        return match?.[1]?.trim() || '';
+      }).catch(() => '');
+      const navigatedNickname = renderedNickname || pageTitleNickname;
+      if (navigatedNickname && !['抖音', '抖音精选'].includes(navigatedNickname)) {
+        douyinNicknameCache.set(cacheKey, navigatedNickname);
+        return navigatedNickname;
+      }
+    }
+    const fallback = cachedIdentity.accountID ? `抖音号 ${cachedIdentity.accountID}` : '';
+    if (fallback) douyinNicknameCache.set(cacheKey, fallback);
+    return fallback;
   } catch {
     return '';
   }
