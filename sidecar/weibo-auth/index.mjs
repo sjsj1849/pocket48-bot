@@ -25,6 +25,8 @@ let douyinTimer;
 let douyinIMReconnectTimer;
 let douyinIMInitRetryTimer;
 let douyinIMHealthTimer;
+let douyinContactSyncTimer;
+let douyinContactPersistTimer;
 let douyinIMSocket;
 let refreshRunning = false;
 let douyinScanning = false;
@@ -52,6 +54,9 @@ let settings = {
 let douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '', groupNumber: '' };
 const douyinIMSeen = new Set();
 const douyinNicknameCache = new Map();
+const douyinContacts = new Map();
+let douyinContactSyncRunning = false;
+const douyinContactSyncMs = 6 * 60 * 60_000;
 
 const wss = new WebSocketServer({ host: '127.0.0.1', port: requestedPort });
 
@@ -65,6 +70,81 @@ function emit(type, payload = {}) {
 function log(message) {
   emit('log', { message });
   process.stderr.write(`[weibo-auth] ${message}\n`);
+}
+
+function douyinContactCachePath() {
+  return path.resolve(settings.profileDir, 'douyin-contact-cache.json');
+}
+
+function douyinContactKey(contact) {
+  return contact.uid ? `uid:${contact.uid}` : `sec:${contact.secUid}`;
+}
+
+function rememberDouyinContact(contact, { persist = false } = {}) {
+  const hasMutual = typeof contact.mutual === 'boolean';
+  const normalized = {
+    uid: String(contact.uid || '').trim(),
+    secUid: String(contact.secUid || '').trim(),
+    nickname: String(contact.nickname || '').trim(),
+    remarkName: String(contact.remarkName || '').trim(),
+    mutual: contact.mutual === true,
+    updatedAt: Number(contact.updatedAt) || Date.now(),
+  };
+  if ((!normalized.uid && !normalized.secUid) || !normalized.nickname) return false;
+  const previous = (normalized.uid && douyinContacts.get(`uid:${normalized.uid}`))
+    || (normalized.secUid && douyinContacts.get(`sec:${normalized.secUid}`));
+  const merged = {
+    ...previous,
+    ...normalized,
+    uid: normalized.uid || previous?.uid || '',
+    secUid: normalized.secUid || previous?.secUid || '',
+    remarkName: normalized.remarkName || previous?.remarkName || '',
+    mutual: hasMutual ? normalized.mutual : previous?.mutual || false,
+  };
+  if (merged.uid) {
+    douyinContacts.set(`uid:${merged.uid}`, merged);
+    douyinNicknameCache.set(`uid:${merged.uid}`, merged.nickname);
+  }
+  if (merged.secUid) {
+    douyinContacts.set(`sec:${merged.secUid}`, merged);
+    douyinNicknameCache.set(`sec:${merged.secUid}`, merged.nickname);
+  }
+  if (persist) scheduleDouyinContactPersist();
+  return true;
+}
+
+async function persistDouyinContacts() {
+  clearTimeout(douyinContactPersistTimer);
+  douyinContactPersistTimer = undefined;
+  const unique = new Map();
+  for (const contact of douyinContacts.values()) {
+    unique.set(douyinContactKey(contact), contact);
+  }
+  const target = douyinContactCachePath();
+  const temp = `${target}.tmp`;
+  const payload = JSON.stringify({ version: 1, updatedAt: Date.now(), contacts: [...unique.values()] }, null, 2);
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await fs.writeFile(temp, payload, { mode: 0o600 });
+  await fs.rename(temp, target);
+}
+
+function scheduleDouyinContactPersist() {
+  clearTimeout(douyinContactPersistTimer);
+  douyinContactPersistTimer = setTimeout(() => {
+    douyinContactPersistTimer = undefined;
+    void persistDouyinContacts().catch((error) => log(`Douyin contact cache persist failed: ${error.message}`));
+  }, 1_000);
+}
+
+async function loadDouyinContacts() {
+  try {
+    const saved = JSON.parse(await fs.readFile(douyinContactCachePath(), 'utf8'));
+    for (const contact of saved.contacts || []) rememberDouyinContact(contact);
+    const unique = new Set([...douyinContacts.values()].map(douyinContactKey));
+    log(`loaded ${unique.size} persisted Douyin contacts`);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') log(`Douyin contact cache load failed: ${error.message}`);
+  }
 }
 
 function cookieObjects(header, domain) {
@@ -196,6 +276,110 @@ async function getDouyinLookupPage() {
   return douyinLookupPage;
 }
 
+async function syncDouyinContacts() {
+  if (douyinContactSyncRunning || shuttingDown || !settings.douyinIMEnabled) return;
+  douyinContactSyncRunning = true;
+  let syncBrowser;
+  let syncContext;
+  let syncPage;
+  const seen = new Set();
+  let mutualCount = 0;
+  let hasMore = true;
+  let pageCount = 0;
+  const responseTasks = new Map();
+  const onResponse = (response) => {
+    if (!response.url().includes('/aweme/v1/web/user/following/list/')) return Promise.resolve();
+    if (responseTasks.has(response.url())) return responseTasks.get(response.url());
+    const task = (async () => {
+      try {
+        const body = await response.json();
+        if (Number(body?.status_code) !== 0 || !Array.isArray(body?.followings)) return;
+        pageCount += 1;
+        hasMore = body.has_more === true;
+        for (const user of body.followings) {
+          const uid = String(user?.uid || user?.user_id || '').trim();
+          const secUid = String(user?.sec_uid || user?.sec_user_id || '').trim();
+          const nickname = String(user?.nickname || '').trim();
+          if ((!uid && !secUid) || !nickname) continue;
+          const mutual = Number(user?.follow_status) === 2;
+          const key = uid ? `uid:${uid}` : `sec:${secUid}`;
+          seen.add(key);
+          if (mutual) mutualCount += 1;
+          rememberDouyinContact({
+            uid,
+            secUid,
+            nickname,
+            remarkName: user?.remark_name,
+            mutual,
+            updatedAt: Date.now(),
+          });
+        }
+      } catch (error) {
+        log(`Douyin following page decode failed: ${error.message}`);
+      }
+    })();
+    responseTasks.set(response.url(), task);
+    return task;
+  };
+  try {
+    await startBrowser();
+    const chromiumArgs = ['--disable-dev-shm-usage'];
+    if (typeof process.getuid === 'function' && process.getuid() === 0) chromiumArgs.push('--no-sandbox');
+    syncBrowser = await chromium.launch({ headless: true, args: chromiumArgs });
+    syncContext = await syncBrowser.newContext({
+      storageState: await context.storageState(),
+      viewport: { width: 1280, height: 720 },
+    });
+    syncPage = await syncContext.newPage();
+    syncPage.setDefaultTimeout(15_000);
+    syncPage.on('response', onResponse);
+    await syncPage.goto('https://www.douyin.com/user/self', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    const firstResponse = syncPage.waitForResponse(
+      (response) => response.url().includes('/aweme/v1/web/user/following/list/'),
+      { timeout: 20_000 },
+    );
+    await syncPage.locator('[data-e2e="user-info-follow"] > div').last().click({ timeout: 15_000 });
+    await onResponse(await firstResponse);
+    await syncPage.waitForTimeout(2_000);
+    let idleRounds = 0;
+    while (hasMore && idleRounds < 8 && pageCount < 200) {
+      const before = pageCount;
+      await syncPage.locator('div').evaluateAll((elements) => {
+        const scrollable = elements
+          .filter((element) => element.clientHeight > 200 && element.scrollHeight > element.clientHeight + 500)
+          .sort((left, right) => right.scrollHeight - left.scrollHeight)[0];
+        if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
+      });
+      await syncPage.waitForTimeout(700);
+      idleRounds = pageCount === before ? idleRounds + 1 : 0;
+    }
+    await syncPage.waitForTimeout(500);
+    if (pageCount === 0 || seen.size === 0) throw new Error('关注列表未返回有效分页');
+    await persistDouyinContacts();
+    log(`synced ${seen.size} Douyin following contacts (${mutualCount} mutual) across ${pageCount} pages`);
+  } catch (error) {
+    const pageInfo = syncPage ? ` page=${syncPage.url()} title=${await syncPage.title().catch(() => '-')}` : '';
+    log(`Douyin contact sync failed: ${error.message}${pageInfo}`);
+    if (!shuttingDown && settings.douyinIMEnabled) setTimeout(() => void syncDouyinContacts(), 60_000);
+  } finally {
+    syncPage?.off('response', onResponse);
+    await syncContext?.close().catch(() => {});
+    await syncBrowser?.close().catch(() => {});
+    douyinContactSyncRunning = false;
+  }
+}
+
+function scheduleDouyinContactSync() {
+  clearInterval(douyinContactSyncTimer);
+  douyinContactSyncTimer = undefined;
+  if (!settings.douyinIMEnabled) return;
+  douyinContactSyncTimer = setInterval(() => void syncDouyinContacts(), douyinContactSyncMs);
+  setTimeout(() => void syncDouyinContacts(), 30_000);
+}
+
 function stopDouyinIM() {
   clearTimeout(douyinIMReconnectTimer);
   douyinIMReconnectTimer = undefined;
@@ -203,6 +387,8 @@ function stopDouyinIM() {
   douyinIMInitRetryTimer = undefined;
   clearInterval(douyinIMHealthTimer);
   douyinIMHealthTimer = undefined;
+  clearInterval(douyinContactSyncTimer);
+  douyinContactSyncTimer = undefined;
   if (douyinIMSocket) {
     const socket = douyinIMSocket;
     douyinIMSocket = undefined;
@@ -370,7 +556,7 @@ async function resolveDouyinNickname(secUserId, userId) {
       return { nickname: '', accountID };
     }, { secUserId: sec, userId: uid });
     if (cachedIdentity.nickname) {
-      douyinNicknameCache.set(cacheKey, cachedIdentity.nickname);
+      rememberDouyinContact({ uid, secUid: sec, nickname: cachedIdentity.nickname }, { persist: true });
       return cachedIdentity.nickname;
     }
     const nickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
@@ -383,7 +569,7 @@ async function resolveDouyinNickname(secUserId, userId) {
       return String(body?.user?.nickname || body?.user_info?.nickname || body?.data?.user?.nickname || '');
     }, { secUserId: sec, userId: uid });
     if (nickname) {
-      douyinNicknameCache.set(cacheKey, nickname);
+      rememberDouyinContact({ uid, secUid: sec, nickname }, { persist: true });
       return nickname;
     }
     if (sec) {
@@ -408,7 +594,7 @@ async function resolveDouyinNickname(secUserId, userId) {
       }).catch(() => '');
       const navigatedNickname = renderedNickname || pageTitleNickname;
       if (navigatedNickname && !['抖音', '抖音精选'].includes(navigatedNickname)) {
-        douyinNicknameCache.set(cacheKey, navigatedNickname);
+        rememberDouyinContact({ uid, secUid: sec, nickname: navigatedNickname }, { persist: true });
         return navigatedNickname;
       }
     }
@@ -894,8 +1080,10 @@ async function shutdown() {
   shuttingDown = true;
   clearInterval(refreshTimer);
   clearInterval(douyinTimer);
+  clearInterval(douyinContactSyncTimer);
   stopDouyinIM();
   try {
+    if (douyinContactPersistTimer) await persistDouyinContacts();
     await persistStorageState();
     if (context) await context.close();
   } finally {
@@ -926,6 +1114,7 @@ wss.on('connection', (socket) => {
             douyinIMGroupName: command.douyinIMGroupName || '',
             douyinIMGroupNumber: command.douyinIMGroupNumber || '',
           };
+          await loadDouyinContacts();
           if (settings.weiboEnabled) {
             scheduleRefresh();
             await refresh({ reason: 'startup' });
@@ -935,6 +1124,7 @@ wss.on('connection', (socket) => {
           scheduleDouyin();
           if (settings.douyinIMEnabled) {
             await restoreDouyinIMIdentity();
+            scheduleDouyinContactSync();
             void startDouyinIM().catch((error) => {
               if (!shuttingDown) emit('douyin_im_status', { status: 'error', message: error.message });
             });
