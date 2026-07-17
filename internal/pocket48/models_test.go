@@ -1,11 +1,30 @@
 package pocket48
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"pocket48-bot/internal/config"
 )
+
+func TestLiveModelsAcceptStringEncodedNumbers(t *testing.T) {
+	var listItem LiveListItem
+	if err := json.Unmarshal([]byte(`{"liveId":"live-1","status":"1","ctime":"1784210000","memberId":"63559","userId":63559,"roomId":"123456"}`), &listItem); err != nil {
+		t.Fatal(err)
+	}
+	if listItem.StartTime != 1784210000 || listItem.MemberID != 63559 || listItem.LiveRoomID != 123456 || listItem.LiveStatus != 1 {
+		t.Fatalf("list item = %#v", listItem)
+	}
+
+	var live LiveOne
+	if err := json.Unmarshal([]byte(`{"liveId":"live-1","ctime":"1784210000","onlineNum":"88","liveType":"1","roomId":"123456","user":{"userId":"63559","roomId":"1279287"}}`), &live); err != nil {
+		t.Fatal(err)
+	}
+	if live.RoomID != 123456 || live.OnlineNum != 88 || live.User.UserID != 63559 || live.User.RoomID != 1279287 {
+		t.Fatalf("live = %#v", live)
+	}
+}
 
 func TestIsAuthorizationExpired(t *testing.T) {
 	if !IsAuthorizationExpired(&APIError{Status: 401003, Message: "expired"}) {

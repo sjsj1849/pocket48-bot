@@ -84,6 +84,7 @@ func buildServiceStates(lines []string) []serviceState {
 	states := []serviceState{
 		{ID: "bot", Name: "Bot", Subtitle: "主控服务与任务调度", Status: choose(active, "healthy", "down"), StatusText: choose(active, "运行中", "已停止"), Uptime: uptime, Detail: "pocket48-bot.service", LastEvent: "任务调度正常"},
 		{ID: "qchat", Name: "QChat", Subtitle: "口袋48实时消息", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "WebSocket", LastEvent: "等待连接状态"},
+		{ID: "pocket_live", Name: "Live NIM", Subtitle: "口袋48直播礼物与结束事件", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "NIM Chatroom", LastEvent: "等待直播链路状态"},
 		{ID: "napcat", Name: "NapCat", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
 		{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
@@ -103,6 +104,18 @@ func buildServiceStates(lines []string) []serviceState {
 			}
 		}
 		switch {
+		case strings.Contains(line, "[NIM-health] qchat=connected"):
+			setLatest("qchat", "healthy", "运行中", "实时消息心跳正常")
+		case strings.Contains(line, "[NIM-health] qchat=disconnected"):
+			setLatest("qchat", "attention", "重连中", "实时消息心跳中断")
+		case strings.Contains(line, "[NIM-live-health] status=connected"):
+			setLatest("pocket_live", "healthy", "直播中", "直播礼物与结束事件链路已连接")
+		case strings.Contains(line, "[NIM-live-health] status=idle"):
+			setLatest("pocket_live", "healthy", "待命", "当前无直播，实时链路待命")
+		case strings.Contains(line, "[NIM-live-health] status=reconnecting"):
+			setLatest("pocket_live", "attention", "重连中", "直播实时链路正在恢复")
+		case strings.Contains(line, "[NIM-live] active live discovery failed"), strings.Contains(line, "[NIM-live] GetLiveOne failed"):
+			setLatest("pocket_live", "down", "发现异常", "直播发现接口调用失败")
 		case strings.Contains(line, "[NIM-room] QChat connected"):
 			setLatest("qchat", "healthy", "运行中", "WebSocket 已连接")
 		case strings.Contains(line, "Connected to NapCat successfully"):

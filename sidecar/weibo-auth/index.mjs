@@ -23,6 +23,7 @@ let refreshTimer;
 let douyinTimer;
 let douyinIMReconnectTimer;
 let douyinIMInitRetryTimer;
+let douyinIMHealthTimer;
 let douyinIMSocket;
 let refreshRunning = false;
 let douyinScanning = false;
@@ -47,7 +48,7 @@ let settings = {
   douyinIMGroupName: '',
   douyinIMGroupNumber: '',
 };
-let douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '' };
+let douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '', groupNumber: '' };
 const douyinIMSeen = new Set();
 const douyinNicknameCache = new Map();
 
@@ -190,13 +191,50 @@ function stopDouyinIM() {
   douyinIMReconnectTimer = undefined;
   clearTimeout(douyinIMInitRetryTimer);
   douyinIMInitRetryTimer = undefined;
+  clearInterval(douyinIMHealthTimer);
+  douyinIMHealthTimer = undefined;
   if (douyinIMSocket) {
     const socket = douyinIMSocket;
     douyinIMSocket = undefined;
     socket.removeAllListeners();
     socket.close();
   }
-  douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '' };
+  douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '', groupNumber: '' };
+}
+
+function douyinIMIdentityPath() {
+  return path.resolve(settings.profileDir, 'douyin-im-identity.json');
+}
+
+async function persistDouyinIMIdentity() {
+  if (!douyinIMIdentity.selfUid || !douyinIMIdentity.conversationId) return;
+  const target = douyinIMIdentityPath();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const temp = `${target}.tmp`;
+  await fs.writeFile(temp, JSON.stringify(douyinIMIdentity), { mode: 0o600 });
+  await fs.rename(temp, target);
+}
+
+async function restoreDouyinIMIdentity() {
+  try {
+    const restored = JSON.parse(await fs.readFile(douyinIMIdentityPath(), 'utf8'));
+    const configuredNumber = String(settings.douyinIMGroupNumber || '').trim();
+    const configuredName = String(settings.douyinIMGroupName || '').trim();
+    const numberMatches = !configuredNumber || String(restored.groupNumber || '') === configuredNumber;
+    const nameMatches = !configuredName || String(restored.groupName || '').includes(configuredName);
+    if (!/^\d+$/.test(String(restored.selfUid || '')) || !restored.conversationId || !numberMatches || !nameMatches) return false;
+    douyinIMIdentity = {
+      selfUid: String(restored.selfUid),
+      conversationId: String(restored.conversationId),
+      ownerUid: String(restored.ownerUid || ''),
+      groupName: String(restored.groupName || configuredName),
+      groupNumber: String(restored.groupNumber || configuredNumber),
+    };
+    log(`restored Douyin IM identity for group ${douyinIMIdentity.groupName || douyinIMIdentity.groupNumber}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function scheduleDouyinIMInitRetry() {
@@ -272,8 +310,29 @@ async function connectDouyinIM() {
       },
     );
     douyinIMSocket = socket;
-    socket.on('open', () => emit('douyin_im_status', { status: 'connected', message: '抖音私信/群聊只读连接已建立' }));
+    let healthTimer;
+    let alive = true;
+    socket.on('open', () => {
+      emit('douyin_im_status', { status: 'connected', message: '抖音私信/群聊只读连接已建立' });
+      clearInterval(douyinIMHealthTimer);
+      healthTimer = setInterval(() => {
+        if (douyinIMSocket !== socket || socket.readyState !== WebSocket.OPEN) return;
+        if (!alive) {
+          socket.terminate();
+          return;
+        }
+        alive = false;
+        try { socket.ping(); } catch { socket.terminate(); }
+      }, 30_000);
+      healthTimer.unref?.();
+      douyinIMHealthTimer = healthTimer;
+    });
+    socket.on('pong', () => {
+      alive = true;
+      emit('douyin_im_status', { status: 'connected', message: '抖音私信/群聊只读连接心跳正常' });
+    });
     socket.on('message', (raw) => {
+      alive = true;
       try {
         const message = decodeDouyinIMPush(raw);
         if (message) void publishDouyinIMMessage(message);
@@ -283,6 +342,8 @@ async function connectDouyinIM() {
     });
     socket.on('error', (error) => emit('douyin_im_status', { status: 'error', message: error.message }));
     socket.on('close', () => {
+      clearInterval(healthTimer);
+      if (douyinIMHealthTimer === healthTimer) douyinIMHealthTimer = undefined;
       if (douyinIMSocket === socket) douyinIMSocket = undefined;
       emit('douyin_im_status', { status: 'disconnected', message: '抖音私信/群聊只读连接已断开，准备重连' });
       scheduleDouyinIMReconnect();
@@ -296,7 +357,11 @@ async function connectDouyinIM() {
 }
 
 async function startDouyinIM() {
-  if (!settings.douyinIMEnabled || shuttingDown || douyinIMInitRunning || douyinIMIdentity.selfUid) return;
+  if (!settings.douyinIMEnabled || shuttingDown || douyinIMInitRunning) return;
+  if (douyinIMIdentity.selfUid) {
+    await connectDouyinIM();
+    return;
+  }
   douyinIMInitRunning = true;
   clearTimeout(douyinIMInitRetryTimer);
   douyinIMInitRetryTimer = undefined;
@@ -326,8 +391,10 @@ async function startDouyinIM() {
         conversationId: group?.conversationId || '',
         ownerUid: group?.ownerUid || '',
         groupName: group?.name || targetGroupName,
+        groupNumber: group?.groupNumber || targetGroupNumber,
       };
       await persistStorageState();
+      await persistDouyinIMIdentity();
       if (group) {
         emit('douyin_im_group', {
           groupName: group.name,
@@ -718,9 +785,12 @@ wss.on('connection', (socket) => {
             clearInterval(refreshTimer);
           }
           scheduleDouyin();
-          if (settings.douyinIMEnabled) void startDouyinIM().catch((error) => {
-            if (!shuttingDown) emit('douyin_im_status', { status: 'error', message: error.message });
-          });
+          if (settings.douyinIMEnabled) {
+            await restoreDouyinIMIdentity();
+            void startDouyinIM().catch((error) => {
+              if (!shuttingDown) emit('douyin_im_status', { status: 'error', message: error.message });
+            });
+          }
           else stopDouyinIM();
           emit('douyin_status', { status: 'ready', message: '抖音作品监控已就绪' });
           void scanAllDouyin();

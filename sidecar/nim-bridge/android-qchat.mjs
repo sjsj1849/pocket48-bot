@@ -375,6 +375,10 @@ export class AndroidQChatClient {
       }, 20000);
       this.socket = net.createConnection(address);
       this.socket.setKeepAlive(true, 15000);
+      this.socket.setTimeout(45000, () => {
+        this.onError?.(new Error('QChat heartbeat timeout'));
+        this.socket?.destroy();
+      });
       this.socket.on('connect', () => this.socket.write(handshake.wire));
       this.socket.on('data', (chunk) => {
         try {
