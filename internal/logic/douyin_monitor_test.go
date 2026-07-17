@@ -91,3 +91,11 @@ func TestFormatDouyinIMTime(t *testing.T) {
 		t.Fatalf("millisecond fallback=%q", got)
 	}
 }
+
+func TestFormatDouyinIMNotification(t *testing.T) {
+	got := formatDouyinIMNotification("【肥家｜抖音群】", "群主", "消息正文", "2026-07-17 10:00:00")
+	want := "【肥家｜抖音群】\n来自：群主\n消息正文\n2026-07-17 10:00:00"
+	if got != want {
+		t.Fatalf("notification=%q", got)
+	}
+}
