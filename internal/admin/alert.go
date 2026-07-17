@@ -162,7 +162,7 @@ func sendServiceEmail(cfg alertConfig, service serviceState, recovered bool, now
 	fmt.Fprintf(&message, "From: %s\r\nTo: %s\r\nSubject: %s\r\n", cfg.From, cfg.To, subject)
 	message.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
 	message.WriteString(body)
-	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi")
+	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", cfg.From)
 	cmd.Stdin = &message
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(output)))
