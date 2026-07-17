@@ -115,6 +115,21 @@ func TestFormatDouyinReplyText(t *testing.T) {
 	}
 }
 
+func TestInferDouyinQuotedName(t *testing.T) {
+	peerReply := douyinBrowserEvent{SenderUID: "peer", QuotedSenderUID: "peer"}
+	if got := inferDouyinQuotedName(peerReply, "对方昵称", "self"); got != "对方昵称" {
+		t.Fatalf("peer quoted name=%q", got)
+	}
+	selfReply := douyinBrowserEvent{SenderUID: "peer", SelfUID: "self", QuotedSenderUID: "self"}
+	if got := inferDouyinQuotedName(selfReply, "对方昵称", "self"); got != "我" {
+		t.Fatalf("self quoted name=%q", got)
+	}
+	explicit := douyinBrowserEvent{QuotedName: "引用昵称", QuotedSenderUID: "self"}
+	if got := inferDouyinQuotedName(explicit, "对方昵称", "self"); got != "引用昵称" {
+		t.Fatalf("explicit quoted name=%q", got)
+	}
+}
+
 func TestClassifyDouyinIMEventRejectsExplicitSelfUID(t *testing.T) {
 	event := douyinBrowserEvent{ConversationType: 1, SenderUID: "self", SelfUID: "self"}
 	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "" {

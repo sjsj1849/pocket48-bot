@@ -114,7 +114,7 @@ function firstText(value, keys, depth = 0) {
 }
 
 function replyDetails(content) {
-  if (!content || typeof content !== 'object') return { quotedName: '', quotedText: '' };
+  if (!content || typeof content !== 'object') return { quotedName: '', quotedText: '', quotedSenderUid: '' };
   const queue = [content];
   while (queue.length > 0) {
     const current = queue.shift();
@@ -127,12 +127,13 @@ function replyDetails(content) {
         }
         const quotedName = firstText(parsed, ['nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname', 'sender_name', 'senderName', 'replyName']);
         const quotedText = firstText(parsed, ['text', 'content', 'message', 'msg', 'replyText', 'quote_text', 'quotedText', 'hint']);
-        if (quotedName || quotedText) return { quotedName, quotedText };
+        const quotedSenderUid = firstText(parsed, ['sender_uid', 'senderUid', 'from_uid', 'fromUid', 'user_id', 'userId', 'uid']);
+        if (quotedName || quotedText || quotedSenderUid) return { quotedName, quotedText, quotedSenderUid };
       }
       if (value && typeof value === 'object') queue.push(value);
     }
   }
-  return { quotedName: '', quotedText: '' };
+  return { quotedName: '', quotedText: '', quotedSenderUid: '' };
 }
 
 function decodeMessage(raw, fallbackConversationId = '', fallbackConversationType = 0) {
@@ -143,7 +144,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   const ext = mapEntries(message, 9);
   const messageType = Number(first(message, 6, 0n));
   let text = typeof content?.text === 'string' ? content.text.trim() : '';
-  const { quotedName, quotedText } = replyDetails({ content, ext });
+  const { quotedName, quotedText, quotedSenderUid } = replyDetails({ content, ext });
   if (!text) {
     const contentWithoutReply = Object.fromEntries(Object.entries(content || {}).filter(([key]) => !/reply|quote|reference|referenced/i.test(key)));
     text = firstText(contentWithoutReply, ['text', 'content', 'message', 'msg', 'title', 'description']);
@@ -171,6 +172,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     createTime: asNumber(first(message, 10, 0n)),
     quotedName,
     quotedText,
+    quotedSenderUid,
     internalMetadata,
     contentKeys: [...Object.keys(content || {}), ...Object.keys(ext).map((key) => `ext:${key}`)].slice(0, 20),
     text,

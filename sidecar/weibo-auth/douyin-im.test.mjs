@@ -47,13 +47,13 @@ test('decodes a text push with its server creation time', () => {
   assert.deepEqual(decodeDouyinIMPush(frame), {
     conversationId: 'group-conv', conversationType: 2, serverMessageId: '7', index: '9',
     conversationShortId: '', messageType: 7, senderUid: '12345', senderSecUid: '', senderNameHint: '', createTime: 1784251775000,
-    quotedName: '', quotedText: '', internalMetadata: false, contentKeys: ['text'],
+    quotedName: '', quotedText: '', quotedSenderUid: '', internalMetadata: false, contentKeys: ['text'],
     text: '只读测试', link: '',
   });
 });
 
 test('decodes reply context and answer text', () => {
-  const content = JSON.stringify({ text: '回复内容', reply_info: { nickname: '原发送人', text: '原消息' } });
+  const content = JSON.stringify({ text: '回复内容', reply_info: { nickname: '原发送人', text: '原消息', sender_uid: '123' } });
   const message = [...field(1, 'private-conv'), ...intField(2, 1), ...intField(3, 8), ...intField(6, 7), ...intField(7, 456), ...field(8, content)];
   const notify = [...field(2, 'private-conv'), ...intField(3, 1), ...field(5, message)];
   const frame = [...field(7, 'pb'), ...field(8, field(6, field(500, notify)))];
@@ -61,6 +61,7 @@ test('decodes reply context and answer text', () => {
   assert.equal(decoded.text, '回复内容');
   assert.equal(decoded.quotedName, '原发送人');
   assert.equal(decoded.quotedText, '原消息');
+  assert.equal(decoded.quotedSenderUid, '123');
 });
 
 test('uses the sender nickname carried in message ext', () => {
