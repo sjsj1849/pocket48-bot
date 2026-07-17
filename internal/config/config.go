@@ -66,6 +66,10 @@ type Config struct {
 	DouyinIMPrivateEnabled            bool                                               `json:"DOUYIN_IM_PRIVATE_ENABLED"`
 	DouyinIMGroupName                 string                                             `json:"DOUYIN_IM_GROUP_NAME"`
 	DouyinIMGroupNumber               string                                             `json:"DOUYIN_IM_GROUP_NUMBER"`
+	AlertEmailEnabled                 bool                                               `json:"ALERT_EMAIL_ENABLED"`
+	AlertEmailTo                      string                                             `json:"ALERT_EMAIL_TO"`
+	AlertEmailFrom                    string                                             `json:"ALERT_EMAIL_FROM"`
+	AlertEmailCooldownMinutes         int                                                `json:"ALERT_EMAIL_COOLDOWN_MINUTES"`
 	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
 	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
 	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
@@ -217,6 +221,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.BrowserSidecarCmd) == "" {
 		cfg.BrowserSidecarCmd = cfg.WeiboBrowserAuthCmd
+	}
+	if strings.TrimSpace(cfg.AlertEmailFrom) == "" {
+		cfg.AlertEmailFrom = "pocket48@jiufeng.cloud"
+	}
+	if cfg.AlertEmailCooldownMinutes <= 0 {
+		cfg.AlertEmailCooldownMinutes = 60
 	}
 	if strings.TrimSpace(cfg.BrowserProfileDir) == "" {
 		cfg.BrowserProfileDir = cfg.WeiboBrowserProfileDir

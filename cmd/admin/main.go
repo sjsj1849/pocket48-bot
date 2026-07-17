@@ -9,11 +9,12 @@ import (
 
 func main() {
 	server, err := admin.New(admin.Options{
-		Address:      envOr("POCKET48_ADMIN_ADDR", "127.0.0.1:8787"),
-		ConfigPath:   envOr("POCKET48_CONFIG_PATH", "/root/pocket48-bot/config.json"),
-		LogPath:      envOr("POCKET48_LOG_PATH", "/root/pocket48-bot/bot.log"),
-		PasswordPath: envOr("POCKET48_ADMIN_PASSWORD_FILE", "/root/pocket48-bot/storage/admin-password"),
-		CookiePath:   envOr("POCKET48_ADMIN_COOKIE_PATH", "/"),
+		Address:        envOr("POCKET48_ADMIN_ADDR", "127.0.0.1:8787"),
+		ConfigPath:     envOr("POCKET48_CONFIG_PATH", "/root/pocket48-bot/config.json"),
+		LogPath:        envOr("POCKET48_LOG_PATH", "/root/pocket48-bot/bot.log"),
+		PasswordPath:   envOr("POCKET48_ADMIN_PASSWORD_FILE", "/root/pocket48-bot/storage/admin-password"),
+		CookiePath:     envOr("POCKET48_ADMIN_COOKIE_PATH", "/"),
+		AlertStatePath: envOr("POCKET48_ALERT_STATE_PATH", "/root/pocket48-bot/storage/admin-alert-state.json"),
 	})
 	if err != nil {
 		log.Fatal(err)

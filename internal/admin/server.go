@@ -28,11 +28,12 @@ var webFiles embed.FS
 const botService = "pocket48-bot.service"
 
 type Options struct {
-	Address      string
-	ConfigPath   string
-	LogPath      string
-	PasswordPath string
-	CookiePath   string
+	Address        string
+	ConfigPath     string
+	LogPath        string
+	PasswordPath   string
+	CookiePath     string
+	AlertStatePath string
 }
 
 type Server struct {
@@ -77,6 +78,9 @@ func New(opts Options) (*Server, error) {
 		sessions: make(map[string]session),
 		login:    make(map[string]*loginAttempt),
 	}
+	if strings.TrimSpace(s.opts.AlertStatePath) == "" {
+		s.opts.AlertStatePath = filepath.Join(filepath.Dir(opts.ConfigPath), "storage", "admin-alert-state.json")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
 	mux.Handle("/api/", s.requireSession(http.HandlerFunc(s.handleAPI)))
@@ -95,6 +99,7 @@ func New(opts Options) (*Server, error) {
 func (s *Server) Address() string { return s.opts.Address }
 
 func (s *Server) ListenAndServe() error {
+	go s.runAlertMonitor()
 	err := s.httpServer.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil

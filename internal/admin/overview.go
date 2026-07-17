@@ -120,6 +120,8 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("qchat", "healthy", "运行中", "WebSocket 已连接")
 		case strings.Contains(line, "Connected to NapCat successfully"):
 			setLatest("napcat", "healthy", "运行中", "会话连接正常")
+		case strings.Contains(line, "NapCat read error (disconnected?)"):
+			setLatest("napcat", "down", "连接中断", "WebSocket 已断开，正在自动重连")
 		case strings.Contains(line, "[NAPCAT] Sending "):
 			setLatest("napcat", "healthy", "运行中", "消息发送链路正常")
 		case strings.Contains(line, "[Weibo-auth] status=healthy"):

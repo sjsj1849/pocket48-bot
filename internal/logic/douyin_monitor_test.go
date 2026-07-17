@@ -82,3 +82,12 @@ func TestClassifyDouyinIMEvent(t *testing.T) {
 		t.Fatalf("outgoing private message must be ignored, got %q", got)
 	}
 }
+
+func TestFormatDouyinIMTime(t *testing.T) {
+	if got := formatDouyinIMTime(1784251775, 0); got != "2026-07-17 09:29:35" {
+		t.Fatalf("seconds timestamp=%q", got)
+	}
+	if got := formatDouyinIMTime(0, 1784251775000); got != "2026-07-17 09:29:35" {
+		t.Fatalf("millisecond fallback=%q", got)
+	}
+}

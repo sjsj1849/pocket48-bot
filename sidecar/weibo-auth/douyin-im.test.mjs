@@ -37,16 +37,16 @@ test('decodes the configured group owner from the IM init envelope', () => {
   });
 });
 
-test('decodes a text push without exposing send functionality', () => {
+test('decodes a text push with its server creation time', () => {
   const content = JSON.stringify({ text: '只读测试' });
-  const message = [...field(1, 'group-conv'), ...intField(2, 2), ...intField(3, 7), ...intField(4, 9), ...intField(6, 7), ...intField(7, 12345), ...field(8, content)];
+  const message = [...field(1, 'group-conv'), ...intField(2, 2), ...intField(3, 7), ...intField(4, 9), ...intField(6, 7), ...intField(7, 12345), ...field(8, content), ...intField(10, 1784251775000)];
   const notify = [...field(2, 'group-conv'), ...intField(3, 2), ...field(5, message)];
   const body = field(500, notify);
   const response = field(6, body);
   const frame = [...field(7, 'pb'), ...field(8, response)];
   assert.deepEqual(decodeDouyinIMPush(frame), {
     conversationId: 'group-conv', conversationType: 2, serverMessageId: '7', index: '9',
-    conversationShortId: '', messageType: 7, senderUid: '12345', senderSecUid: '',
+    conversationShortId: '', messageType: 7, senderUid: '12345', senderSecUid: '', createTime: 1784251775000,
     text: '只读测试', link: '',
   });
 });

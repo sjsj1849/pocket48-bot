@@ -259,19 +259,24 @@ function rememberDouyinIMMessage(key) {
   return true;
 }
 
-async function resolveDouyinNickname(secUserId) {
+async function resolveDouyinNickname(secUserId, userId) {
   const sec = String(secUserId || '').trim();
-  if (!sec) return '';
-  if (douyinNicknameCache.has(sec)) return douyinNicknameCache.get(sec);
+  const uid = String(userId || '').trim();
+  if (!sec && !uid) return '';
+  const cacheKey = sec ? `sec:${sec}` : `uid:${uid}`;
+  if (douyinNicknameCache.has(cacheKey)) return douyinNicknameCache.get(cacheKey);
   try {
     const targetPage = await getDouyinIMPage();
-    const nickname = await targetPage.evaluate(async (value) => {
-      const response = await fetch(`/aweme/v1/web/user/profile/other/?sec_user_id=${encodeURIComponent(value)}`, { credentials: 'include' });
+    const nickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
+      const params = new URLSearchParams();
+      if (secValue) params.set('sec_user_id', secValue);
+      else params.set('user_id', uidValue);
+      const response = await fetch(`/aweme/v1/web/user/profile/other/?${params}`, { credentials: 'include' });
       if (!response.ok) return '';
       const body = await response.json();
       return String(body?.user?.nickname || body?.user_info?.nickname || body?.data?.user?.nickname || '');
-    }, sec);
-    douyinNicknameCache.set(sec, nickname);
+    }, { secUserId: sec, userId: uid });
+    if (nickname) douyinNicknameCache.set(cacheKey, nickname);
     return nickname;
   } catch {
     return '';
@@ -286,8 +291,9 @@ async function publishDouyinIMMessage(message) {
   if (!isPrivate && !isTargetGroup) return;
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
   if (!rememberDouyinIMMessage(key)) return;
-  const senderName = await resolveDouyinNickname(message.senderSecUid);
-  emit('douyin_im_message', { ...message, senderName });
+  const senderName = await resolveDouyinNickname(message.senderSecUid, message.senderUid);
+  if (!senderName) log(`Douyin IM nickname unresolved sender_uid=${message.senderUid} sender_sec_uid=${message.senderSecUid || '-'}`);
+  emit('douyin_im_message', { ...message, senderName, receivedAt: Date.now() });
 }
 
 async function connectDouyinIM() {
