@@ -3,6 +3,8 @@ package pocket48
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Response represents a generic Pocket48 API response
@@ -164,6 +166,44 @@ type LiveUser struct {
 	Avatar   string `json:"avatar"`
 }
 
+type flexibleInt64 int64
+
+func (value *flexibleInt64) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" || raw == `""` {
+		*value = 0
+		return nil
+	}
+	if strings.HasPrefix(raw, `"`) {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(text)
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return err
+	}
+	*value = flexibleInt64(parsed)
+	return nil
+}
+
+func (user *LiveUser) UnmarshalJSON(data []byte) error {
+	type alias LiveUser
+	aux := struct {
+		*alias
+		UserID flexibleInt64 `json:"userId"`
+		RoomID flexibleInt64 `json:"roomId"`
+	}{alias: (*alias)(user)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	user.UserID = int64(aux.UserID)
+	user.RoomID = int64(aux.RoomID)
+	return nil
+}
+
 type LiveListItem struct {
 	LiveID      string `json:"liveId"`
 	LiveTitle   string `json:"title"`
@@ -178,6 +218,27 @@ type LiveListItem struct {
 	MsgFilePath string `json:"msgFilePath"`
 }
 
+func (item *LiveListItem) UnmarshalJSON(data []byte) error {
+	type alias LiveListItem
+	aux := struct {
+		*alias
+		LiveStatus flexibleInt64 `json:"status"`
+		StartTime  flexibleInt64 `json:"ctime"`
+		MemberID   flexibleInt64 `json:"memberId"`
+		UserID     flexibleInt64 `json:"userId"`
+		LiveRoomID flexibleInt64 `json:"roomId"`
+	}{alias: (*alias)(item)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	item.LiveStatus = int(aux.LiveStatus)
+	item.StartTime = int64(aux.StartTime)
+	item.MemberID = int64(aux.MemberID)
+	item.UserID = int64(aux.UserID)
+	item.LiveRoomID = int64(aux.LiveRoomID)
+	return nil
+}
+
 type LiveOne struct {
 	LiveID      string   `json:"liveId"`
 	Title       string   `json:"title"`
@@ -188,6 +249,25 @@ type LiveOne struct {
 	LiveType    int      `json:"liveType"`
 	RoomID      int64    `json:"roomId"`
 	User        LiveUser `json:"user"`
+}
+
+func (item *LiveOne) UnmarshalJSON(data []byte) error {
+	type alias LiveOne
+	aux := struct {
+		*alias
+		Ctime     flexibleInt64 `json:"ctime"`
+		OnlineNum flexibleInt64 `json:"onlineNum"`
+		LiveType  flexibleInt64 `json:"liveType"`
+		RoomID    flexibleInt64 `json:"roomId"`
+	}{alias: (*alias)(item)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	item.Ctime = int64(aux.Ctime)
+	item.OnlineNum = int64(aux.OnlineNum)
+	item.LiveType = int(aux.LiveType)
+	item.RoomID = int64(aux.RoomID)
+	return nil
 }
 
 // LoginResponseContent is the content of a successful login response

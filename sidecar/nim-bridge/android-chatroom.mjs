@@ -268,6 +268,10 @@ export class AndroidChatroomClient {
 
       this.socket = net.createConnection(address);
       this.socket.setKeepAlive(true, 15000);
+      this.socket.setTimeout(45000, () => {
+        this.onError?.(new Error(`chatroom ${this.roomId} heartbeat timeout`));
+        this.socket?.destroy();
+      });
       this.socket.on('connect', () => this.socket.write(handshake));
       this.socket.on('data', (chunk) => {
         try {

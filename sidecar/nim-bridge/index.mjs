@@ -18,6 +18,7 @@ const qchatState = {
   connected: false,
   rooms: new Map()
 };
+let healthTimer;
 
 function emit(type, fields = {}) {
   const payload = JSON.stringify({ type, ...fields });
@@ -327,6 +328,7 @@ async function syncRooms(command) {
 }
 
 async function shutdown() {
+  clearInterval(healthTimer);
   for (const nimRoomId of [...liveRooms.keys()]) await disconnectLive(nimRoomId, 'shutdown');
   await destroyQChat();
   for (const peer of peers) peer.close();
@@ -374,6 +376,15 @@ wss.on('connection', (peer) => {
 server.listen({ host: '127.0.0.1', port: requestedPort }, () => {
   const address = server.address();
   process.stdout.write(`PORT:${address.port}\n`);
+  healthTimer = setInterval(() => {
+    const liveConnected = [...liveRooms.values()].filter((item) => item.client?.connected).length;
+    emit('nim_status', {
+      qchatConnected: qchatState.connected,
+      liveConnected,
+      liveConfigured: liveRooms.size,
+    });
+  }, 30_000);
+  healthTimer.unref?.();
 });
 
 process.on('SIGINT', () => void shutdown().finally(() => process.exit(0)));

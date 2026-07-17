@@ -113,13 +113,16 @@ type RoomSubscription struct {
 }
 
 type sidecarEvent struct {
-	Type      string          `json:"type"`
-	Data      json.RawMessage `json:"data,omitempty"`
-	Msg       string          `json:"msg,omitempty"`
-	RoomID    int64           `json:"roomId,omitempty"`    // Pocket48 channel id
-	NIMRoomID int64           `json:"nimRoomId,omitempty"` // live chatroom id
-	ChannelID int64           `json:"channelId,omitempty"`
-	Code      int             `json:"code,omitempty"`
+	Type           string          `json:"type"`
+	Data           json.RawMessage `json:"data,omitempty"`
+	Msg            string          `json:"msg,omitempty"`
+	RoomID         int64           `json:"roomId,omitempty"`    // Pocket48 channel id
+	NIMRoomID      int64           `json:"nimRoomId,omitempty"` // live chatroom id
+	ChannelID      int64           `json:"channelId,omitempty"`
+	Code           int             `json:"code,omitempty"`
+	QChatConnected bool            `json:"qchatConnected,omitempty"`
+	LiveConnected  int             `json:"liveConnected,omitempty"`
+	LiveConfigured int             `json:"liveConfigured,omitempty"`
 }
 
 type sidecarCommand struct {
@@ -503,10 +506,12 @@ func (b *NimDanmakuBridge) readLoop() {
 			if b.onConnected != nil {
 				b.onConnected(roomID)
 			}
+			log.Printf("[NIM-live] connected room=%d nimRoom=%d", roomID, evt.NIMRoomID)
 		case "live_disconnected":
 			b.mu.Lock()
 			delete(b.connectedLives, evt.NIMRoomID)
 			b.mu.Unlock()
+			log.Printf("[NIM-live] disconnected room=%d nimRoom=%d", roomID, evt.NIMRoomID)
 		case "qchat_connected":
 			b.mu.Lock()
 			b.qchatConnected = true
@@ -517,6 +522,22 @@ func (b *NimDanmakuBridge) readLoop() {
 			b.qchatConnected = false
 			b.mu.Unlock()
 			log.Printf("[NIM-room] QChat disconnected: %s", evt.Msg)
+		case "nim_status":
+			b.mu.Lock()
+			b.qchatConnected = evt.QChatConnected
+			b.mu.Unlock()
+			qchatStatus := "disconnected"
+			if evt.QChatConnected {
+				qchatStatus = "connected"
+			}
+			log.Printf("[NIM-health] qchat=%s", qchatStatus)
+			liveStatus := "idle"
+			if evt.LiveConfigured > 0 && evt.LiveConnected == evt.LiveConfigured {
+				liveStatus = "connected"
+			} else if evt.LiveConfigured > 0 {
+				liveStatus = "reconnecting"
+			}
+			log.Printf("[NIM-live-health] status=%s connected=%d configured=%d", liveStatus, evt.LiveConnected, evt.LiveConfigured)
 		case "danmaku":
 			var msg DanmakuMessage
 			if json.Unmarshal(evt.Data, &msg) == nil && b.onDanmaku != nil {
@@ -1260,10 +1281,13 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	if name == "" {
 		name = b.getRoomNameForDanmaku(roomID)
 	}
-	text := fmt.Sprintf("⏹️ %s的直播已结束\n本场鸡腿值：%d", name, snapshot.ChickenLegs)
-	if snapshot.AnnualScore > 0 {
-		text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
+	text := fmt.Sprintf("⏹️ %s的直播已结束", name)
+	if snapshot.StartedAt > 0 {
+		duration := time.Since(time.UnixMilli(snapshot.StartedAt))
+		text += "\n直播时长：" + formatDouyinDuration(duration)
 	}
+	text += fmt.Sprintf("\n本场鸡腿值：%d", snapshot.ChickenLegs)
+	text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
 	if snapshot.PeakOnline > 0 {
 		text += fmt.Sprintf("\n最高在线人数：%d", snapshot.PeakOnline)
 	}

@@ -42,3 +42,32 @@ func TestDouyinInitMissingIsConnectingNotLoginRequired(t *testing.T) {
 	}
 	t.Fatal("Douyin state not found")
 }
+
+func TestNIMHealthPopulatesQChatAndLiveStates(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/17 09:00:00 [NIM-health] qchat=connected",
+		"2026/07/17 09:00:00 [NIM-live-health] status=idle connected=0 configured=0",
+	})
+	statusByID := make(map[string]serviceState)
+	for _, state := range states {
+		statusByID[state.ID] = state
+	}
+	if statusByID["qchat"].Status != "healthy" {
+		t.Fatalf("qchat state = %#v", statusByID["qchat"])
+	}
+	if statusByID["pocket_live"].StatusText != "待命" {
+		t.Fatalf("live state = %#v", statusByID["pocket_live"])
+	}
+}
+
+func TestNewestLiveDiscoveryFailureOverridesOlderHealthyStatus(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/17 09:00:00 [NIM-live-health] status=idle connected=0 configured=0",
+		"2026/07/17 09:00:30 [NIM-live] active live discovery failed: bad response",
+	})
+	for _, state := range states {
+		if state.ID == "pocket_live" && state.Status != "down" {
+			t.Fatalf("live state = %#v", state)
+		}
+	}
+}
