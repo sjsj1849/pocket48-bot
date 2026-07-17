@@ -45,6 +45,8 @@ type weiboAuthEvent struct {
 	SenderName       string       `json:"senderName,omitempty"`
 	ServerMessageID  string       `json:"serverMessageId,omitempty"`
 	MessageType      int          `json:"messageType,omitempty"`
+	CreateTime       int64        `json:"createTime,omitempty"`
+	ReceivedAt       int64        `json:"receivedAt,omitempty"`
 	Text             string       `json:"text,omitempty"`
 	Link             string       `json:"link,omitempty"`
 	Index            string       `json:"index,omitempty"`

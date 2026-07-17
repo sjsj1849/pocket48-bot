@@ -71,3 +71,19 @@ func TestNewestLiveDiscoveryFailureOverridesOlderHealthyStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestNapCatDisconnectOverridesOlderConnection(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/17 09:00:00 ✅ Connected to NapCat successfully",
+		"2026/07/17 09:00:30 ⚠️ NapCat read error (disconnected?): unexpected EOF",
+	})
+	for _, state := range states {
+		if state.ID == "napcat" {
+			if state.Status != "down" || state.StatusText != "连接中断" {
+				t.Fatalf("NapCat state = %#v", state)
+			}
+			return
+		}
+	}
+	t.Fatal("NapCat state not found")
+}

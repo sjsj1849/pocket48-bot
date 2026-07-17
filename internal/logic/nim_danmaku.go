@@ -1286,8 +1286,12 @@ func (b *Bot) finishLiveSession(roomID int64) {
 		duration := time.Since(time.UnixMilli(snapshot.StartedAt))
 		text += "\n直播时长：" + formatDouyinDuration(duration)
 	}
-	text += fmt.Sprintf("\n本场鸡腿值：%d", snapshot.ChickenLegs)
-	text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
+	if snapshot.ChickenLegs > 0 {
+		text += fmt.Sprintf("\n本场鸡腿值：%d", snapshot.ChickenLegs)
+	}
+	if snapshot.AnnualScore > 0 {
+		text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
+	}
 	if snapshot.PeakOnline > 0 {
 		text += fmt.Sprintf("\n最高在线人数：%d", snapshot.PeakOnline)
 	}

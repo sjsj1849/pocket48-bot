@@ -64,6 +64,8 @@ type douyinBrowserEvent struct {
 	SenderName       string       `json:"senderName"`
 	ServerMessageID  string       `json:"serverMessageId"`
 	MessageType      int          `json:"messageType"`
+	CreateTime       int64        `json:"createTime"`
+	ReceivedAt       int64        `json:"receivedAt"`
 	Text             string       `json:"text"`
 	Link             string       `json:"link"`
 	Index            string       `json:"index"`
@@ -401,6 +403,7 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	if event.Link != "" {
 		text += "\n" + event.Link
 	}
+	timeText := formatDouyinIMTime(event.CreateTime, event.ReceivedAt)
 	m.mu.Lock()
 	conversationID := m.imConversationID
 	ownerUID := m.imOwnerUID
@@ -420,7 +423,7 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 			groupName = "抖音群"
 		}
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, []interface{}{
-			napcat.TextSegment(fmt.Sprintf("【抖音群｜%s】\n%s：%s", groupName, name, text)),
+			napcat.TextSegment(fmt.Sprintf("【抖音群｜%s】\n%s：%s\n%s", groupName, name, text, timeText)),
 		})
 	case "private_incoming":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
@@ -428,10 +431,24 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 		name := strings.TrimSpace(event.SenderName)
 		if name == "" {
-			name = "抖音用户"
+			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
-		m.notifyAdmins(fmt.Sprintf("【抖音私信】\n来自：%s\n%s", name, text))
+		m.notifyAdmins(fmt.Sprintf("【抖音私信】\n来自：%s\n%s\n%s", name, text, timeText))
 	}
+}
+
+func formatDouyinIMTime(createTime, receivedAt int64) string {
+	value := createTime
+	if value <= 0 {
+		value = receivedAt
+	}
+	if value <= 0 {
+		return time.Now().Format("2006-01-02 15:04:05")
+	}
+	if value < 1_000_000_000_000 {
+		return time.Unix(value, 0).Format("2006-01-02 15:04:05")
+	}
+	return time.UnixMilli(value).Format("2006-01-02 15:04:05")
 }
 
 func classifyDouyinIMEvent(event douyinBrowserEvent, conversationID, ownerUID, selfUID string) string {

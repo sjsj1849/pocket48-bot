@@ -103,6 +103,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     messageType,
     senderUid: asString(first(message, 7)),
     senderSecUid: asString(first(message, 14)),
+    createTime: asNumber(first(message, 10, 0n)),
     text,
     link,
   };
