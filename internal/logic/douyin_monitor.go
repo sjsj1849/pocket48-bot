@@ -68,6 +68,7 @@ type douyinBrowserEvent struct {
 	ReceivedAt       int64        `json:"receivedAt"`
 	QuotedName       string       `json:"quotedName"`
 	QuotedText       string       `json:"quotedText"`
+	QuotedSenderUID  string       `json:"quotedSenderUid"`
 	Text             string       `json:"text"`
 	Link             string       `json:"link"`
 	Index            string       `json:"index"`
@@ -439,9 +440,27 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		if name == "" {
 			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
-		text = formatDouyinReplyText(name, text, event.QuotedName, event.QuotedText)
+		quotedName := inferDouyinQuotedName(event, name, selfUID)
+		text = formatDouyinReplyText(name, text, quotedName, event.QuotedText)
 		m.notifyAdmins(formatDouyinPrivateNotification(name, text, timeText))
 	}
+}
+
+func inferDouyinQuotedName(event douyinBrowserEvent, senderName, selfUID string) string {
+	if name := strings.TrimSpace(event.QuotedName); name != "" {
+		return name
+	}
+	quotedUID := strings.TrimSpace(event.QuotedSenderUID)
+	if quotedUID == "" {
+		return ""
+	}
+	if quotedUID == event.SenderUID {
+		return senderName
+	}
+	if quotedUID == event.SelfUID || quotedUID == selfUID {
+		return "我"
+	}
+	return ""
 }
 
 func formatDouyinReplyText(senderName, text, quotedName, quotedText string) string {
