@@ -128,8 +128,12 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("weibo", "healthy", "已认证", "认证状态已刷新")
 		case strings.Contains(line, "[Douyin] status=healthy"):
 			setLatest("douyin", "healthy", "已登录", "浏览器账号登录态有效")
+		case strings.Contains(line, "[Douyin] status=ready"):
+			setLatest("douyin", "healthy", "运行中", "抖音作品监控已就绪")
 		case strings.Contains(line, "[Douyin] status=login_required"):
 			setLatest("douyin", "attention", "待登录", "浏览器账号需要登录")
+		case strings.Contains(line, "[Douyin] status=login_error"):
+			setLatest("douyin", "down", "认证异常", "浏览器登录状态检查失败")
 		case strings.Contains(line, "[Douyin-IM] status=connected"):
 			setLatest("douyin_im", "healthy", "运行中", "群聊只读连接已建立")
 		case strings.Contains(line, "[Douyin-IM] status=init_missing"):
