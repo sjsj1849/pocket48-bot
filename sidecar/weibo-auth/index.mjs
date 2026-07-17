@@ -55,6 +55,7 @@ let douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupNam
 const douyinIMSeen = new Set();
 const douyinNicknameCache = new Map();
 const douyinContacts = new Map();
+const douyinAccountPages = new Map();
 let douyinContactSyncRunning = false;
 const douyinContactSyncMs = 6 * 60 * 60_000;
 
@@ -82,6 +83,7 @@ function douyinContactKey(contact) {
 
 function rememberDouyinContact(contact, { persist = false } = {}) {
   const hasMutual = typeof contact.mutual === 'boolean';
+  const hasRemark = Object.prototype.hasOwnProperty.call(contact, 'remarkName');
   const normalized = {
     uid: String(contact.uid || '').trim(),
     secUid: String(contact.secUid || '').trim(),
@@ -98,19 +100,28 @@ function rememberDouyinContact(contact, { persist = false } = {}) {
     ...normalized,
     uid: normalized.uid || previous?.uid || '',
     secUid: normalized.secUid || previous?.secUid || '',
-    remarkName: normalized.remarkName || previous?.remarkName || '',
+    remarkName: hasRemark ? normalized.remarkName : previous?.remarkName || '',
     mutual: hasMutual ? normalized.mutual : previous?.mutual || false,
   };
+  const displayName = merged.remarkName || merged.nickname;
   if (merged.uid) {
     douyinContacts.set(`uid:${merged.uid}`, merged);
-    douyinNicknameCache.set(`uid:${merged.uid}`, merged.nickname);
+    douyinNicknameCache.set(`uid:${merged.uid}`, displayName);
   }
   if (merged.secUid) {
     douyinContacts.set(`sec:${merged.secUid}`, merged);
-    douyinNicknameCache.set(`sec:${merged.secUid}`, merged.nickname);
+    douyinNicknameCache.set(`sec:${merged.secUid}`, displayName);
   }
   if (persist) scheduleDouyinContactPersist();
   return true;
+}
+
+function cachedDouyinDisplayName(secUserId, userId) {
+  const sec = String(secUserId || '').trim();
+  const uid = String(userId || '').trim();
+  return (sec && douyinNicknameCache.get(`sec:${sec}`))
+    || (uid && douyinNicknameCache.get(`uid:${uid}`))
+    || '';
 }
 
 async function persistDouyinContacts() {
@@ -258,6 +269,16 @@ async function getDouyinPage() {
   return douyinPage;
 }
 
+async function getDouyinAccountPage(secUserId) {
+  await startBrowser();
+  const existing = douyinAccountPages.get(secUserId);
+  if (existing && !existing.isClosed()) return existing;
+  const accountPage = await context.newPage();
+  accountPage.setDefaultTimeout(15_000);
+  douyinAccountPages.set(secUserId, accountPage);
+  return accountPage;
+}
+
 async function getDouyinIMPage() {
   await startBrowser();
   if (!douyinIMPage || douyinIMPage.isClosed()) {
@@ -337,12 +358,14 @@ async function syncDouyinContacts() {
       waitUntil: 'domcontentloaded',
       timeout: 30_000,
     });
-    const firstResponse = syncPage.waitForResponse(
+    const firstResponseResult = syncPage.waitForResponse(
       (response) => response.url().includes('/aweme/v1/web/user/following/list/'),
       { timeout: 20_000 },
-    );
+    ).then((response) => ({ response }), (error) => ({ error }));
     await syncPage.locator('[data-e2e="user-info-follow"] > div').last().click({ timeout: 15_000 });
-    await onResponse(await firstResponse);
+    const firstResult = await firstResponseResult;
+    if (firstResult.error) throw firstResult.error;
+    await onResponse(firstResult.response);
     await syncPage.waitForTimeout(2_000);
     let idleRounds = 0;
     while (hasMore && idleRounds < 8 && pageCount < 200) {
@@ -377,7 +400,7 @@ function scheduleDouyinContactSync() {
   douyinContactSyncTimer = undefined;
   if (!settings.douyinIMEnabled) return;
   douyinContactSyncTimer = setInterval(() => void syncDouyinContacts(), douyinContactSyncMs);
-  setTimeout(() => void syncDouyinContacts(), 30_000);
+  setTimeout(() => void syncDouyinContacts(), 5 * 60_000);
 }
 
 function stopDouyinIM() {
@@ -464,7 +487,7 @@ async function resolveDouyinNickname(secUserId, userId) {
   try {
     const targetPage = await getDouyinIMPage();
     const cachedIdentity = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
-      const nicknameKeys = ['nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname', 'remark_name', 'remarkName'];
+      const nicknameKeys = ['remark_name', 'remarkName', 'nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname'];
       const findIdentity = (root, depth = 0) => {
         if (!root || typeof root !== 'object' || depth > 7) return { nickname: '', accountID: '' };
         let accountID = String(root.unique_id || root.uniqueId || root.short_id || root.shortId || '').trim();
@@ -616,7 +639,9 @@ async function publishDouyinIMMessage(message) {
   if (!isPrivate && !isTargetGroup) return;
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
   if (!rememberDouyinIMMessage(key)) return;
-  const senderName = message.senderNameHint || await resolveDouyinNickname(message.senderSecUid, message.senderUid);
+  const senderName = cachedDouyinDisplayName(message.senderSecUid, message.senderUid)
+    || message.senderNameHint
+    || await resolveDouyinNickname(message.senderSecUid, message.senderUid);
   if (!senderName) log(`Douyin IM nickname unresolved sender_uid=${message.senderUid} sender_sec_uid=${message.senderSecUid || '-'}`);
   if (message.text === '[暂不支持的消息]' || ![5, 7, 8, 17, 27].includes(message.messageType)) {
     log(`Douyin IM nonstandard message type=${message.messageType} content_keys=${message.contentKeys.join(',') || '-'}`);
@@ -808,10 +833,20 @@ async function douyinPageSnapshot(targetPage, secUserId) {
   }, secUserId);
 }
 
+function emitDouyinAccountState(account, secUserId, profileUrl, posts, profileLive, snapshot = {}) {
+  const nickname = profileLive.nickname || posts[0]?.nickname || snapshot.nickname || account.name || '';
+  const discoveredLiveId = (profileLive.active || snapshot.liveActive)
+    ? (profileLive.liveId || snapshot.liveId || '')
+    : '';
+  const liveId = discoveredLiveId || account.liveId || '';
+  emit('douyin_account', { secUserId, profileUrl, nickname, liveId });
+  if (posts.length > 0) emit('douyin_posts', { secUserId, nickname, posts });
+}
+
 async function scanDouyinAccount(account) {
   const secUserId = String(account.secUserId || '').trim();
   if (!secUserId) return;
-  const targetPage = await getDouyinPage();
+  const targetPage = await getDouyinAccountPage(secUserId);
   const profileUrl = account.profileUrl || `https://www.douyin.com/user/${encodeURIComponent(secUserId)}`;
   let apiBody;
   let profileBody;
@@ -821,25 +856,31 @@ async function scanDouyinAccount(account) {
       if (response.url().includes('/aweme/v1/web/aweme/post/')) {
         const responseSecUserId = new URL(response.url()).searchParams.get('sec_user_id') || '';
         const matchingPosts = responseSecUserId === secUserId ? normalizeAwemeList(body, secUserId) : [];
-        if (matchingPosts.length > 0) apiBody = body;
+        if (Number(body?.status_code) === 0 && matchingPosts.length > 0) {
+          apiBody = body;
+        }
       } else if (response.url().includes('/aweme/v1/web/user/profile/other/')) {
-        profileBody = body;
+        const responseSecUserId = new URL(response.url()).searchParams.get('sec_user_id') || '';
+        if (Number(body?.status_code) === 0 && responseSecUserId === secUserId) {
+          profileBody = body;
+        }
       }
     } catch {}
   };
   targetPage.on('response', onResponse);
   try {
-    await targetPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    const currentProfile = targetPage.url().includes(`/user/${encodeURIComponent(secUserId)}`);
+    if (currentProfile) {
+      await targetPage.reload({ waitUntil: 'domcontentloaded', timeout: 45_000 });
+    } else {
+      await targetPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    }
     await targetPage.waitForTimeout(4_000);
     const snapshot = await douyinPageSnapshot(targetPage, secUserId);
     const posts = apiBody ? normalizeAwemeList(apiBody, secUserId) : snapshot.cards;
     const profileLive = extractProfileLive(profileBody);
-    const nickname = profileLive.nickname || posts[0]?.nickname || snapshot.nickname || account.name || '';
-    const discoveredLiveId = (profileLive.active || snapshot.liveActive) ? (profileLive.liveId || snapshot.liveId) : '';
-    const liveId = discoveredLiveId || account.liveId || '';
     const finalProfileUrl = targetPage.url().includes('/user/') ? targetPage.url() : profileUrl;
-    emit('douyin_account', { secUserId, profileUrl: finalProfileUrl, nickname, liveId });
-    if (posts.length > 0) emit('douyin_posts', { secUserId, nickname, posts });
+    emitDouyinAccountState(account, secUserId, finalProfileUrl, posts, profileLive, snapshot);
   } catch (error) {
     emit('douyin_account_error', { secUserId, message: error.message });
   } finally {
@@ -851,6 +892,12 @@ async function scanAllDouyin() {
   if (douyinScanning || shuttingDown || !settings.douyinEnabled || settings.douyinAccounts.length === 0) return;
   douyinScanning = true;
   try {
+    const configured = new Set(settings.douyinAccounts.map((account) => String(account.secUserId || '').trim()));
+    for (const [secUserId, accountPage] of douyinAccountPages) {
+      if (configured.has(secUserId)) continue;
+      douyinAccountPages.delete(secUserId);
+      await accountPage.close().catch(() => {});
+    }
     for (const account of settings.douyinAccounts) {
       if (shuttingDown) break;
       await scanDouyinAccount(account);
