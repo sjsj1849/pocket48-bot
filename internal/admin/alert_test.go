@@ -3,7 +3,9 @@ package admin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadAlertConfig(t *testing.T) {
@@ -23,6 +25,17 @@ func TestLoadAlertConfig(t *testing.T) {
 	}
 	if !cfg.Enabled || cfg.To != "owner@example.com" || cfg.CooldownMinutes != 90 {
 		t.Fatalf("config = %#v", cfg)
+	}
+}
+
+func TestBuildServiceEmailIncludesStyledAndPlainVersions(t *testing.T) {
+	cfg := alertConfig{From: "bot@example.com", To: "owner@example.com"}
+	service := serviceState{Name: "QChat <实时>", StatusText: "重连中", LastEvent: "连接 <异常>"}
+	message := string(buildServiceEmail(cfg, service, false, time.Date(2026, 7, 17, 10, 0, 0, 0, time.Local)))
+	for _, want := range []string{"multipart/alternative", "Content-Type: text/plain", "Content-Type: text/html", "Pocket48 Console", "打开管理面板", "QChat &lt;实时&gt;", "连接 &lt;异常&gt;"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("email does not contain %q", want)
+		}
 	}
 }
 

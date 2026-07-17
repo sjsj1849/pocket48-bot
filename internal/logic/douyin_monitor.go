@@ -416,14 +416,15 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 		name := strings.TrimSpace(event.SenderName)
 		if name == "" {
-			name = "群主"
+			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
 		groupName := strings.TrimSpace(m.cfg.DouyinIMGroupName)
-		if groupName == "" {
-			groupName = "抖音群"
+		title := "【抖音群】"
+		if groupName != "" {
+			title = "【" + groupName + "｜抖音群】"
 		}
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, []interface{}{
-			napcat.TextSegment(fmt.Sprintf("【抖音群｜%s】\n%s：%s\n%s", groupName, name, text, timeText)),
+			napcat.TextSegment(formatDouyinIMNotification(title, name, text, timeText)),
 		})
 	case "private_incoming":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
@@ -433,8 +434,12 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		if name == "" {
 			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
-		m.notifyAdmins(fmt.Sprintf("【抖音私信】\n来自：%s\n%s\n%s", name, text, timeText))
+		m.notifyAdmins(formatDouyinIMNotification("【抖音私信】", name, text, timeText))
 	}
+}
+
+func formatDouyinIMNotification(title, name, text, timeText string) string {
+	return fmt.Sprintf("%s\n来自：%s\n%s\n%s", title, name, text, timeText)
 }
 
 func formatDouyinIMTime(createTime, receivedAt int64) string {
