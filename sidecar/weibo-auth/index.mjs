@@ -1169,6 +1169,17 @@ wss.on('connection', (socket) => {
             clearInterval(refreshTimer);
           }
           scheduleDouyin();
+          if (settings.douyinEnabled || settings.douyinIMEnabled) {
+            try {
+              const loggedIn = await douyinBrowserLoggedIn();
+              emit('douyin_status', {
+                status: loggedIn ? 'healthy' : 'login_required',
+                message: loggedIn ? '抖音浏览器已登录' : '抖音浏览器需要登录',
+              });
+            } catch (error) {
+              emit('douyin_status', { status: 'login_error', message: `抖音登录状态检查失败：${error.message}` });
+            }
+          }
           if (settings.douyinIMEnabled) {
             await restoreDouyinIMIdentity();
             scheduleDouyinContactSync();

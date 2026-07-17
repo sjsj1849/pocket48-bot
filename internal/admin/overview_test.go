@@ -43,6 +43,33 @@ func TestDouyinInitMissingIsConnectingNotLoginRequired(t *testing.T) {
 	t.Fatal("Douyin state not found")
 }
 
+func TestDouyinReadyIsHealthy(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/17 11:01:45 [Douyin] status=ready message=抖音作品监控已就绪",
+	})
+	for _, state := range states {
+		if state.ID != "douyin" {
+			continue
+		}
+		if state.Status != "healthy" || state.StatusText != "运行中" || state.LastTime != "11:01:45" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("Douyin state not found")
+}
+
+func TestDouyinLoginErrorIsDown(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/17 11:01:45 [Douyin] status=login_error message=cookies failed",
+	})
+	for _, state := range states {
+		if state.ID == "douyin" && state.Status != "down" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+	}
+}
+
 func TestNIMHealthPopulatesQChatAndLiveStates(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 09:00:00 [NIM-health] qchat=connected",
