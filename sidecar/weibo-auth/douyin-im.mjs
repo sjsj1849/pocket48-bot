@@ -79,13 +79,77 @@ function mapValue(fields, fieldNumber, targetKey) {
   return '';
 }
 
+function mapEntries(fields, fieldNumber) {
+  const result = {};
+  for (const entryRaw of fields.get(fieldNumber) || []) {
+    try {
+      const entry = decodeFields(entryRaw);
+      const key = asString(first(entry, 1));
+      if (key) result[key] = asString(first(entry, 2));
+    } catch {}
+  }
+  return result;
+}
+
+function firstText(value, keys, depth = 0) {
+  if (!value || depth > 6) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return '';
+    if ((text.startsWith('{') || text.startsWith('['))) {
+      try { return firstText(JSON.parse(text), keys, depth + 1); } catch {}
+    }
+    return text;
+  }
+  if (typeof value !== 'object') return '';
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  for (const child of Object.values(value)) {
+    const candidate = firstText(child, keys, depth + 1);
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
+function replyDetails(content) {
+  if (!content || typeof content !== 'object') return { quotedName: '', quotedText: '' };
+  const queue = [content];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object') continue;
+    for (const [key, value] of Object.entries(current)) {
+      if (/reply|quote|reference|referenced/i.test(key) && value) {
+        let parsed = value;
+        if (typeof parsed === 'string' && (parsed.trim().startsWith('{') || parsed.trim().startsWith('['))) {
+          try { parsed = JSON.parse(parsed); } catch {}
+        }
+        const quotedName = firstText(parsed, ['nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname', 'sender_name', 'senderName', 'replyName']);
+        const quotedText = firstText(parsed, ['text', 'content', 'message', 'msg', 'replyText', 'quote_text', 'quotedText', 'hint']);
+        if (quotedName || quotedText) return { quotedName, quotedText };
+      }
+      if (value && typeof value === 'object') queue.push(value);
+    }
+  }
+  return { quotedName: '', quotedText: '' };
+}
+
 function decodeMessage(raw, fallbackConversationId = '', fallbackConversationType = 0) {
   const message = decodeFields(raw);
   const contentRaw = asString(first(message, 8));
   let content = {};
   try { content = JSON.parse(contentRaw); } catch {}
+  const ext = mapEntries(message, 9);
   const messageType = Number(first(message, 6, 0n));
   let text = typeof content?.text === 'string' ? content.text.trim() : '';
+  const { quotedName, quotedText } = replyDetails({ content, ext });
+  if (!text) {
+    const contentWithoutReply = Object.fromEntries(Object.entries(content || {}).filter(([key]) => !/reply|quote|reference|referenced/i.test(key)));
+    text = firstText(contentWithoutReply, ['text', 'content', 'message', 'msg', 'title', 'description']);
+  }
+  if (text === 'favorite_emoji') text = '[表情]';
+  const internalMetadata = /^\d+:\d+:\d+:\d+$/.test(text);
   let link = '';
   if (!text && messageType === 8) {
     text = `[视频]${content?.content_title ? ` ${content.content_title}` : ''}`;
@@ -103,7 +167,12 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     messageType,
     senderUid: asString(first(message, 7)),
     senderSecUid: asString(first(message, 14)),
+    senderNameHint: ext['s:sender_nickname'] || ext.sender_nickname || ext['a:sender_nickname'] || ext['s:sender_name'] || '',
     createTime: asNumber(first(message, 10, 0n)),
+    quotedName,
+    quotedText,
+    internalMetadata,
+    contentKeys: [...Object.keys(content || {}), ...Object.keys(ext).map((key) => `ext:${key}`)].slice(0, 20),
     text,
     link,
   };
@@ -178,6 +247,12 @@ export function buildDouyinIMWebSocketURL(selfUid) {
     xsack: '0', xaack: '0', xsqos: '0', qos_sdk_version: '2',
   });
   return `wss://frontier-im.douyin.com/ws/v2?${params}`;
+}
+
+export function isOwnDouyinIMMessage(senderUid, selfUid) {
+  const sender = String(senderUid || '').trim();
+  const self = String(selfUid || '').trim();
+  return sender !== '' && self !== '' && sender === self;
 }
 
 export const douyinIMInternals = { decodeFields, asString, asNumber };

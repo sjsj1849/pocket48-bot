@@ -47,6 +47,8 @@ type weiboAuthEvent struct {
 	MessageType      int          `json:"messageType,omitempty"`
 	CreateTime       int64        `json:"createTime,omitempty"`
 	ReceivedAt       int64        `json:"receivedAt,omitempty"`
+	QuotedName       string       `json:"quotedName,omitempty"`
+	QuotedText       string       `json:"quotedText,omitempty"`
 	Text             string       `json:"text,omitempty"`
 	Link             string       `json:"link,omitempty"`
 	Index            string       `json:"index,omitempty"`
@@ -335,6 +337,8 @@ func (b *WeiboAuthBridge) readLoop() {
 					OwnerUID: event.OwnerUID, SelfUID: event.SelfUID, SenderUID: event.SenderUID,
 					SenderSecUID: event.SenderSecUID, SenderName: event.SenderName,
 					ServerMessageID: event.ServerMessageID, MessageType: event.MessageType,
+					CreateTime: event.CreateTime, ReceivedAt: event.ReceivedAt,
+					QuotedName: event.QuotedName, QuotedText: event.QuotedText,
 					Text: event.Text, Link: event.Link, Index: event.Index,
 				})
 			}

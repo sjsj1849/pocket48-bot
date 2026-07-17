@@ -99,3 +99,17 @@ func TestFormatDouyinIMNotification(t *testing.T) {
 		t.Fatalf("notification=%q", got)
 	}
 }
+
+func TestFormatDouyinReplyText(t *testing.T) {
+	got := formatDouyinReplyText("发送人", "回复内容", "原发送人", "原消息")
+	if got != "原发送人:原消息\n发送人:回复内容" {
+		t.Fatalf("reply=%q", got)
+	}
+}
+
+func TestClassifyDouyinIMEventRejectsExplicitSelfUID(t *testing.T) {
+	event := douyinBrowserEvent{ConversationType: 1, SenderUID: "self", SelfUID: "self"}
+	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "" {
+		t.Fatalf("self message classified as %q", got)
+	}
+}
