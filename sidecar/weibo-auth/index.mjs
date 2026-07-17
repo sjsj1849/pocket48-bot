@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
 import { extractProfileLive, normalizeAwemeList } from './douyin-parser.mjs';
-import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush } from './douyin-im.mjs';
+import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage } from './douyin-im.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((arg) => {
   const [key, ...rest] = arg.replace(/^--/, '').split('=');
@@ -267,6 +267,58 @@ async function resolveDouyinNickname(secUserId, userId) {
   if (douyinNicknameCache.has(cacheKey)) return douyinNicknameCache.get(cacheKey);
   try {
     const targetPage = await getDouyinIMPage();
+    const cachedNickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
+      const nicknameKeys = ['nickname', 'nick_name', 'nickName', 'user_nickname', 'userNickname', 'remark_name', 'remarkName'];
+      const findDisplayName = (root, depth = 0) => {
+        if (!root || typeof root !== 'object' || depth > 7) return '';
+        for (const key of nicknameKeys) {
+          if (typeof root[key] === 'string' && root[key].trim()) return root[key].trim();
+        }
+        for (const child of Object.values(root)) {
+          const found = findDisplayName(child, depth + 1);
+          if (found) return found;
+        }
+        const accountID = String(root.unique_id || root.uniqueId || root.short_id || root.shortId || '').trim();
+        if (accountID) return `抖音号 ${accountID}`;
+        return '';
+      };
+      const readRequest = (request) => new Promise((resolve) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => resolve(undefined);
+      });
+      for (const value of Object.values(localStorage)) {
+        if (!String(value).includes(uidValue) && (!secValue || !String(value).includes(secValue))) continue;
+        try {
+          const found = findDisplayName(JSON.parse(value));
+          if (found) return found;
+        } catch {}
+      }
+      for (const databaseInfo of await indexedDB.databases()) {
+        if (!databaseInfo.name) continue;
+        const database = await new Promise((resolve) => {
+          const request = indexedDB.open(databaseInfo.name);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => resolve(undefined);
+        });
+        if (!database) continue;
+        for (const storeName of Array.from(database.objectStoreNames)) {
+          for (const key of [`${uidValue}_user`, uidValue, secValue].filter(Boolean)) {
+            try {
+              const transaction = database.transaction(storeName, 'readonly');
+              const value = await readRequest(transaction.objectStore(storeName).get(key));
+              const found = findDisplayName(value);
+              if (found) { database.close(); return found; }
+            } catch {}
+          }
+        }
+        database.close();
+      }
+      return '';
+    }, { secUserId: sec, userId: uid });
+    if (cachedNickname) {
+      douyinNicknameCache.set(cacheKey, cachedNickname);
+      return cachedNickname;
+    }
     const nickname = await targetPage.evaluate(async ({ secUserId: secValue, userId: uidValue }) => {
       const params = new URLSearchParams();
       if (secValue) params.set('sec_user_id', secValue);
@@ -285,15 +337,20 @@ async function resolveDouyinNickname(secUserId, userId) {
 
 async function publishDouyinIMMessage(message) {
   if (!message?.conversationId || !message.senderUid) return;
+  if (isOwnDouyinIMMessage(message.senderUid, douyinIMIdentity.selfUid)) return;
+  if (message.internalMetadata) return;
   const isPrivate = message.conversationType === 1 && settings.douyinIMPrivateEnabled;
   const isTargetGroup = message.conversationType === 2
     && message.conversationId === douyinIMIdentity.conversationId;
   if (!isPrivate && !isTargetGroup) return;
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
   if (!rememberDouyinIMMessage(key)) return;
-  const senderName = await resolveDouyinNickname(message.senderSecUid, message.senderUid);
+  const senderName = message.senderNameHint || await resolveDouyinNickname(message.senderSecUid, message.senderUid);
   if (!senderName) log(`Douyin IM nickname unresolved sender_uid=${message.senderUid} sender_sec_uid=${message.senderSecUid || '-'}`);
-  emit('douyin_im_message', { ...message, senderName, receivedAt: Date.now() });
+  if (message.text === '[暂不支持的消息]' || ![5, 7, 8, 17, 27].includes(message.messageType)) {
+    log(`Douyin IM nonstandard message type=${message.messageType} content_keys=${message.contentKeys.join(',') || '-'}`);
+  }
+  emit('douyin_im_message', { ...message, selfUid: douyinIMIdentity.selfUid, senderName, receivedAt: Date.now() });
 }
 
 async function connectDouyinIM() {

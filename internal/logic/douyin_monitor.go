@@ -66,6 +66,8 @@ type douyinBrowserEvent struct {
 	MessageType      int          `json:"messageType"`
 	CreateTime       int64        `json:"createTime"`
 	ReceivedAt       int64        `json:"receivedAt"`
+	QuotedName       string       `json:"quotedName"`
+	QuotedText       string       `json:"quotedText"`
 	Text             string       `json:"text"`
 	Link             string       `json:"link"`
 	Index            string       `json:"index"`
@@ -409,6 +411,9 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	ownerUID := m.imOwnerUID
 	selfUID := m.imSelfUID
 	m.mu.Unlock()
+	if event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID) {
+		return
+	}
 	switch classifyDouyinIMEvent(event, conversationID, ownerUID, selfUID) {
 	case "group_owner":
 		if !m.cfg.DouyinIMEnabled || m.cfg.BoundGroupID == 0 {
@@ -434,8 +439,22 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		if name == "" {
 			name = "抖音用户（UID：" + event.SenderUID + "）"
 		}
+		text = formatDouyinReplyText(name, text, event.QuotedName, event.QuotedText)
 		m.notifyAdmins(formatDouyinIMNotification("【抖音私信】", name, text, timeText))
 	}
+}
+
+func formatDouyinReplyText(senderName, text, quotedName, quotedText string) string {
+	quotedName = strings.TrimSpace(quotedName)
+	quotedText = strings.TrimSpace(quotedText)
+	if quotedText == "" {
+		return text
+	}
+	quotedLine := quotedText
+	if quotedName != "" {
+		quotedLine = quotedName + ":" + quotedText
+	}
+	return quotedLine + "\n" + senderName + ":" + text
 }
 
 func formatDouyinIMNotification(title, name, text, timeText string) string {
