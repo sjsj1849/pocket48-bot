@@ -324,26 +324,33 @@ func extractChickenLegFromRaw(raw json.RawMessage, giftName string, giftNum int6
 	}
 
 	giftInfo := findObjectByKey(payload, "giftInfo")
+	// Score-only gifts (isScore/tpNum) must not pollute chicken-leg totals.
+	if giftInfo != nil && directBoolByKeys(giftInfo, []string{"isScore", "is_score"}) {
+		return 0, 0, "score-only"
+	}
+	if giftInfo == nil {
+		if root, ok := payload.(map[string]interface{}); ok && directBoolByKeys(root, []string{"isScore", "is_score"}) {
+			return 0, 0, "score-only"
+		}
+	}
+
 	scopes := []interface{}{giftInfo, payload}
 	for idx, scope := range scopes {
 		if scope == nil {
 			continue
 		}
 
+		// Prefer explicit chicken-leg fields only (do not treat price/money/score as legs).
 		total, totalOK := findNumberByKeys(scope, []string{
 			"totalChickenLeg",
 			"totalChickenLegs",
-			"totalGiftValue",
-			"totalValue",
-			"totalPrice",
-			"totalDiamond",
-			"totalCoin",
-			"totalAmount",
+			"total_chicken_leg",
+			"total_chicken_legs",
 		})
 		if totalOK && total > 0 {
-			source := "raw.payload.total"
+			source := "raw.payload.totalChicken"
 			if idx == 0 {
-				source = "raw.giftInfo.total"
+				source = "raw.giftInfo.totalChicken"
 			}
 			if num > 0 && total%num == 0 {
 				return total / num, total, source
@@ -354,24 +361,17 @@ func extractChickenLegFromRaw(raw json.RawMessage, giftName string, giftNum int6
 		unit, unitOK := findNumberByKeys(scope, []string{
 			"chickenLeg",
 			"chickenLegs",
-			"giftValue",
-			"giftPrice",
-			"diamond",
-			"coin",
-			"price",
-			"value",
-			"money",
-			"amount",
+			"chicken_leg",
+			"chicken_legs",
 		})
 		if unitOK && unit > 0 {
 			total := unit * num
-			source := "raw.payload.unit"
+			source := "raw.payload.unitChicken"
 			if idx == 0 {
-				source = "raw.giftInfo.unit"
+				source = "raw.giftInfo.unitChicken"
 			}
 			return unit, total, source
 		}
-
 	}
 
 	_ = giftName

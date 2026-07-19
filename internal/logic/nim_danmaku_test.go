@@ -458,15 +458,34 @@ func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
 		t.Fatal("new live session was not started")
 	}
 	bot.handleLiveUpdate(123, &LiveUpdate{OnlineNum: 34})
+	// Score gift: must not also count as chicken legs (even if chickenLeg field present).
 	bot.handleDanmakuGift(123, &GiftMessage{
-		GiftName: "测试礼物",
+		GiftName: "鎏光碟影",
+		GiftNum:  5,
+		Raw:      []byte(`{"giftInfo":{"giftName":"鎏光碟影","giftNum":5,"chickenLeg":10,"price":10,"isScore":true,"tpNum":1}}`),
+	})
+	// Pure chicken-leg gift.
+	bot.handleDanmakuGift(123, &GiftMessage{
+		GiftName: "鸡腿",
 		GiftNum:  2,
-		Raw:      []byte(`{"giftInfo":{"giftName":"测试礼物","giftNum":2,"chickenLeg":5,"isScore":true,"tpNum":3}}`),
+		Raw:      []byte(`{"giftInfo":{"giftName":"鸡腿","giftNum":2,"chickenLeg":5}}`),
 	})
 
 	session := bot.liveSessions[123]
-	if session == nil || session.ChickenLegs != 10 || session.AnnualScore != 6 || session.PeakOnline != 34 {
+	if session == nil || session.ChickenLegs != 10 || session.AnnualScore != 5 || session.PeakOnline != 34 {
 		t.Fatalf("unexpected live statistics: %#v", session)
+	}
+}
+
+func TestScoreGiftDoesNotCountAsChickenLegs(t *testing.T) {
+	raw := []byte(`{"giftInfo":{"giftName":"鎏光碟影","giftNum":5,"price":10,"money":10,"isScore":true,"tpNum":1}}`)
+	unit, total, source := extractChickenLegFromRaw(raw, "鎏光碟影", 5)
+	if unit != 0 || total != 0 || source != "score-only" {
+		t.Fatalf("score gift leaked into chicken legs: unit=%d total=%d source=%s", unit, total, source)
+	}
+	score, ok := parseAnnualScoreGiftMessage(string(raw))
+	if !ok || score.TotalScore != 5 {
+		t.Fatalf("score parse failed: ok=%v gift=%#v", ok, score)
 	}
 }
 

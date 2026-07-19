@@ -545,6 +545,8 @@ func (b *Bot) collectAdminRecipients() []int64 {
 
 type cachedUserDetail struct {
 	info      *pocket48.UserDetailInfo
+	isStar    bool
+	resolved  bool // true when we successfully decided star/non-star (incl. negative cache)
 	expiresAt time.Time
 }
 
@@ -764,24 +766,87 @@ func (b *Bot) getCachedUserDetail(userID int64) (*pocket48.UserDetailInfo, error
 	if userID == 0 {
 		return nil, nil
 	}
+	info, _, err := b.resolveUserStarDetail(userID)
+	return info, err
+}
 
+// resolveUserStarDetail decides whether userID is a Pocket member/star.
+// Prefer star archives (still works when /user/info/home 404s), then home info.
+// Failures and non-members are negatively cached to avoid log/API storms.
+func (b *Bot) resolveUserStarDetail(userID int64) (*pocket48.UserDetailInfo, bool, error) {
+	if userID == 0 {
+		return nil, false, nil
+	}
 	now := time.Now()
 	b.mu.RLock()
 	cached, ok := b.userDetailCache[userID]
 	b.mu.RUnlock()
-	if ok && now.Before(cached.expiresAt) {
-		return cached.info, nil
+	if ok && now.Before(cached.expiresAt) && cached.resolved {
+		return cached.info, cached.isStar, nil
 	}
 
-	detailInfo, err := b.pocket.GetUserDetailInfo(userID)
+	// 1) Star archives: works for official members (e.g. 胡晓慧 63559).
+	if star, err := b.pocket.GetStarArchives(userID); err == nil && star != nil && star.UserID != 0 {
+		info := &pocket48.UserDetailInfo{
+			UserID:   star.UserID,
+			Nickname: firstNonEmptyStr(star.Nickname, star.StarName),
+			StarName: star.StarName,
+			IsStar:   true,
+		}
+		b.cacheUserDetail(userID, info, true, now.Add(30*time.Minute))
+		return info, true, nil
+	} else if err != nil && isPocketNotFound(err) {
+		// Explicit "成员不存在" / 404 from archives → not a star.
+		b.cacheUserDetail(userID, &pocket48.UserDetailInfo{UserID: userID, IsStar: false}, false, now.Add(30*time.Minute))
+		return nil, false, nil
+	}
+
+	// 2) Fallback home info (may 404 for many accounts on current API).
+	detail, err := b.pocket.GetUserDetailInfo(userID)
+	if err == nil && detail != nil {
+		b.cacheUserDetail(userID, detail, detail.IsStar, now.Add(30*time.Minute))
+		return detail, detail.IsStar, nil
+	}
+	if err != nil && isPocketNotFound(err) {
+		// Home 404 is common and inconclusive alone; without archives hit, treat as non-star briefly.
+		b.cacheUserDetail(userID, &pocket48.UserDetailInfo{UserID: userID, IsStar: false}, false, now.Add(15*time.Minute))
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, err
+		// Transient errors: short negative cache, log once-class noise at info.
+		b.cacheUserDetail(userID, nil, false, now.Add(2*time.Minute))
+		log.Printf("[Pocket] user star lookup %d: %v", userID, err)
+		return nil, false, err
 	}
+	b.cacheUserDetail(userID, &pocket48.UserDetailInfo{UserID: userID, IsStar: false}, false, now.Add(15*time.Minute))
+	return nil, false, nil
+}
 
+func (b *Bot) cacheUserDetail(userID int64, info *pocket48.UserDetailInfo, isStar bool, exp time.Time) {
 	b.mu.Lock()
-	b.userDetailCache[userID] = cachedUserDetail{info: detailInfo, expiresAt: now.Add(10 * time.Minute)}
+	b.userDetailCache[userID] = cachedUserDetail{info: info, isStar: isStar, resolved: true, expiresAt: exp}
 	b.mu.Unlock()
-	return detailInfo, nil
+}
+
+func isPocketNotFound(err error) bool {
+	apiErr, ok := err.(*pocket48.APIError)
+	if !ok || apiErr == nil {
+		return false
+	}
+	if apiErr.Status == 404 {
+		return true
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "不存在") || strings.Contains(msg, "no message available") || strings.Contains(msg, "not found")
+}
+
+func firstNonEmptyStr(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func (b *Bot) getCachedRoomInfo(roomID int64) (*pocket48.RoomInfo, error) {
