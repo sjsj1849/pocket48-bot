@@ -6,6 +6,21 @@
 
 ## 功能
 
+### 管理面板截图
+
+开箱后可在浏览器打开管理台（默认本机 `http://127.0.0.1:8787`，密码见部署配置）。
+
+| 总览 | 配置（Bot） |
+| :---: | :---: |
+| ![总览](docs/screenshots/01-overview.png) | ![配置 Bot](docs/screenshots/02-config-bot.png) |
+
+| 抖音订阅 | 小红书订阅 |
+| :---: | :---: |
+| ![抖音](docs/screenshots/03-config-douyin.png) | ![小红书](docs/screenshots/04-config-xhs.png) |
+
+配置页按 **Bot / 口袋48 / 微博 / 抖音 / 小红书** 分组；各平台页底部可直接添加/删除订阅（不必只靠 QQ 命令）。
+
+
 ### 📱 口袋48 房间监控
 - **文本/图片/语音/视频** 消息转发
 - **QChat 实时推送**：连接成功后停止对应房间的 REST 轮询，断线自动恢复轮询
@@ -43,11 +58,22 @@
 - 语音消息文件转发
 - 视频消息文件转发
 - 媒体缓存自动清理
+- **媒体发送方式** `MEDIA_DELIVERY`：`local`（默认，本机下载再给 NapCat）或 `remote`（直链交给 NapCat 下载）
 
 ### ⚙️ 系统特性
 - 多群分组订阅（不同群监控不同房间）
 - COS 归档存储（消息自动归档）
 - 自适应轮询间隔
+
+
+### 📧 邮件告警与日报
+
+- **不是只能 Linux**：推荐配置 **SMTP**（QQ 邮箱填授权码、`smtp.qq.com`、端口 465/587）。Windows 必走 SMTP。
+- Linux 若本机已装 MTA，可把 `ALERT_EMAIL_SMTP_HOST` 留空，回退 `/usr/sbin/sendmail`（不推荐跨平台依赖）。
+- 相关字段：`ALERT_EMAIL_ENABLED` / `TO` / `FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `COOLDOWN_MINUTES`
+- 可选 `ADMIN_PANEL_URL`：写进告警邮件的「打开管理面板」按钮；**留空则不写死任何作者域名**。
+- 策略：服务持续异常且超过自愈观察窗口才发邮件；已恢复不发。
+
 
 ### ⚡ NIM 实时监控（可选）
 
@@ -78,6 +104,10 @@ cd ../..
   "NIM_VIEWER_EVENT_ENABLED": false,
 
   "NIM_ROOM_MESSAGE_ENABLED": true,
+  "MEDIA_DELIVERY": "local",
+  "ALERT_EMAIL_SMTP_HOST": "",
+  "ALERT_EMAIL_SMTP_PORT": 465,
+  "ADMIN_PANEL_URL": "",
   "NIM_ROOM_MESSAGE_POLL_FALLBACK": true
 }
 ```
@@ -368,45 +398,6 @@ bot code <验证码>          # 输入验证码完成登录
 | `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |
 | `DOUYIN_IM_GROUP_NUMBER` | 目标抖音群号（优先精确匹配） | `""` |
 
-### 🌍 随机地址生成器
-
-内置多国随机地址生成器（`bot addr gen <国家代码或中文名>`），可生成包含真实姓名、街道、城市、邮编、电话的完整身份信息。
-
-**支持国家：**（支持 ISO 代码和中文名，如 `US`/`美国`）
-
-| 代码 | 国家 | 城市数 | 街道数 | 姓名池 |
-| :--- | :--- | ---: | ---: | ---: |
-| US | 美国 | 118 | 92 | 160人 |
-| GB | 英国 | 110 | 90 | 160人 |
-| CA | 加拿大 | 83 | 70 | 144人 |
-| AU | 澳大利亚 | 82 | 67 | 148人 |
-| DE | 德国 | 105 | 85 | 158人 |
-| FR | 法国 | 102 | 80 | 152人 |
-| JP | 日本 | 103 | 85 | 156人 |
-| CN | 中国 | 100 | 95 | 156人 |
-
-**数据真实性说明：**
-- **地址数据**：优先使用 **OpenStreetMap 真实建筑地址**（US/GB/AU/DE/FR 等有 OSM 数据的国家）；无 OSM 数据时回退到随机组合
-- **城市名**：来自 GeoNames 真实地名数据库（cities5000, CC-BY 4.0）
-- **街道名**：各国真实常见路名（如 US 的 Main St / Park Ave, DE 的 Hauptstrasse / Bahnhofstrasse）
-- **姓名**：各国真实常见姓氏和名字（US 的 Smith/Johnson, JP 的 Sato/Suzuki 等）
-- **邮编**：按各国真实格式随机生成（US 的 5位数字, GB 的 AA# #AA, JP 的 ###-####）
-- **电话**：按各国真实号码格式生成（US 的 (XXX) XXX-XXXX, CN 的 1XX XXXX XXXX）
-
-**注意**：所有数据从预定义池中离线生成（非实时 API 查询），池子较大（每个国家数百条目）。OSM 地址是真实存在的具体门牌号，随机组合地址（城市+街道+号码）不保证现实中存在该具体地址。
-
-**输出示例：**
-```
-📍 随机地址生成
-
-  姓名:       Daniel Cooper
-  国家:       United States
-  州省:       AZ
-  城市:       Phoenix
-  地址:       3238 Eastwood Dr
-  邮编:       07246
-  电话:       +1 (328) 150-3935
-```
 
 ### 5. 运行
 
@@ -420,9 +411,13 @@ bot code <验证码>          # 输入验证码完成登录
 
 程序会自动读取同目录下的 `config.json`，启动后自动登录口袋48并开始轮询。
 
+也可用管理面板（`cmd/admin`）在浏览器里改配置、管理各平台订阅，保存后会安全重启 Bot。
+
 ### 6. 添加房间监控
 
-在绑定的 QQ 群里发（假设前缀为 `bot`）：
+**面板**：配置 → 口袋48 → 底部「房间订阅」填 QQ 群号 + 房间 ID。
+
+**QQ 命令**（假设前缀为 `bot`）：
 
 ```
 bot search 王奕
@@ -454,12 +449,13 @@ bot weibo cookie set "SCF=xxx; SUB=xxx; ..."
 bot weibo cookie check
 ```
 
+启用 `WEIBO_BROWSER_AUTH_ENABLED` 后，也可在管理面板「浏览器」页扫码维护 weibo.com Cookie。
+
 > ⚠️ **AppAuth 与 Cookie 分属不同认证体系**：
 > - **AppAuth**（`bot weibo cookie import` 导入）— 微博 App 端的短期认证，用于签到、超话监控等
-> - **weibo.com Cookie**（`bot weibo cookie set` 设置）— 浏览器端长期认证，用于动态监控
+> - **weibo.com Cookie**（`bot weibo cookie set` 或浏览器扫码）— 浏览器端长期认证，用于动态监控
 > - 两者**各自独立维护**。gsid（App 用）和 Cookie（浏览器用）混合会导致签名不匹配，签到必失败。
-> - `bot weibo cookie import` 只导入 AppAuth，不再自动推导 Cookie。如需 Cookie，请单独使用 `bot weibo cookie set` 设置。
-> - 启用 `WEIBO_BROWSER_AUTH_ENABLED` 后，Web Cookie 由浏览器 Profile 自动维护；AppAuth 仍需独立维护。
+> - `bot weibo cookie import` 只导入 AppAuth，不再自动推导 Cookie。如需 Cookie，请单独设置。
 >
 > 过期后 bot 会自动通知：
 > - AppAuth 失效 → 每 2 小时自动健康检查，检测到后发送通知到群
@@ -636,7 +632,6 @@ bot weibo cookie check
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `bot addr gen <国家代码>` | 随机生成多国真实地址（支持 ISO 码或中文名，含姓名/街道/邮编/电话） |
 | `bot status` | 运行状态、监控房间数、微博监控数 |
 | `bot help [命令名]` | 显示帮助。加命令名显示该命令的详细用法 |
 | `bot archive status` | 归档存储状态 |

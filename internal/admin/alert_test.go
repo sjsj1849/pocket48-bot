@@ -13,7 +13,7 @@ func TestLoadAlertConfig(t *testing.T) {
 	data := []byte(`{
   "ALERT_EMAIL_ENABLED": true,
   "ALERT_EMAIL_TO": "owner@example.com",
-  "ALERT_EMAIL_FROM": "pocket48@jiufeng.cloud",
+  "ALERT_EMAIL_FROM": "bot@example.com",
   "ALERT_EMAIL_COOLDOWN_MINUTES": 90
 }`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -29,10 +29,10 @@ func TestLoadAlertConfig(t *testing.T) {
 }
 
 func TestBuildServiceEmailIncludesStyledAndPlainVersions(t *testing.T) {
-	cfg := alertConfig{From: "bot@example.com", To: "owner@example.com"}
+	cfg := alertConfig{From: "bot@example.com", To: "owner@example.com", PanelURL: "https://panel.example.com"}
 	service := serviceState{Name: "QChat <实时>", StatusText: "重连中", LastEvent: "连接 <异常>"}
 	message := string(buildServiceEmail(cfg, service, false, time.Date(2026, 7, 17, 10, 0, 0, 0, time.Local)))
-	for _, want := range []string{"multipart/alternative", "Content-Type: text/plain", "Content-Type: text/html", "Pocket48 Console", "打开管理面板", "QChat &lt;实时&gt;", "连接 &lt;异常&gt;"} {
+	for _, want := range []string{"multipart/alternative", "Content-Type: text/plain", "Content-Type: text/html", "Pocket48 Console", "打开管理面板", "panel.example.com", "QChat &lt;实时&gt;", "连接 &lt;异常&gt;"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("email does not contain %q", want)
 		}
