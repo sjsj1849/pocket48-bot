@@ -674,26 +674,26 @@ func (m *WeiboMonitor) checkWeiboForConfig(config *WeiboConfig) {
 // weiboMymblogResponse weibo.com/ajax/statuses/mymblog 响应
 type weiboMymblogResponse struct {
 	Data struct {
-		SinceID string               `json:"since_id"`
-		List    []weiboMymblogPost   `json:"list"`
+		SinceID string             `json:"since_id"`
+		List    []weiboMymblogPost `json:"list"`
 	} `json:"data"`
 	OK int `json:"ok"`
 }
 
 type weiboMymblogPost struct {
-	ID        int64  `json:"id"`
-	IDStr     string `json:"idstr"`
-	MblogID   string `json:"mblogid"`
-	CreatedAt string `json:"created_at"`
-	Text      string `json:"text"`
-	TextRaw   string `json:"text_raw"`
-	IsLongText bool  `json:"isLongText"`
-	PicNum    int    `json:"pic_num"`
-	PicIDs    []string `json:"pic_ids,omitempty"`
-	PicInfos  map[string]weiboPicInfo `json:"pic_infos,omitempty"`
-	PageInfo  *weiboPageInfo          `json:"page_info,omitempty"`
-	IsTop     int    `json:"isTop"`
-	User      struct {
+	ID         int64                   `json:"id"`
+	IDStr      string                  `json:"idstr"`
+	MblogID    string                  `json:"mblogid"`
+	CreatedAt  string                  `json:"created_at"`
+	Text       string                  `json:"text"`
+	TextRaw    string                  `json:"text_raw"`
+	IsLongText bool                    `json:"isLongText"`
+	PicNum     int                     `json:"pic_num"`
+	PicIDs     []string                `json:"pic_ids,omitempty"`
+	PicInfos   map[string]weiboPicInfo `json:"pic_infos,omitempty"`
+	PageInfo   *weiboPageInfo          `json:"page_info,omitempty"`
+	IsTop      int                     `json:"isTop"`
+	User       struct {
 		ScreenName string `json:"screen_name"`
 		ID         int64  `json:"id"`
 		IDStr      string `json:"idstr"`
@@ -713,10 +713,10 @@ type weiboPicInfo struct {
 }
 
 type weiboPageInfo struct {
-	Type       interface{}  `json:"type"`
-	PageTitle  string       `json:"page_title"`
-	PagePic    *weiboPagePic `json:"page_pic,omitempty"`
-	MediaInfo  *struct {
+	Type      interface{}   `json:"type"`
+	PageTitle string        `json:"page_title"`
+	PagePic   *weiboPagePic `json:"page_pic,omitempty"`
+	MediaInfo *struct {
 		StreamURL   string `json:"stream_url"`
 		StreamURLHD string `json:"stream_url_hd"`
 		MP4HDURL    string `json:"mp4_hd_url"`
@@ -1177,12 +1177,16 @@ func (m *WeiboMonitor) handleFallbackUpdate(config *WeiboConfig, latestID string
 }
 
 func (m *WeiboMonitor) sendFallbackWeiboLink(config *WeiboConfig, cardID string) {
-	msg := "[微博监控降级模式]\n"
+	// Same order as normal weibo: @全体成员 first (own line), then body.
+	var segments []napcat.MessageSegment
 	if config.AtAll {
-		msg += "[CQ:at,all]\n"
+		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
-	msg += fmt.Sprintf("检测到新微博（API受限，已走网页回退）\nhttps://weibo.com/%s/%s\n%s", config.UID, cardID, time.Now().Format("2006-01-02 15:04:05"))
-	m.napcat.SendGroupMessage(config.GroupID, napcat.TextSegment(msg))
+	segments = append(segments, napcat.TextSegment(fmt.Sprintf(
+		"[微博监控降级模式]\n检测到新微博（API受限，已走网页回退）\nhttps://weibo.com/%s/%s\n%s",
+		config.UID, cardID, time.Now().Format("2006-01-02 15:04:05"),
+	)))
+	m.napcat.SendGroupMessage(config.GroupID, segments)
 }
 
 func (m *WeiboMonitor) DispatchPerfectWeibo(config *WeiboConfig, card WeiboCard, cardID string) {
@@ -1203,13 +1207,13 @@ func (m *WeiboMonitor) DispatchPerfectWeibo(config *WeiboConfig, card WeiboCard,
 
 func (m *WeiboMonitor) formatWeiboCleanText(card WeiboCard, cardID string, atAll bool, uid string) []napcat.MessageSegment {
 	var segments []napcat.MessageSegment
-	header := fmt.Sprintf("【%s|微博】\n", card.User.ScreenName)
-	segments = append(segments, napcat.TextSegment(header))
-
+	// Unified QQ layout: @全体成员 (own line) / 【标题】 / 正文 / 时间戳
 	if atAll {
 		segments = append(segments, napcat.AtSegment("all"))
 		segments = append(segments, napcat.TextSegment("\n"))
 	}
+	header := fmt.Sprintf("【%s|微博】\n", card.User.ScreenName)
+	segments = append(segments, napcat.TextSegment(header))
 
 	// 正文彻底清洗
 	rawText := m.resolveWeiboText(card, cardID)
@@ -1945,6 +1949,7 @@ type WeiboSuperCountResult struct {
 	TodayInteraction   string
 	SignText           string
 	Heat24h            string
+	ReadCount          string // m.weibo 累计阅读，如 "1672.9万"
 	SuperLikeText      string
 	SuperLikeCount     int
 	PostLabel          string
@@ -2121,42 +2126,42 @@ func (m *WeiboMonitor) SignWeiboSuperTopic(oid string) (*WeiboSuperSignResult, e
 	errMsg := ""
 	out := &WeiboSuperSignResult{OID: oid, Code: code, Message: strings.TrimSpace(result.Msg)}
 	if len(result.Data) > 0 {
-	trimmed := strings.TrimSpace(string(result.Data))
-	if strings.HasPrefix(trimmed, "{") {
-		var dataObj struct {
-			ErrNo       interface{} `json:"errno"`
-			ErrMsg      string      `json:"errmsg"`
-			ErrCode     interface{} `json:"errcode"`
-			MemberRank  int         `json:"member_rank"`
-			Rank        int         `json:"rank"`
-			OrderNum    int         `json:"order_num"`
-			Num         int         `json:"num"`
-			TotalSign   int         `json:"total_sign"`
-			CheckinRank int         `json:"checkin_rank"`
-		}
-		if err := json.Unmarshal(result.Data, &dataObj); err == nil {
-			errNo = parseWeiboCode(dataObj.ErrNo)
-			errCode = parseWeiboCode(dataObj.ErrCode)
-			errMsg = strings.TrimSpace(dataObj.ErrMsg)
-			out.Rank = firstNonZero(dataObj.MemberRank, dataObj.Rank, dataObj.OrderNum, dataObj.Num, dataObj.TotalSign, dataObj.CheckinRank)
-		}
-		// 如果上面没命中，从 alert_title / tipMessage 解析 "第X名"
-		if out.Rank <= 0 {
-			var fallback struct {
-				AlertTitle  string `json:"alert_title"`
-				TipMessage  string `json:"tipMessage"`
-				AlertSub    string `json:"alert_subtitle"`
+		trimmed := strings.TrimSpace(string(result.Data))
+		if strings.HasPrefix(trimmed, "{") {
+			var dataObj struct {
+				ErrNo       interface{} `json:"errno"`
+				ErrMsg      string      `json:"errmsg"`
+				ErrCode     interface{} `json:"errcode"`
+				MemberRank  int         `json:"member_rank"`
+				Rank        int         `json:"rank"`
+				OrderNum    int         `json:"order_num"`
+				Num         int         `json:"num"`
+				TotalSign   int         `json:"total_sign"`
+				CheckinRank int         `json:"checkin_rank"`
 			}
-			if err := json.Unmarshal(result.Data, &fallback); err == nil {
-				for _, text := range []string{fallback.AlertTitle, fallback.TipMessage, fallback.AlertSub} {
-					if n, ok := parseRankFromText(text); ok && n > 0 {
-						out.Rank = n
-						break
+			if err := json.Unmarshal(result.Data, &dataObj); err == nil {
+				errNo = parseWeiboCode(dataObj.ErrNo)
+				errCode = parseWeiboCode(dataObj.ErrCode)
+				errMsg = strings.TrimSpace(dataObj.ErrMsg)
+				out.Rank = firstNonZero(dataObj.MemberRank, dataObj.Rank, dataObj.OrderNum, dataObj.Num, dataObj.TotalSign, dataObj.CheckinRank)
+			}
+			// 如果上面没命中，从 alert_title / tipMessage 解析 "第X名"
+			if out.Rank <= 0 {
+				var fallback struct {
+					AlertTitle string `json:"alert_title"`
+					TipMessage string `json:"tipMessage"`
+					AlertSub   string `json:"alert_subtitle"`
+				}
+				if err := json.Unmarshal(result.Data, &fallback); err == nil {
+					for _, text := range []string{fallback.AlertTitle, fallback.TipMessage, fallback.AlertSub} {
+						if n, ok := parseRankFromText(text); ok && n > 0 {
+							out.Rank = n
+							break
+						}
 					}
 				}
 			}
 		}
-	}
 	}
 	// 如果 data 未命中，尝试从 msg 解析 "第X名" 或 "第X位"
 	if out.Rank <= 0 && strings.TrimSpace(result.Msg) != "" {
@@ -2290,8 +2295,13 @@ func (m *WeiboMonitor) FetchSuperCountByOID(oid string, nameHint string) (*Weibo
 	if oid == "" {
 		return nil, fmt.Errorf("oid 不能为空")
 	}
-	if res, err := m.fetchSuperCountByOIDViaApp(oid, nameHint); err == nil {
-		return res, nil
+	// 2026-07-18 用户：APP 超话链路难维护，暂时只走 web（weibo.com Cookie）。
+	// App 实现 fetchSuperCountByOIDViaApp 保留，需要时把 weiboAppSuperCountEnabled 改回 true。
+	const weiboAppSuperCountEnabled = false
+	if weiboAppSuperCountEnabled {
+		if res, err := m.fetchSuperCountByOIDViaApp(oid, nameHint); err == nil {
+			return res, nil
+		}
 	}
 	res, err := m.fetchSuperCountByOIDViaWeb(oid, nameHint)
 	if err != nil {
@@ -2299,7 +2309,6 @@ func (m *WeiboMonitor) FetchSuperCountByOID(oid string, nameHint string) (*Weibo
 	}
 	return res, nil
 }
-
 
 func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (*WeiboSuperCountResult, error) {
 	baseID := strings.TrimPrefix(oid, "1022:")
@@ -2358,6 +2367,16 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 				LabelList []struct {
 					Text string `json:"text"`
 				} `json:"label_list"`
+				DescMore []struct {
+					Desc    string `json:"desc"`
+					DescNum string `json:"desc_num"`
+				} `json:"desc_more"`
+				TitleIconList []struct {
+					IconURL string `json:"icon_url"`
+				} `json:"title_icon_list"`
+				ShareContent struct {
+					Description string `json:"description"`
+				} `json:"share_content"`
 			} `json:"data"`
 		} `json:"header"`
 	}
@@ -2393,6 +2412,54 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 		name = actualOID
 	}
 
+	res := &WeiboSuperCountResult{
+		OID:    actualOID,
+		Name:   name,
+		Source: "web",
+	}
+
+	// 帖子 / 粉丝（粉名可能是 JEWEL、ANY 等）
+	for _, item := range result.Header.Data.DescMore {
+		desc := strings.TrimSpace(item.Desc)
+		value := strings.TrimSpace(item.DescNum)
+		if desc == "" && value == "" {
+			continue
+		}
+		if res.PostLabel == "" && strings.Contains(desc, "帖") {
+			res.PostLabel = desc
+			res.PostCount = value
+			continue
+		}
+		// 第二个 desc_more 通常是粉丝数（标签可能是自定义粉名）
+		if res.FansLabel == "" && value != "" {
+			res.FansLabel = desc
+			if desc == "" {
+				res.FansLabel = "粉丝"
+			}
+			res.FansCount = value
+		}
+	}
+	// share_content 兜底： "3779帖子 5779粉丝" / "4.5万帖子 4.9万JEWEL"
+	if (res.PostCount == "" || res.FansCount == "") && strings.TrimSpace(result.Header.Data.ShareContent.Description) != "" {
+		post, fans := parseWeiboShareContentStats(result.Header.Data.ShareContent.Description)
+		if res.PostCount == "" && post != "" {
+			res.PostCount = post
+			if res.PostLabel == "" {
+				res.PostLabel = "帖子"
+			}
+		}
+		if res.FansCount == "" && fans != "" {
+			res.FansCount = fans
+			if res.FansLabel == "" {
+				res.FansLabel = "粉丝"
+			}
+		}
+	}
+	if len(result.Header.Data.TitleIconList) > 0 {
+		res.LevelIconURL = strings.TrimSpace(result.Header.Data.TitleIconList[0].IconURL)
+		res.LevelText = inferWeiboLevelText(res.LevelIconURL)
+	}
+
 	interaction := ""
 	signText := ""
 	signCount := 0
@@ -2409,6 +2476,13 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 		}
 		if interaction == "" && strings.Contains(text, "今日互动") {
 			interaction = text
+		}
+		if res.Heat24h == "" && strings.Contains(text, "24小时热度") {
+			res.Heat24h = text
+		}
+		if res.SuperLikeText == "" && strings.Contains(strings.ToUpper(text), "超LIKE") {
+			res.SuperLikeCount = parseFirstNumber(text)
+			res.SuperLikeText = normalizeWeiboSuperLikeText(text, res.SuperLikeCount)
 		}
 		if strings.Contains(text, "签到") && strings.Contains(text, "人") {
 			if n, ok := parseSignCountFromLabelText(text); ok {
@@ -2444,15 +2518,164 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 	if signCount <= 0 {
 		return nil, fmt.Errorf("未解析到签到人数")
 	}
+	res.SignCount = signCount
+	res.SignText = signText
+	res.TodayInteraction = interaction
 
-	return &WeiboSuperCountResult{
-		OID:              actualOID,
-		Name:             name,
-		SignCount:        signCount,
-		TodayInteraction: interaction,
-		SignText:         signText,
-		Source:           "web",
-	}, nil
+	// m.weibo 补阅读（以及 web 缺帖/粉时的兜底）；失败不影响签到主链路
+	m.enrichSuperCountFromMWeibo(res, baseID)
+
+	return res, nil
+}
+
+// enrichSuperCountFromMWeibo fills ReadCount (and missing post/fans) via m.weibo.cn getIndex.
+func (m *WeiboMonitor) enrichSuperCountFromMWeibo(res *WeiboSuperCountResult, baseID string) {
+	if res == nil {
+		return
+	}
+	baseID = strings.TrimPrefix(strings.TrimSpace(baseID), "1022:")
+	if baseID == "" {
+		return
+	}
+	m.mu.RLock()
+	cookieHeader := buildWeiboCookieHeader(m.MWeiboCookie)
+	if cookieHeader == "" {
+		cookieHeader = buildWeiboCookieHeader(m.Cookie)
+	}
+	m.mu.RUnlock()
+	if cookieHeader == "" {
+		return
+	}
+	url := "https://m.weibo.cn/api/container/getIndex?containerid=" + neturl.QueryEscape(baseID)
+	client := &http.Client{Timeout: 12 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+	applyWeiboRequestHeaders(req, cookieHeader)
+	req.Header.Set("Referer", "https://m.weibo.cn/p/index?containerid="+baseID)
+	req.Header.Set("MWeibo-Pwa", "1")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Weibo][MWeiboCount] fetch failed oid=%s err=%v", baseID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[Weibo][MWeiboCount] http=%d oid=%s", resp.StatusCode, baseID)
+		return
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+	var payload struct {
+		OK   int `json:"ok"`
+		Data struct {
+			PageInfo struct {
+				DescMore []string `json:"desc_more"`
+			} `json:"pageInfo"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	if payload.OK != 1 {
+		return
+	}
+	read, posts, fans, _ := parseMWeiboPageInfoDescMore(payload.Data.PageInfo.DescMore)
+	if res.ReadCount == "" && read != "" {
+		res.ReadCount = read
+	}
+	if res.PostCount == "" && posts != "" {
+		res.PostCount = posts
+		if res.PostLabel == "" {
+			res.PostLabel = "帖子"
+		}
+	}
+	if res.FansCount == "" && fans != "" {
+		res.FansCount = fans
+		if res.FansLabel == "" {
+			res.FansLabel = "粉丝"
+		}
+	}
+	// m.weibo「等级LV.x…」是当前登录账号个人态，不写入日报 LevelText；等级仍用 web title_icon_list。
+	if res.ReadCount != "" {
+		log.Printf("[Weibo][MWeiboCount] oid=%s read=%q posts=%q fans=%q", baseID, res.ReadCount, res.PostCount, res.FansCount)
+	}
+}
+
+// parseMWeiboPageInfoDescMore parses strings like:
+//
+//	"阅读1672.9万　帖子3780　粉丝5779"
+//	"等级LV.2中级粉丝　连续签到0天 >>"
+//
+// parseMWeiboPageInfoDescMore parses strings like:
+//
+//	"阅读1672.9万　帖子3780　粉丝5779"
+//	"阅读9.6亿　帖子11.9万　粉丝4.9万"
+//	"等级LV.2中级粉丝　连续签到0天 >>"
+func parseMWeiboPageInfoDescMore(lines []string) (read, posts, fans, level string) {
+	// 支持 万/亿；去掉数字与单位之间可能的空格
+	numUnit := `([0-9]+(?:\.[0-9]+)?\s*[万亿]?)`
+	reRead := regexp.MustCompile(`阅读\s*` + numUnit)
+	rePosts := regexp.MustCompile(`帖子\s*` + numUnit)
+	reFans := regexp.MustCompile(`粉丝\s*` + numUnit)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// normalize fullwidth spaces
+		line = strings.ReplaceAll(line, "\u3000", " ")
+		if read == "" {
+			if m := reRead.FindStringSubmatch(line); len(m) == 2 {
+				read = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+			}
+		}
+		if posts == "" {
+			if m := rePosts.FindStringSubmatch(line); len(m) == 2 {
+				posts = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+			}
+		}
+		if fans == "" {
+			if m := reFans.FindStringSubmatch(line); len(m) == 2 {
+				fans = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+			}
+		}
+		if level == "" {
+			if idx := strings.Index(line, "等级"); idx >= 0 {
+				rest := strings.TrimSpace(line[idx+len("等级"):])
+				for _, sep := range []string{"连续签到", ">>", "〉", "›"} {
+					if i := strings.Index(rest, sep); i >= 0 {
+						rest = strings.TrimSpace(rest[:i])
+					}
+				}
+				level = rest
+			}
+		}
+	}
+	return
+}
+
+// parseWeiboShareContentStats parses "3779帖子 5779粉丝" / "4.5万帖子 4.9万JEWEL".
+func parseWeiboShareContentStats(desc string) (posts, fans string) {
+	desc = strings.TrimSpace(desc)
+	if desc == "" {
+		return "", ""
+	}
+	numUnit := `([0-9]+(?:\.[0-9]+)?\s*[万亿]?)`
+	if m := regexp.MustCompile(numUnit + `\s*帖子`).FindStringSubmatch(desc); len(m) == 2 {
+		posts = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+	}
+	// 粉丝 / 自定义粉名：优先「帖子」后的 数字+单位
+	if m := regexp.MustCompile(`帖子\s*` + numUnit).FindStringSubmatch(desc); len(m) == 2 {
+		fans = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+	} else if m := regexp.MustCompile(numUnit + `\s*粉丝`).FindStringSubmatch(desc); len(m) == 2 {
+		fans = strings.ReplaceAll(strings.TrimSpace(m[1]), " ", "")
+	}
+	return
 }
 
 func (m *WeiboMonitor) fetchSuperCountByOIDViaApp(oid string, nameHint string) (*WeiboSuperCountResult, error) {
@@ -2999,23 +3222,34 @@ func inferWeiboLevelText(iconURL string) string {
 	if iconURL == "" {
 		return ""
 	}
-	re := regexp.MustCompile(`active_level_page_([a-z]+)_([0-9]+)\.png`)
+	// 例：
+	//   active_level_page_silver_1.png   → 银1（银超）
+	//   active_level_page_gold_2.png     → 金2
+	//   active_level_page_silver_common.png → 普通（非银超；common=未进金银钻阶梯）
+	//   active_level_page_gold_common.png   → 普通
+	re := regexp.MustCompile(`active_level_page_([a-z]+)_(common|[0-9]+)\.png`)
 	m := re.FindStringSubmatch(iconURL)
 	if len(m) < 3 {
 		return ""
 	}
 	levelType := m[1]
 	levelNum := m[2]
+	// common = 普通超话档，文件名里的 silver/gold 只是默认图色，不代表银/金超
+	if levelNum == "common" {
+		return "普通"
+	}
+	prefix := levelType
 	switch levelType {
 	case "silver":
-		return "银" + levelNum
+		prefix = "银"
 	case "gold":
-		return "金" + levelNum
+		prefix = "金"
 	case "diamond":
-		return "钻" + levelNum
-	default:
-		return levelType + levelNum
+		prefix = "钻"
+	case "bronze":
+		prefix = "铜"
 	}
+	return prefix + levelNum
 }
 
 // CheckWeiboAppAuth 主动检查微博 App 认证是否有效。

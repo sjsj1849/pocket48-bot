@@ -28,3 +28,17 @@ debug_*
 sidecar/nim-bridge/probe-*
 sidecar/nim-bridge/scripts/probe-*
 sidecar/weibo-auth/storage/
+# local binaries / backups
+*.previous
+pocket48-bot.previous
+pocket48-admin.previous
+# python / probes / ops junk
+scripts/__pycache__/
+**/__pycache__/
+sidecar/weibo-auth/xhs_*_probe.mjs
+sidecar/weibo-auth/xhs_http_probe*.mjs
+sidecar/weibo-auth/xhs_webpack_probe.mjs
+sidecar/weibo-auth/xhs_xys_probe.mjs
+# large local dumps
+bot.log
+scripts/llbot_auto_revive.py

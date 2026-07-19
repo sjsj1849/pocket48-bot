@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -34,12 +36,22 @@ type activityItem struct {
 }
 
 type resources struct {
-	CPUPercent    int    `json:"cpuPercent"`
-	MemoryPercent int    `json:"memoryPercent"`
-	DiskPercent   int    `json:"diskPercent"`
-	Uptime        string `json:"uptime"`
-	OS            string `json:"os"`
+	// Percents are 0–100 with one decimal so the meters visibly move on quiet hosts.
+	CPUPercent    float64 `json:"cpuPercent"`
+	MemoryPercent float64 `json:"memoryPercent"`
+	DiskPercent   float64 `json:"diskPercent"`
+	Uptime        string  `json:"uptime"`
+	OS            string  `json:"os"`
 }
+
+// cpuSample keeps the previous /proc/stat snapshot so consecutive overview
+// polls (5s) can compute a real instantaneous usage without sleeping every time.
+var (
+	cpuSampleMu    sync.Mutex
+	lastCPUIdle    uint64
+	lastCPUTotal   uint64
+	lastCPUSampled time.Time
+)
 
 type overviewResponse struct {
 	UpdatedAt string         `json:"updatedAt"`
@@ -64,10 +76,65 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	lines, _ := tailLines(s.opts.LogPath, 5000)
 	services := buildServiceStates(lines)
-	attentionItems := make([]attention, 0, 2)
+	attentionItems := make([]attention, 0, 4)
 	for _, item := range services {
-		if item.ID == "douyin_im" && item.Status != "healthy" {
-			attentionItems = append(attentionItems, attention{ID: "douyin-im", Title: "Douyin 网页 IM 尚未连接", Description: "账号已经登录；新版网页未开放群聊初始化接口，侧卡会继续低频探测", Action: "查看浏览器", Target: "browser"})
+		if item.Status == "healthy" {
+			continue
+		}
+		switch item.ID {
+		case "douyin_im":
+			title := "Douyin 网页 IM 异常"
+			desc := item.LastEvent
+			if item.StatusText == "重连中" {
+				title = "Douyin 网页 IM 重连中"
+				desc = "群聊连接断开，正在自动重连；若登录失效会自动请求扫码，打开浏览器即可扫"
+			} else if item.StatusText == "未连接" {
+				title = "Douyin 网页 IM 尚未连接"
+				desc = "账号可能已登录但 IM 初始化未完成；侧车会继续低频探测"
+			}
+			if desc == "" {
+				desc = item.StatusText
+			}
+			attentionItems = append(attentionItems, attention{
+				ID: "douyin-im", Title: title, Description: desc, Action: "查看浏览器", Target: "browser",
+			})
+		case "xiaohongshu":
+			title := "小红书监控异常"
+			desc := item.LastEvent
+			switch item.StatusText {
+			case "待登录":
+				title = "小红书需要登录"
+				desc = "浏览器账号需要重新扫码登录小红书"
+			case "拉帖异常", "Cookie已有", "已就绪":
+				title = "小红书无法拉帖"
+				desc = "Cookie 可能仍在，但 notes 不可用（登录半残/风控）；请在面板浏览器重新登录并确认能看到笔记"
+			case "认证异常":
+				title = "小红书认证异常"
+			}
+			if desc == "" {
+				desc = item.StatusText + " — " + item.LastEvent
+			}
+			attentionItems = append(attentionItems, attention{
+				ID: "xiaohongshu", Title: title, Description: desc, Action: "查看浏览器", Target: "browser",
+			})
+		case "douyin":
+			if item.StatusText == "待登录" || item.Status == "down" {
+				attentionItems = append(attentionItems, attention{
+					ID: "douyin", Title: "抖音浏览器需要登录", Description: item.LastEvent, Action: "查看浏览器", Target: "browser",
+				})
+			}
+		case "weibo":
+			if item.Status == "down" || item.StatusText == "待登录" {
+				attentionItems = append(attentionItems, attention{
+					ID: "weibo", Title: "微博认证异常", Description: item.LastEvent, Action: "查看浏览器", Target: "browser",
+				})
+			}
+		case "napcat":
+			if item.Status == "down" {
+				attentionItems = append(attentionItems, attention{
+					ID: "napcat", Title: "NapCat/QQ 连接中断", Description: item.LastEvent, Action: "查看服务", Target: "services",
+				})
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, overviewResponse{
@@ -88,6 +155,7 @@ func buildServiceStates(lines []string) []serviceState {
 		{ID: "napcat", Name: "NapCat", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
 		{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
+		{ID: "xiaohongshu", Name: "Xiaohongshu", Subtitle: "小红书帖子与开播提醒", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
 		{ID: "douyin_im", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "未连接", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待网页 IM 初始化"},
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -122,8 +190,14 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("napcat", "healthy", "运行中", "会话连接正常")
 		case strings.Contains(line, "NapCat read error (disconnected?)"):
 			setLatest("napcat", "down", "连接中断", "WebSocket 已断开，正在自动重连")
+		case strings.Contains(line, "Failed to connect to NapCat"):
+			setLatest("napcat", "down", "连接中断", "无法连接 OneBot/llbot（127.0.0.1:3001），正在重试")
 		case strings.Contains(line, "[NAPCAT] Sending "):
 			setLatest("napcat", "healthy", "运行中", "消息发送链路正常")
+		case strings.Contains(line, "[NapCat] status=disconnected"):
+			setLatest("napcat", "down", "连接中断", "OneBot/llbot 已断开，正在自动重连")
+		case strings.Contains(line, "[NapCat] status=connected"):
+			setLatest("napcat", "healthy", "运行中", "OneBot/llbot 会话已恢复")
 		case strings.Contains(line, "[Weibo-auth] status=healthy"):
 			setLatest("weibo", "healthy", "已认证", "认证状态已刷新")
 		case strings.Contains(line, "[Douyin] status=healthy"):
@@ -134,6 +208,30 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("douyin", "attention", "待登录", "浏览器账号需要登录")
 		case strings.Contains(line, "[Douyin] status=login_error"):
 			setLatest("douyin", "down", "认证异常", "浏览器登录状态检查失败")
+		// Cookie-only "healthy/ready" is NOT enough — notes must load. Prefer failure
+		// signals (scan bottom-up: first match wins, so put data-plane errors first).
+		case strings.Contains(line, "[Xiaohongshu] status=notes_ok"):
+			setLatest("xiaohongshu", "healthy", "运行中", "笔记列表可拉取")
+		case strings.Contains(line, "[Xiaohongshu] status=login_required"):
+			setLatest("xiaohongshu", "attention", "待登录", "浏览器账号需要登录")
+		case strings.Contains(line, "[Xiaohongshu] status=login_error"):
+			setLatest("xiaohongshu", "down", "认证异常", "浏览器登录状态检查失败")
+		case strings.Contains(line, "[Xiaohongshu] status=degraded"),
+			strings.Contains(line, "[Xiaohongshu] status=notes_unavailable"):
+			setLatest("xiaohongshu", "attention", "拉帖异常", "登录 Cookie 可能有效，但笔记列表不可用")
+		case strings.Contains(line, "[Xiaohongshu] account_error"),
+			strings.Contains(line, "xiaohongshu blocked"),
+			strings.Contains(line, "小红书需重新登录"),
+			strings.Contains(line, "笔记列表暂不可用"),
+			strings.Contains(line, "Account abnormal"):
+			setLatest("xiaohongshu", "attention", "拉帖异常", "无法读取笔记/需重新登录或触发风控")
+		case strings.Contains(line, "[Xiaohongshu] notes "):
+			setLatest("xiaohongshu", "healthy", "运行中", "已收到笔记推送")
+		case strings.Contains(line, "[Xiaohongshu] status=healthy"):
+			// Cookie present only — show as attention until notes prove healthy.
+			setLatest("xiaohongshu", "attention", "Cookie已有", "仅 Cookie 有效，尚未确认能拉 notes")
+		case strings.Contains(line, "[Xiaohongshu] status=ready"):
+			setLatest("xiaohongshu", "attention", "已就绪", "监控进程就绪，等待 notes 验证")
 		case strings.Contains(line, "[Douyin-IM] status=connected"):
 			setLatest("douyin_im", "healthy", "运行中", "群聊只读连接已建立")
 		case strings.Contains(line, "[Douyin-IM] status=init_missing"):
@@ -257,11 +355,7 @@ func tailLines(path string, limit int) ([]string, error) {
 
 func readResources() resources {
 	result := resources{OS: "Linux " + runtime.GOARCH}
-	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
-		fields := strings.Fields(string(data))
-		load, _ := strconv.ParseFloat(fields[0], 64)
-		result.CPUPercent = clamp(int(load/float64(runtime.NumCPU())*100), 0, 100)
-	}
+	result.CPUPercent = readCPUPercent()
 	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
 		values := map[string]int64{}
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -271,19 +365,125 @@ func readResources() resources {
 				values[strings.TrimSuffix(fields[0], ":")], _ = strconv.ParseInt(fields[1], 10, 64)
 			}
 		}
-		if values["MemTotal"] > 0 {
-			result.MemoryPercent = int((values["MemTotal"] - values["MemAvailable"]) * 100 / values["MemTotal"])
+		if total := values["MemTotal"]; total > 0 {
+			available := values["MemAvailable"]
+			if available == 0 {
+				available = values["MemFree"]
+			}
+			used := float64(total-available) * 100 / float64(total)
+			result.MemoryPercent = round1(clampFloat(used, 0, 100))
 		}
 	}
 	var stat syscall.Statfs_t
 	if syscall.Statfs("/", &stat) == nil && stat.Blocks > 0 {
-		result.DiskPercent = int((stat.Blocks - stat.Bavail) * 100 / stat.Blocks)
+		used := float64(stat.Blocks-stat.Bavail) * 100 / float64(stat.Blocks)
+		result.DiskPercent = round1(clampFloat(used, 0, 100))
 	}
 	if data, err := os.ReadFile("/proc/uptime"); err == nil {
 		seconds, _ := strconv.ParseFloat(strings.Fields(string(data))[0], 64)
 		result.Uptime = humanDuration(time.Duration(seconds) * time.Second)
 	}
 	return result
+}
+
+// readCPUTimes returns idle and total jiffies from the aggregate "cpu " line.
+func readCPUTimes() (idle, total uint64, ok bool) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "cpu ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		// cpu user nice system idle iowait irq softirq steal ...
+		if len(fields) < 5 {
+			return 0, 0, false
+		}
+		var sum uint64
+		for i := 1; i < len(fields); i++ {
+			v, err := strconv.ParseUint(fields[i], 10, 64)
+			if err != nil {
+				continue
+			}
+			sum += v
+			if i == 4 { // idle
+				idle = v
+			}
+			if i == 5 { // iowait counts as idle for usage
+				idle += v
+			}
+		}
+		return idle, sum, sum > 0
+	}
+	return 0, 0, false
+}
+
+// cpuUsageFromDelta converts two /proc/stat samples into a 0–100 usage percent.
+func cpuUsageFromDelta(prevIdle, prevTotal, idle, total uint64) float64 {
+	if total <= prevTotal {
+		return 0
+	}
+	dTotal := total - prevTotal
+	var dIdle uint64
+	if idle >= prevIdle {
+		dIdle = idle - prevIdle
+	}
+	if dIdle > dTotal {
+		dIdle = dTotal
+	}
+	used := (1 - float64(dIdle)/float64(dTotal)) * 100
+	return round1(clampFloat(used, 0, 100))
+}
+
+func readCPUPercent() float64 {
+	idle, total, ok := readCPUTimes()
+	if !ok {
+		return 0
+	}
+
+	cpuSampleMu.Lock()
+	needBootstrap := lastCPUTotal == 0 || time.Since(lastCPUSampled) > 30*time.Second
+	if needBootstrap {
+		// Store first sample, release lock, then sleep so we don't block other
+		// overview readers holding the mutex for 200ms.
+		lastCPUIdle, lastCPUTotal = idle, total
+		lastCPUSampled = time.Now()
+		cpuSampleMu.Unlock()
+		time.Sleep(200 * time.Millisecond)
+		idle2, total2, ok2 := readCPUTimes()
+		cpuSampleMu.Lock()
+		defer cpuSampleMu.Unlock()
+		if !ok2 {
+			return 0
+		}
+		// Prefer delta against the bootstrap sample we just took.
+		usage := cpuUsageFromDelta(lastCPUIdle, lastCPUTotal, idle2, total2)
+		lastCPUIdle, lastCPUTotal = idle2, total2
+		lastCPUSampled = time.Now()
+		return usage
+	}
+
+	usage := cpuUsageFromDelta(lastCPUIdle, lastCPUTotal, idle, total)
+	lastCPUIdle, lastCPUTotal = idle, total
+	lastCPUSampled = time.Now()
+	cpuSampleMu.Unlock()
+	return usage
+}
+
+func round1(value float64) float64 {
+	return math.Round(value*10) / 10
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
 }
 
 func humanDuration(value time.Duration) string {

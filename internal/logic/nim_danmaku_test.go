@@ -105,7 +105,32 @@ func TestRealtimeMessageFallbackRemainsEnabledDuringQChatActivity(t *testing.T) 
 		},
 	}
 	if !bot.shouldPollRoomMessages() {
-		t.Fatal("REST fallback was disabled while QChat monitoring was active")
+		t.Fatal("global REST fallback flag should remain enabled when configured")
+	}
+}
+
+func TestShouldPollRoomMessagesForSkipsWhenRealtimeActive(t *testing.T) {
+	bridge := &NimDanmakuBridge{
+		qchatConnected:    true,
+		lastRealtimeMsgAt: map[int64]time.Time{101: time.Now()},
+	}
+	bot := &Bot{
+		cfg: &config.Config{
+			NIMRoomMessageEnabled:      true,
+			NIMRoomMessagePollFallback: true,
+		},
+		nimDanmaku: bridge,
+	}
+	if bot.shouldPollRoomMessagesFor(101) {
+		t.Fatal("active QChat room must skip REST polling")
+	}
+	if !bot.shouldPollRoomMessagesFor(202) {
+		t.Fatal("inactive room must keep REST polling while fallback is enabled")
+	}
+
+	bridge.lastRealtimeMsgAt[101] = time.Now().Add(-6 * time.Minute)
+	if !bot.shouldPollRoomMessagesFor(101) {
+		t.Fatal("stale realtime delivery must re-enable REST polling")
 	}
 }
 
@@ -116,6 +141,31 @@ func TestMessageDedupKeepsSameIDInDifferentRooms(t *testing.T) {
 	otherRoom := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 202}, MsgIDServer: "same-id"}
 	if !bot.markMessageSeen(first) || bot.markMessageSeen(duplicate) || !bot.markMessageSeen(otherRoom) {
 		t.Fatal("message ID deduplication did not respect room boundaries")
+	}
+}
+
+func TestAdvanceRoomMessageCursorPersistsAndMonotonic(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewStorage(dir, "")
+	bot := &Bot{
+		storage:       store,
+		lastMsgTime:   make(map[int64]int64),
+		cursorLoaded:  make(map[int64]bool),
+		seenMessageIDs: make(map[string]time.Time),
+	}
+	msgOlder := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 1279287}, MsgIDServer: "a", Time: 1000}
+	msgNewer := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 1279287}, MsgIDServer: "b", Time: 2000}
+	bot.advanceRoomMessageCursor(1279287, msgNewer)
+	bot.advanceRoomMessageCursor(1279287, msgOlder) // must not regress
+	if bot.lastMsgTime[1279287] != 2000 {
+		t.Fatalf("lastMsgTime = %d", bot.lastMsgTime[1279287])
+	}
+	cur, err := store.GetCursor(1279287)
+	if err != nil || cur == nil {
+		t.Fatalf("GetCursor err=%v cur=%v", err, cur)
+	}
+	if cur.LastMsgTime != 2000 || cur.LastMsgID != "b" {
+		t.Fatalf("cursor = %#v", cur)
 	}
 }
 
@@ -311,7 +361,7 @@ func TestRoomRealtimeTasksPrepareConcurrentlyAndSendInOrder(t *testing.T) {
 	}
 }
 
-func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
+func TestUnresolvedRealtimeSenderIsDroppedNotDeferred(t *testing.T) {
 	bot := &Bot{
 		cfg:            &config.Config{NIMRoomMessagePollFallback: true},
 		seenMessageIDs: make(map[string]time.Time),
@@ -320,8 +370,11 @@ func TestUnresolvedRealtimeSenderDoesNotPoisonRESTDedup(t *testing.T) {
 		Room:        &pocket48.RoomInfo{ChannelID: 101},
 		MsgIDServer: "same-id",
 	}
-	if !bot.shouldDeferRoomRealtimeToREST(qchat) {
-		t.Fatal("unresolved QChat sender was not deferred to REST")
+	if !bot.shouldDropUnresolvedRoomRealtime(qchat) {
+		t.Fatal("unresolved QChat sender was not dropped")
+	}
+	if bot.shouldDeferRoomRealtimeToREST(qchat) {
+		t.Fatal("unresolved QChat sender must not defer to REST")
 	}
 	if len(bot.seenMessageIDs) != 0 {
 		t.Fatal("unresolved QChat message unexpectedly populated dedup state")

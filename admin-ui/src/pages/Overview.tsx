@@ -20,8 +20,19 @@ function ServiceRow({ service }: { service: ServiceState }) {
   )
 }
 
+function formatPercent(value: number) {
+  if (!Number.isFinite(value)) return '0.0'
+  return value.toFixed(1)
+}
+
 function Meter({ label, value }: { label: string; value: number }) {
-  return <div className="meter"><div><span>{label}</span><strong>{value}%</strong></div><div className="meter-track"><i style={{ width: `${value}%` }} /></div></div>
+  const safe = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0
+  return (
+    <div className="meter">
+      <div><span>{label}</span><strong>{formatPercent(safe)}%</strong></div>
+      <div className="meter-track"><i style={{ width: `${safe}%` }} /></div>
+    </div>
+  )
 }
 
 export function Overview({ onNavigate }: { onNavigate: (page: Page) => void }) {
@@ -34,7 +45,8 @@ export function Overview({ onNavigate }: { onNavigate: (page: Page) => void }) {
   }, [])
   useEffect(() => {
     void load()
-    const timer = window.setInterval(() => void load(true), 15_000)
+    // 5s keeps CPU/memory meters responsive without hammering the admin API.
+    const timer = window.setInterval(() => void load(true), 5_000)
     return () => window.clearInterval(timer)
   }, [load])
 
@@ -59,7 +71,20 @@ export function Overview({ onNavigate }: { onNavigate: (page: Page) => void }) {
       </section>
       <div className="overview-grid">
         <section className="section-block activity-block"><div className="section-title"><div><h2>最近活动</h2><p>关键事件与消息流转</p></div><button className="text-button" onClick={() => onNavigate('logs')}>查看日志 <ArrowRight size={15} /></button></div><div className="activity-list">{data.activity.length ? data.activity.map((item, index) => <div className="activity-item" key={`${item.time}-${index}`}><time>{item.time}</time><span className={`activity-mark ${item.level}`} /><div><strong>{item.source}</strong><p>{item.message}</p></div></div>) : <p className="muted">暂无关键事件</p>}</div></section>
-        <section className="section-block resources-block"><div className="section-title"><div><h2>系统资源</h2><p>{data.resources.os}</p></div></div><div className="resource-meters"><Meter label="CPU" value={data.resources.cpuPercent} /><Meter label="内存" value={data.resources.memoryPercent} /><Meter label="磁盘" value={data.resources.diskPercent} /></div><div className="uptime-stat"><span>系统运行时间</span><strong>{data.resources.uptime}</strong></div></section>
+        <section className="section-block resources-block">
+          <div className="section-title">
+            <div>
+              <h2>系统资源</h2>
+              <p>{data.resources.os} · CPU 为瞬时占用 · 每 5 秒刷新</p>
+            </div>
+          </div>
+          <div className="resource-meters">
+            <Meter label="CPU" value={data.resources.cpuPercent} />
+            <Meter label="内存" value={data.resources.memoryPercent} />
+            <Meter label="磁盘" value={data.resources.diskPercent} />
+          </div>
+          <div className="uptime-stat"><span>系统运行时间</span><strong>{data.resources.uptime}</strong></div>
+        </section>
       </div>
     </main>
   )

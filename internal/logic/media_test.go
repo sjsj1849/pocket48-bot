@@ -28,10 +28,26 @@ func TestDownloadMediaFindsRefinedExtensionCache(t *testing.T) {
 	}
 }
 
-func TestQChatMediaUsesDirectNapCatURL(t *testing.T) {
-	url := "https://invalid.example/qchat-direct-media-test.jpg"
-	msg := &pocket48.Message{MsgIDServer: "direct", Type: pocket48.MsgImage, DirectMedia: true}
+func TestQChatMediaPrefersLocalCacheOverDirectURL(t *testing.T) {
+	url := "https://invalid.example/qchat-local-media-test.jpg"
+	hash := md5.Sum([]byte(url))
+	cached := filepath.Join(mediaCacheDir, hex.EncodeToString(hash[:])+".jpg")
+	if err := os.WriteFile(cached, []byte("cached"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cached) })
+
+	msg := &pocket48.Message{MsgIDServer: "local", Type: pocket48.MsgImage, DirectMedia: true}
+	if got := (&Bot{}).mediaPathForMessage(msg, url); got != cached {
+		t.Fatalf("mediaPathForMessage returned %q, want local cache %q", got, cached)
+	}
+}
+
+func TestMediaPathFallsBackToRemoteURLWhenDownloadFails(t *testing.T) {
+	// Port 1 is almost always closed → immediate connection refused (no 20s wait).
+	url := "http://127.0.0.1:1/qchat-missing-media-test-no-cache.jpg"
+	msg := &pocket48.Message{MsgIDServer: "fallback", Type: pocket48.MsgImage, DirectMedia: true}
 	if got := (&Bot{}).mediaPathForMessage(msg, url); got != url {
-		t.Fatalf("mediaPathForMessage returned %q, want direct URL %q", got, url)
+		t.Fatalf("mediaPathForMessage returned %q, want remote fallback %q", got, url)
 	}
 }

@@ -879,12 +879,20 @@ func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket
 	}
 }
 
+// shouldDropUnresolvedRoomRealtime drops QChat messages whose sender could not
+// be resolved to a user id. These are almost always fan/noise traffic and must
+// not keep REST polling warm as a "fallback".
+func (b *Bot) shouldDropUnresolvedRoomRealtime(msg *pocket48.Message) bool {
+	return msg != nil && msg.ExtInfo.User.UserID == 0
+}
+
 func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
 	if msg == nil || !b.cfg.NIMRoomMessagePollFallback {
 		return false
 	}
+	// Unresolved senders are dropped, not deferred — see shouldDropUnresolvedRoomRealtime.
 	if msg.ExtInfo.User.UserID == 0 {
-		return true
+		return false
 	}
 	switch msg.Type {
 	case pocket48.MsgText:
@@ -965,6 +973,41 @@ func (b *Bot) enqueueRoomRealtimeTask(roomID int64, prepare, send func()) {
 	}()
 }
 
+// prefetchRoomRealtimeMedia downloads image/audio/video for a realtime message
+// before the per-room ordered send slot. prepare runs concurrently with the
+// previous message's send, so CDN fetch does not serialize behind NapCat.
+func (b *Bot) prefetchRoomRealtimeMedia(msg *pocket48.Message) {
+	if msg == nil {
+		return
+	}
+	var mediaURL string
+	switch msg.Type {
+	case pocket48.MsgImage, pocket48.MsgExpressImage:
+		mediaURL = b.extractImageURL(msg.Body)
+	case pocket48.MsgAudio, pocket48.MsgFlipCardAudio:
+		mediaURL = b.extractAudioURL(msg.Body)
+	case pocket48.MsgVideo, pocket48.MsgFlipCardVideo:
+		mediaURL = b.extractVideoURL(msg.Body)
+	case pocket48.MsgAudioGiftReply:
+		_, mediaURL, _, _ = parseAudioGiftReplyMessage(msg.Body)
+	case pocket48.MsgLivePush:
+		// cover may be embedded; processSingle extracts later — best-effort skip here
+		return
+	default:
+		return
+	}
+	mediaURL = normalizeMediaURL(strings.TrimSpace(mediaURL))
+	if mediaURL == "" {
+		return
+	}
+	started := time.Now()
+	if _, err := b.downloadMedia(mediaURL); err != nil {
+		log.Printf("[NIM-room] media prefetch failed id=%s type=%s elapsed=%s: %v", msg.MsgIDServer, msg.Type, time.Since(started).Round(time.Millisecond), err)
+		return
+	}
+	log.Printf("[NIM-room] media prefetched id=%s type=%s elapsed=%s", msg.MsgIDServer, msg.Type, time.Since(started).Round(time.Millisecond))
+}
+
 func (b *Bot) processRoomRealtimeMessage(msg *pocket48.Message) {
 	if msg == nil || !b.markMessageSeen(msg) {
 		return
@@ -975,13 +1018,45 @@ func (b *Bot) processRoomRealtimeMessage(msg *pocket48.Message) {
 	}
 	targetGroups := b.getTargetGroupsForRoom(roomID)
 	if len(targetGroups) == 0 {
+		// Still advance cursor so a later REST poll / restart does not replay.
+		b.advanceRoomMessageCursor(roomID, msg)
 		return
 	}
 	started := time.Now()
-	b.enqueueRoomRealtimeTask(roomID, nil, func() {
+	b.enqueueRoomRealtimeTask(roomID, func() {
+		b.prefetchRoomRealtimeMedia(msg)
+	}, func() {
 		b.processSinglePocketMessage(msg, targetGroups)
+		// QChat success path must persist cursor. Previously only REST poll
+		// called SaveCursor; after bot restart REST re-fetched from a stale
+		// last_msg_time and re-forwarded the same idol messages.
+		b.advanceRoomMessageCursor(roomID, msg)
 		log.Printf("[NIM-room] ordered message processed room=%d id=%s type=%s elapsed=%s", roomID, msg.MsgIDServer, msg.Type, time.Since(started).Round(time.Millisecond))
 	})
+}
+
+// advanceRoomMessageCursor moves the in-memory + disk REST poll cursor forward
+// when QChat (or any path) has already handled a message. Never regresses.
+func (b *Bot) advanceRoomMessageCursor(roomID int64, msg *pocket48.Message) {
+	if b == nil || roomID == 0 || msg == nil || msg.Time <= 0 {
+		return
+	}
+	msgID := strings.TrimSpace(msg.MsgIDServer)
+	if msgID == "" {
+		msgID = strings.TrimSpace(msg.MsgIDClient)
+	}
+	b.mu.Lock()
+	if msg.Time > b.lastMsgTime[roomID] {
+		b.lastMsgTime[roomID] = msg.Time
+	}
+	b.cursorLoaded[roomID] = true
+	b.mu.Unlock()
+	if b.storage == nil {
+		return
+	}
+	if err := b.storage.SaveCursor(roomID, msgID, msg.Time); err != nil {
+		log.Printf("[Cursor] save room=%d time=%d failed: %v", roomID, msg.Time, err)
+	}
 }
 
 func qchatIdentityMessageKey(roomID int64, serverID, clientID string) string {
@@ -1169,11 +1244,17 @@ func (b *Bot) handleRoomRealtimeMessage(pocketRoomID int64, raw *RoomRealtimeMes
 	}
 	b.resolveQChatOwnerIdentity(room, raw, msg)
 	log.Printf("[NIM-room] received room=%d channel=%d server=%d id=%s type=%s sender=%d from=%q nick=%q", pocketRoomID, raw.ChannelID, raw.ServerID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID, raw.From, raw.FromNick)
-	if b.shouldDeferRoomRealtimeToREST(msg) {
+	if b.shouldDropUnresolvedRoomRealtime(msg) {
+		// Fan/noise with no resolvable sender: drop immediately. Do not markSeen
+		// and do not REST-fallback — otherwise fan spam keeps polling alive.
+		log.Printf("[NIM-room] skip unresolved/fan realtime room=%d id=%s type=%s from=%q", pocketRoomID, msg.MsgIDServer, msg.Type, raw.From)
+	} else if b.shouldDeferRoomRealtimeToREST(msg) {
 		log.Printf("[NIM-room] defer incomplete message to REST room=%d id=%s type=%s sender=%d", pocketRoomID, msg.MsgIDServer, msg.Type, msg.ExtInfo.User.UserID)
 	} else {
 		b.processRoomRealtimeMessage(msg)
 	}
+	// Count all realtime deliveries (including dropped fans) so RoomRealtimeActive
+	// stays true while QChat is healthy and REST stays off for this room.
 	b.nimDanmaku.mu.Lock()
 	b.nimDanmaku.lastRealtimeMsgAt[pocketRoomID] = time.Now()
 	b.nimDanmaku.mu.Unlock()

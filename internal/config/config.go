@@ -66,6 +66,9 @@ type Config struct {
 	DouyinIMPrivateEnabled            bool                                               `json:"DOUYIN_IM_PRIVATE_ENABLED"`
 	DouyinIMGroupName                 string                                             `json:"DOUYIN_IM_GROUP_NAME"`
 	DouyinIMGroupNumber               string                                             `json:"DOUYIN_IM_GROUP_NUMBER"`
+	XiaohongshuEnabled                bool                                               `json:"XIAOHONGSHU_ENABLED"`
+	XiaohongshuPollSeconds            int                                                `json:"XIAOHONGSHU_POLL_SECONDS"`
+	XiaohongshuSubscriptions          map[int64]map[string]*XiaohongshuConfig            `json:"XIAOHONGSHU_SUBSCRIPTIONS"`
 	AlertEmailEnabled                 bool                                               `json:"ALERT_EMAIL_ENABLED"`
 	AlertEmailTo                      string                                             `json:"ALERT_EMAIL_TO"`
 	AlertEmailFrom                    string                                             `json:"ALERT_EMAIL_FROM"`
@@ -94,6 +97,19 @@ type DouyinConfig struct {
 	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
 	LiveID        string `json:"live_id,omitempty"`
 	Auto          bool   `json:"auto,omitempty"`
+}
+
+// XiaohongshuConfig stores a creator subscription and its per-group cursor.
+// UserID is Xiaohongshu's internal profile ID, not the user-facing Red ID.
+type XiaohongshuConfig struct {
+	UserID          string `json:"user_id"`
+	ProfileURL      string `json:"profile_url,omitempty"`
+	Name            string `json:"name,omitempty"`
+	AtAll           bool   `json:"at_all"`
+	LastNoteID      string `json:"last_note_id,omitempty"`
+	LastNoteTime    int64  `json:"last_note_time,omitempty"`
+	LiveInitialized bool   `json:"live_initialized,omitempty"`
+	LiveActive      bool   `json:"live_active,omitempty"`
 }
 
 type WeiboSuperTopic struct {
@@ -128,6 +144,7 @@ type WeiboSuperCountSnapshotItem struct {
 	SignCount          int    `json:"sign_count"`
 	SuperLikeCount     int    `json:"super_like_count"`
 	Heat24h            string `json:"heat24h,omitempty"`
+	ReadCount          string `json:"read_count,omitempty"`
 	PostCount          string `json:"post_count,omitempty"`
 	FansCount          string `json:"fans_count,omitempty"`
 	LevelText          string `json:"level_text,omitempty"`
@@ -242,6 +259,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.DouyinSubscriptions == nil {
 		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)
+	}
+	if cfg.XiaohongshuPollSeconds < 30 {
+		cfg.XiaohongshuPollSeconds = 90
+	}
+	if cfg.XiaohongshuSubscriptions == nil {
+		cfg.XiaohongshuSubscriptions = make(map[int64]map[string]*XiaohongshuConfig)
 	}
 	if _, ok := raw["WEIBO_SUPERPOST_SUBSCRIPTIONS"]; !ok || cfg.WeiboSuperPostSubscriptions == nil {
 		cfg.WeiboSuperPostSubscriptions = make(map[int64]map[string]*WeiboSuperPostConfig)

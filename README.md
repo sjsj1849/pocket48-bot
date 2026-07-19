@@ -20,7 +20,8 @@
 - **主页微博**动态监控
 - **超话发帖**监控（指定 uid 在指定超话的发帖）
 - **超话签到**（手动/自动每日签到，失败可重试）
-- **超话签到人数**查询与日排行
+- **超话签到人数**查询与日排行（分组、涨跌、QQ 推送）
+- **超话日报邮件**（可选）：单封 HTML 多表 + 3:4 卡片 PNG；字段含签到/帖子/粉丝/等级/阅读等（有数据才出列）
 - **三套认证**独立维护：AppAuth / weibo.com Cookie / m.weibo.cn Cookie
 - **AppAuth 主动健康检查**（每 2 小时，失效/恢复自动通知管理员）
 - **Web Cookie 自动维护**：持久化浏览器 Profile，Cookie 失效时向管理员私聊登录二维码
@@ -30,6 +31,12 @@
 - 持久化 Chromium Profile，可由管理员按需扫码登录
 - 开播、下播实时通知，直播结束汇总直播时长和最高在线人数
 - 多群独立订阅与作品游标，支持按群配置 `@全体成员`
+- **IM 只读转发**（可选）：私信 + 指定群的群主消息 → QQ（不回写抖音）
+
+### 📕 小红书监控
+- 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
+- 复用微博/抖音同一 Chromium Profile；登录二维码私聊管理员
+- 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -169,6 +176,31 @@ cd sidecar/weibo-auth
 npm run test:douyin-im
 ```
 
+### 📕 小红书帖子监控（可选）
+
+小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。实现参考了 [jackwener/xhs-cli](https://github.com/jackwener/xhs-cli) 的真实页面浏览与 `window.__INITIAL_STATE__` 提取方式，以及 [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) 的登录态实践；没有引入易随签名规则变化的直连 API。
+
+```json
+{
+  "XIAOHONGSHU_ENABLED": true,
+  "XIAOHONGSHU_POLL_SECONDS": 90,
+  "XIAOHONGSHU_SUBSCRIPTIONS": {}
+}
+```
+
+> ⚠️ **坑（先看）**
+> - **浏览器 `healthy` ≠ 能拉帖**：Cookie/Profile 有值仍可能跳登录页；真正可用要看 notes 拉取成功（`notes_ok` / 管理面板 Attention）。
+> - **短链 `xhslink` 需解析为内部 `user_id`** 后再订阅；不要手填无效 ID。
+> - 用户说「登好了」后仍应执行 `bot xiaohongshu scan` 验证 notes>0；不要只看侧卡状态绿灯。
+> - 登录态与微博/抖音共用 `BROWSER_PROFILE_DIR`，**按账号凭据保护**，勿提交 Git。
+> - 风控：建议轮询 ≥60 秒；程序强制最低 30 秒，并串行访问账号。
+
+- 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；保存后 Bot 会安全重启。
+- 命令：`bot xiaohongshu add <个人主页链接|内部 user_id> [at_all]` 等，见下方命令表。
+- 首次扫描只记最新帖为基线，不转发历史；之后按发布时间推送图文/视频、标题、封面和链接。
+- `bot xiaohongshu login` 把登录二维码私聊给管理员。
+- 开播提醒是保守附加能力：仅当主页明确出现直播入口时才通知；**无**弹幕/人数/下播统计；无法可靠识别时不猜测。
+
 ## 快速开始
 
 ### 1. 下载或编译
@@ -297,6 +329,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 | `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
 | `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
+| `XIAOHONGSHU_ENABLED` | 启用小红书帖子与开播提醒 |
 
 `POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交。也可用短信登录：
 
@@ -321,9 +354,12 @@ bot code <验证码>          # 输入验证码完成登录
 | `WEIBO_BROWSER_PROFILE_DIR` | 持久化 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `WEIBO_BROWSER_HEADLESS` | 使用无头 Chromium | `true` |
 | `WEIBO_BROWSER_REFRESH_MINUTES` | 登录态预热与同步间隔（分钟） | `30` |
-| `BROWSER_SIDECAR_CMD` | 微博/抖音共用浏览器侧卡命令 | `"node ./sidecar/weibo-auth/index.mjs"` |
+| `BROWSER_SIDECAR_CMD` | 微博/抖音/小红书共用浏览器侧卡命令 | `"node ./sidecar/weibo-auth/index.mjs"` |
 | `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
+| `XIAOHONGSHU_ENABLED` | 启用小红书监控 | `false` |
+| `XIAOHONGSHU_POLL_SECONDS` | 小红书个人主页轮询间隔（最低 30 秒） | `90` |
+| `XIAOHONGSHU_SUBSCRIPTIONS` | QQ 群→小红书内部用户 ID 订阅 | `{}` |
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
 | `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |
 | `DOUYIN_LIVE_SIDECAR_CMD` | 可选的 douyinLive 启动命令 | `""` |
@@ -551,6 +587,16 @@ bot weibo cookie check
 > - 连续 5 天拿到精确数据后，**自动恢复自动签到**，日报也会使用精确值
 > - 此机制是自适应调整，无需手动干预
 
+> **日报字段与邮件（可选）**：
+> - 抓取主链路为 **weibo.com** 超话页（签到人数 + 帖子/粉丝/等级图标）；**m.weibo.cn** 补累计**阅读**（失败不影响签到主链路）。
+> - 等级文案来自 web 图标：`silver_1`→银1，`gold_1`→金1；`*_common`→**普通**（不是银超/金超）。
+> - 开启邮件告警配置后，约 **23:55–23:59** 发送 **单封** HTML 日报：按分组 **多张独立表**（不合成一张），有数据才出列；附件为 **3:4** 卡片 PNG（需本机 Node + Playwright，脚本 `scripts/html_to_png.mjs`）。
+> - ⚠️ **涨跌需要连续运行两天**：当天 23:59 左右写 snapshot，次日对比昨日。某晚 bot 离线则次日可能无涨跌。
+
+> **邮件告警原则（与运维）**：
+> - 可自愈的状态（例如短暂断连后恢复）**不发**邮件；**仅恢复失败 / 需人工** 才发 HTML 邮件。
+> - Boot、启停、签到结果、登录恢复、超话日报 QQ 推送等走 QQ，不混成纯文本邮件。
+
 ### 🎵 抖音
 
 | 命令 | 说明 |
@@ -562,7 +608,19 @@ bot weibo cookie check
 | `bot douyin status` | 查看浏览器侧卡、账号和直播连接状态 |
 | `bot douyin login` | 生成抖音登录二维码并私聊管理员 |
 
-> 当前阶段不转发直播间全部弹幕、礼物或点赞，只发送作品、开播和下播通知。粉丝群指定用户消息转发将在后续个人账号 IM 侧卡中实现。
+> 直播：只发送作品、开播和下播通知，不转发弹幕/礼物/点赞。  
+> IM：可选只读转发私信与指定群群主消息到 QQ；**不会**向抖音回写消息。
+
+### 📕 小红书
+
+| 命令 | 说明 |
+| :--- | :--- |
+| `bot xiaohongshu add <个人主页链接或user_id> [at_all]` | 添加小红书帖子与开播提醒 |
+| `bot xiaohongshu del [user_id]` | 删除指定账号；省略则清空本群 |
+| `bot xiaohongshu list` | 查看本群小红书监控列表 |
+| `bot xiaohongshu scan` | 立即执行一次小红书帖子检查 |
+| `bot xiaohongshu status` | 查看小红书浏览器侧卡与账号数 |
+| `bot xiaohongshu login` | 生成小红书登录二维码并私聊管理员 |
 
 ---
 
@@ -601,23 +659,23 @@ bot help weibo
 ## 项目结构
 
 ```
-├── cmd/bot/main.go           # 入口
+├── cmd/bot/                  # Bot 入口
+├── cmd/admin/                # 管理面板入口（可选）
 ├── internal/
-│   ├── config/               # 配置管理
-│   ├── logic/                # 核心逻辑
-│   │   ├── bot.go            # Bot 主循环
-│   │   ├── messages.go       # 消息轮询 & 转发
-│   │   ├── media.go          # 媒体下载 & 缓存清理
-│   │   ├── commands.go       # 命令分发
-│   │   ├── cmd_handlers.go   # 命令处理器
-│   │   ├── weibo.go          # 微博逻辑（认证/签到/超话）
-│   │   └── utils.go          # 工具函数
-│   ├── napcat/               # NapCat OneBot v11 客户端
-│   ├── pocket48/             # 口袋48 API 客户端
-│   ├── monitor/              # 微博监控轮询
-│   └── storage/              # 消息归档（COS）
-├── storage/                  # 本地存储目录
-└── config.json               # 配置文件
+│   ├── admin/                # Web 管理面板 API + 静态资源
+│   ├── config/               # 配置
+│   ├── logic/                # 核心逻辑（口袋/微博/抖音/小红书/命令）
+│   ├── monitor/              # 微博抓取（web / mweibo / App 路径）
+│   ├── napcat/               # OneBot v11 客户端
+│   ├── pocket48/             # 口袋48 API
+│   └── storage/              # 归档
+├── sidecar/
+│   ├── nim-bridge/           # 口袋 NIM QChat / Chatroom 侧卡
+│   └── weibo-auth/           # 浏览器侧卡（微博 Cookie / 抖音 / 小红书）
+├── scripts/
+│   └── html_to_png.mjs       # 超话日报 HTML → 3:4 PNG（可选，依赖 Playwright）
+├── config.json.template      # 配置模板（勿提交真实 config.json）
+└── storage/                  # 本地 Profile / 缓存（gitignore）
 ```
 
 ## License

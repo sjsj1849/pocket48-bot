@@ -224,6 +224,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleLogs(w, r)
 	case "/api/config":
 		s.handleConfig(w, r)
+	case "/api/xiaohongshu/subscriptions":
+		s.handleXiaohongshuSubscriptions(w, r)
 	case "/api/service/restart":
 		s.handleRestart(w, r)
 	case "/api/browser/status":

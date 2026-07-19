@@ -141,6 +141,13 @@ func init() {
 			AdminOnly: true,
 			Usage:     "douyin <add/del/list/login/scan/status>",
 		},
+		"xiaohongshu": {
+			Handler:   cmdXiaohongshu,
+			Help:      "小红书帖子与开播提醒",
+			Category:  "小红书功能",
+			AdminOnly: true,
+			Usage:     "xiaohongshu <add/del/list/login/scan/status>",
+		},
 		"archive": {
 			Handler:   cmdArchive,
 			Help:      "归档状态/重试",
@@ -641,6 +648,16 @@ func cmdHelp(b *Bot, event *napcat.Event, args []string) {
 				"  bot douyin login                      # 私聊管理员抖音登录二维码")
 			return
 		}
+		if cmdName == "xiaohongshu" {
+			b.reply(event, "📘 命令: xiaohongshu — 小红书帖子监控（管理员）\n"+
+				"  bot xiaohongshu add <个人主页/分享链接|user_id> [at_all]\n"+
+				"  bot xiaohongshu del [user_id]          # 省略则清空本群\n"+
+				"  bot xiaohongshu list                   # 查看本群监控\n"+
+				"  bot xiaohongshu scan                   # 立即检查帖子\n"+
+				"  bot xiaohongshu status                 # 查看侧卡状态\n"+
+				"  bot xiaohongshu login                  # 私聊管理员登录二维码")
+			return
+		}
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("📘 命令: %s\n", cmdName))
 		sb.WriteString(fmt.Sprintf("📝 说明: %s\n", def.Help))
@@ -954,6 +971,95 @@ func cmdDouyin(b *Bot, event *napcat.Event, args []string) {
 		b.reply(event, fmt.Sprintf("抖音监控状态\n浏览器侧卡: %v\n手动配置账号数: %d\n直播连接数: %d\nIM只读连接: %v\n直播服务: %s", ready, accounts, lives, imConnected, b.cfg.DouyinLiveWSURL))
 	default:
 		b.reply(event, "用法: douyin <add/del/list/login/scan/status>")
+	}
+}
+
+func cmdXiaohongshu(b *Bot, event *napcat.Event, args []string) {
+	if len(args) < 2 {
+		b.reply(event, "用法: xiaohongshu <add/del/list/login/scan/status>")
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(args[1]))
+	groupID := douyinTargetGroup(b, event)
+	switch action {
+	case "add":
+		if len(args) < 3 || groupID == 0 {
+			b.reply(event, "用法: xiaohongshu add <个人主页/分享链接|user_id> [at_all]（需在群内或先绑定默认群）")
+			return
+		}
+		end, atAll := len(args), false
+		if strings.EqualFold(args[end-1], "at_all") {
+			atAll = true
+			end--
+		}
+		target := strings.Join(args[2:end], " ")
+		eventCopy := *event
+		b.reply(event, "正在解析小红书账号并加入监控，请稍候…")
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			userID, profileURL, err := ResolveXiaohongshuTarget(ctx, target)
+			if err != nil {
+				b.reply(&eventCopy, "[错误] "+err.Error())
+				return
+			}
+			b.cfg.XiaohongshuEnabled = true
+			if err := b.xiaohongshuMonitor.Add(groupID, userID, profileURL, atAll); err != nil {
+				b.reply(&eventCopy, fmt.Sprintf("[错误] 添加小红书监控失败: %v", err))
+				return
+			}
+			b.reply(&eventCopy, fmt.Sprintf("[OK] 已添加小红书监控\nuser_id: %s\n@全体: %v", userID, atAll))
+		}()
+	case "del":
+		if groupID == 0 {
+			b.reply(event, "请在群内执行，或先绑定默认群")
+			return
+		}
+		userID := ""
+		if len(args) >= 3 {
+			userID = strings.TrimSpace(args[2])
+		}
+		if err := b.xiaohongshuMonitor.Remove(groupID, userID); err != nil {
+			b.reply(event, "[错误] 删除失败: "+err.Error())
+			return
+		}
+		if userID == "" {
+			b.reply(event, "[OK] 已清空本群小红书监控")
+		} else {
+			b.reply(event, "[OK] 已删除小红书监控: "+userID)
+		}
+	case "list":
+		items := b.xiaohongshuMonitor.Snapshot(groupID)
+		if len(items) == 0 {
+			b.reply(event, "该群暂无小红书监控")
+			return
+		}
+		lines := []string{"小红书监控列表:"}
+		for _, item := range items {
+			name := item.Name
+			if name == "" {
+				name = "待获取昵称"
+			}
+			lines = append(lines, fmt.Sprintf("- %s\n  user_id=%s", name, item.UserID))
+		}
+		b.reply(event, strings.Join(lines, "\n"))
+	case "scan":
+		if err := b.xiaohongshuMonitor.Scan(); err != nil {
+			b.reply(event, "[错误] 触发检查失败: "+err.Error())
+			return
+		}
+		b.reply(event, "[OK] 已触发小红书帖子检查")
+	case "login":
+		if err := b.xiaohongshuMonitor.RequestLogin(); err != nil {
+			b.reply(event, "[错误] 无法启动小红书登录: "+err.Error())
+			return
+		}
+		b.reply(event, "[OK] 正在生成小红书登录二维码，生成后会私聊管理员")
+	case "status":
+		ready, accounts := b.xiaohongshuMonitor.Status()
+		b.reply(event, fmt.Sprintf("小红书监控状态\n浏览器侧卡: %v\n账号数: %d\n轮询周期: %d 秒", ready, accounts, b.cfg.XiaohongshuPollSeconds))
+	default:
+		b.reply(event, "用法: xiaohongshu <add/del/list/login/scan/status>")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -62,6 +63,8 @@ type douyinBrowserEvent struct {
 	SenderUID        string       `json:"senderUid"`
 	SenderSecUID     string       `json:"senderSecUid"`
 	SenderName       string       `json:"senderName"`
+	SenderNickname   string       `json:"senderNickname"`
+	SenderRemark     string       `json:"senderRemark"`
 	ServerMessageID  string       `json:"serverMessageId"`
 	MessageType      int          `json:"messageType"`
 	CreateTime       int64        `json:"createTime"`
@@ -99,6 +102,10 @@ type DouyinMonitor struct {
 	imOwnerUID       string
 	imSelfUID        string
 	imConnected      bool
+
+	// Captcha window: count account_error "验证码中间页" hits that block post lists.
+	captchaHits      []time.Time
+	captchaLastAlert time.Time
 }
 
 func (m *DouyinMonitor) SetBrowserBridge(browser *WeiboAuthBridge) {
@@ -374,12 +381,56 @@ func (m *DouyinMonitor) HandleBrowserEvent(event douyinBrowserEvent) {
 		log.Printf("[Douyin-IM] status=%s message=%s", event.Status, event.Message)
 	case "account_error", "error":
 		log.Printf("[Douyin] %s %s: %s", event.Type, event.SecUserID, event.Message)
+		m.noteDouyinCaptchaError(event.SecUserID, event.Message)
 	case "status":
 		log.Printf("[Douyin] status=%s message=%s", event.Status, event.Message)
 		if event.Status == "login_error" {
 			m.notifyAdmins("⚠️ 抖音登录二维码生成失败：" + event.Message)
 		}
 	}
+}
+
+// noteDouyinCaptchaError counts captcha-blocked profile scans in a sliding window
+// and notifies admins when the threshold is hit (email-only via notifyAdmins).
+// Defaults: window=30m, threshold=6 hits, alert cooldown=60m.
+func (m *DouyinMonitor) noteDouyinCaptchaError(secUserID, message string) {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		return
+	}
+	if !strings.Contains(msg, "验证码") {
+		return
+	}
+	const (
+		window    = 30 * time.Minute
+		threshold = 6
+		cooldown  = 60 * time.Minute
+	)
+	now := time.Now()
+	m.mu.Lock()
+	// prune old hits
+	kept := m.captchaHits[:0]
+	for _, t := range m.captchaHits {
+		if now.Sub(t) <= window {
+			kept = append(kept, t)
+		}
+	}
+	m.captchaHits = append(kept, now)
+	count := len(m.captchaHits)
+	shouldAlert := count >= threshold && (m.captchaLastAlert.IsZero() || now.Sub(m.captchaLastAlert) >= cooldown)
+	if shouldAlert {
+		m.captchaLastAlert = now
+	}
+	m.mu.Unlock()
+
+	log.Printf("[Douyin] captcha window hits=%d/%d sec=%s msg=%s", count, threshold, secUserID, msg)
+	if !shouldAlert || m.notifyAdmins == nil {
+		return
+	}
+	m.notifyAdmins(fmt.Sprintf(
+		"⚠️ 抖音作品监控验证码告警\n最近 %s 内出现 %d 次验证码导致无法拉作品（阈值 %d）\n最近账号：%s\n%s",
+		window, count, threshold, truncateDouyinLogText(secUserID, 24), msg,
+	))
 }
 
 func (m *DouyinMonitor) handleIMGroup(event douyinBrowserEvent) {
@@ -395,7 +446,7 @@ func (m *DouyinMonitor) handleIMGroup(event douyinBrowserEvent) {
 	m.imOwnerUID = event.OwnerUID
 	m.imSelfUID = event.SelfUID
 	m.mu.Unlock()
-	log.Printf("[Douyin-IM] target group metadata ready: name=%s", event.GroupName)
+	log.Printf("[Douyin-IM] target group metadata ready: name=%s owner=%s conv=%s", event.GroupName, event.OwnerUID, event.ConversationID)
 }
 
 func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
@@ -415,35 +466,56 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	if event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID) {
 		return
 	}
-	switch classifyDouyinIMEvent(event, conversationID, ownerUID, selfUID) {
+	kind := classifyDouyinIMEvent(event, conversationID, ownerUID, selfUID)
+	if kind == "" && event.ConversationType == 2 {
+		// Diagnostic: group traffic that failed owner/conversation match.
+		log.Printf("[Douyin-IM] skip group message type=%d sender=%s owner=%s conv=%s targetConv=%s text=%q",
+			event.MessageType, event.SenderUID, ownerUID, event.ConversationID, conversationID, truncateDouyinLogText(text, 60))
+		return
+	}
+	switch kind {
 	case "group_owner":
 		if !m.cfg.DouyinIMEnabled || m.cfg.BoundGroupID == 0 {
 			return
 		}
-		name := strings.TrimSpace(event.SenderName)
-		if name == "" {
-			name = "抖音用户（UID：" + event.SenderUID + "）"
-		}
+		boxName, lineName := resolveDouyinSenderLabels(event)
 		groupName := strings.TrimSpace(m.cfg.DouyinIMGroupName)
+		// Align with Pocket48 room header: 【备注/名|群】（英文 |）
 		title := "【抖音群】"
-		if groupName != "" {
-			title = "【" + groupName + "｜抖音群】"
+		switch {
+		case boxName != "" && groupName != "":
+			title = "【" + boxName + "|" + groupName + "】"
+		case groupName != "":
+			title = "【" + groupName + "|抖音群】"
+		case boxName != "":
+			title = "【" + boxName + "|抖音群】"
 		}
+		body := formatDouyinSenderLine(lineName, text)
+		log.Printf("[Douyin-IM] forward group_owner box=%s line=%s type=%d text=%q", boxName, lineName, event.MessageType, truncateDouyinLogText(text, 80))
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, []interface{}{
-			napcat.TextSegment(formatDouyinIMNotification(title, name, text, timeText)),
+			napcat.TextSegment(formatDouyinIMGroupNotification(title, body, timeText)),
 		})
 	case "private_incoming":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
 			return
 		}
-		name := strings.TrimSpace(event.SenderName)
-		if name == "" {
-			name = "抖音用户（UID：" + event.SenderUID + "）"
+		boxName, lineName := resolveDouyinSenderLabels(event)
+		quotedName := inferDouyinQuotedName(event, lineName, selfUID)
+		text = formatDouyinReplyText(lineName, text, quotedName, event.QuotedText)
+		// Business forward (not an ops alert) — still QQ private to admins.
+		msg := formatDouyinPrivateNotification(boxName, lineName, text, timeText)
+		for _, uid := range uniqueAdminIDs(m.cfg) {
+			m.napcat.SendPrivateMessage(uid, napcat.TextSegment(msg))
 		}
-		quotedName := inferDouyinQuotedName(event, name, selfUID)
-		text = formatDouyinReplyText(name, text, quotedName, event.QuotedText)
-		m.notifyAdmins(formatDouyinPrivateNotification(name, text, timeText))
 	}
+}
+
+func truncateDouyinLogText(text string, max int) string {
+	runes := []rune(strings.TrimSpace(text))
+	if max <= 0 || len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max]) + "…"
 }
 
 func inferDouyinQuotedName(event douyinBrowserEvent, senderName, selfUID string) string {
@@ -469,19 +541,191 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 	if quotedText == "" {
 		return text
 	}
+	// Prefer Chinese colon to match sender lines; force "我：" when name is 我.
 	quotedLine := quotedText
 	if quotedName != "" {
-		quotedLine = quotedName + ":" + quotedText
+		quotedLine = quotedName + "：" + quotedText
 	}
-	return quotedLine + "\n" + senderName + ":" + text
+	senderName = strings.TrimSpace(senderName)
+	if senderName == "" {
+		return quotedLine + "\n" + text
+	}
+	// Avoid double-prefix if body already has "名："
+	body := strings.TrimSpace(text)
+	if strings.HasPrefix(body, senderName+"：") || strings.HasPrefix(body, senderName+":") {
+		return quotedLine + "\n" + body
+	}
+	return quotedLine + "\n" + senderName + "：" + body
 }
 
+// Group chat header already carries sender|group (Pocket48-style). Body may include "名（备注）：".
+func formatDouyinIMGroupNotification(title, text, timeText string) string {
+	return fmt.Sprintf("%s\n%s\n%s", title, text, timeText)
+}
+
+// Same shape as Pocket48 room forwards: header + "昵称: 内容" + timestamp.
+// No "来自：" prefix — keep it short like room messages.
 func formatDouyinIMNotification(title, name, text, timeText string) string {
-	return fmt.Sprintf("%s\n来自：%s\n%s\n%s", title, name, text, timeText)
+	return fmt.Sprintf("%s\n%s: %s\n%s", title, name, text, timeText)
 }
 
-func formatDouyinPrivateNotification(name, text, timeText string) string {
-	return fmt.Sprintf("【抖音私信|%s】\n%s\n%s", name, text, timeText)
+// resolveDouyinSenderLabels returns (boxName, lineName):
+//   - boxName: 抖音昵称优先（标题框【昵称|抖音私信】）；无昵称再回落备注
+//   - lineName: "抖音名（备注）" if both differ; else single display name
+func resolveDouyinSenderLabels(event douyinBrowserEvent) (boxName, lineName string) {
+	nick := strings.TrimSpace(event.SenderNickname)
+	remark := strings.TrimSpace(event.SenderRemark)
+	fallback := strings.TrimSpace(event.SenderName)
+	if nick == "" {
+		nick = fallback
+	}
+	if nick == "" && remark == "" {
+		if event.SenderUID != "" {
+			return "抖音用户（UID：" + event.SenderUID + "）", "抖音用户（UID：" + event.SenderUID + "）"
+		}
+		return "抖音用户", "抖音用户"
+	}
+	// Title box: nickname first (user wants 【葡萄吞十七|抖音私信】 not remark-only).
+	if nick != "" {
+		boxName = nick
+	} else {
+		boxName = remark
+	}
+	lineName = formatDouyinNamePair(nick, remark)
+	return boxName, lineName
+}
+
+// formatDouyinNamePair → "抖音名（备注）" when both present and different.
+// Special case when nick already embeds remark as "备注（小名）" / "小名（备注）":
+//
+//	nick "胡晓慧（小包）" + remark "胡晓慧" → "小包（胡晓慧）"（用户指定：小名在前，不叠括号）
+//
+// Other containment still collapses to the longer string to avoid "名（备注）" 叠套.
+func formatDouyinNamePair(nickname, remark string) string {
+	nickname = strings.TrimSpace(nickname)
+	remark = strings.TrimSpace(remark)
+	if nickname == "" {
+		return remark
+	}
+	if remark == "" || nickname == remark {
+		return nickname
+	}
+	// nick = "备注（小名）" → "小名（备注）"
+	if strings.HasPrefix(nickname, remark+"（") && strings.HasSuffix(nickname, "）") {
+		alias := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(nickname, remark+"（"), "）"))
+		if alias != "" && alias != remark {
+			return alias + "（" + remark + "）"
+		}
+	}
+	// nick = "小名（备注）" already ideal
+	if strings.HasSuffix(nickname, "（"+remark+"）") {
+		return nickname
+	}
+	// Other containment either way → longer string only, no double labels.
+	if strings.Contains(nickname, remark) {
+		return nickname
+	}
+	if strings.Contains(remark, nickname) {
+		return remark
+	}
+	return nickname + "（" + remark + "）"
+}
+
+// lookupDouyinContactRemark reads remark from sidecar contact cache (same file IM uses).
+// Cache path: {WeiboBrowserProfileDir}/douyin-contact-cache.json
+func lookupDouyinContactRemark(cfg *config.Config, secUserID, nickname string) string {
+	secUserID = strings.TrimSpace(secUserID)
+	nickname = strings.TrimSpace(nickname)
+	if cfg == nil {
+		return ""
+	}
+	dir := strings.TrimSpace(cfg.WeiboBrowserProfileDir)
+	if dir == "" {
+		dir = "./storage/weibo-browser-profile"
+	}
+	path := dir + "/douyin-contact-cache.json"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Contacts []struct {
+			SecUID     string `json:"secUid"`
+			Nickname   string `json:"nickname"`
+			RemarkName string `json:"remarkName"`
+		} `json:"contacts"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	for _, c := range payload.Contacts {
+		if secUserID != "" && strings.TrimSpace(c.SecUID) == secUserID {
+			return strings.TrimSpace(c.RemarkName)
+		}
+	}
+	if nickname != "" {
+		for _, c := range payload.Contacts {
+			if strings.TrimSpace(c.Nickname) == nickname {
+				return strings.TrimSpace(c.RemarkName)
+			}
+		}
+	}
+	return ""
+}
+
+// resolveDouyinWorksTitleNick: header 【昵称|抖音】 only — raw API/config nick, like Weibo screen_name.
+func resolveDouyinWorksTitleNick(apiNickname, configName string) string {
+	if n := strings.TrimSpace(apiNickname); n != "" {
+		return n
+	}
+	return strings.TrimSpace(configName)
+}
+
+// resolveDouyinWorksBodyLabel: content-area name pair (备注规则), NOT for title box.
+//
+//	nick "胡晓慧（小包）" + remark "胡晓慧" → "小包（胡晓慧）"
+//	nick "一盆蘸酱菜" + remark "卢天惠" → "一盆蘸酱菜（卢天惠）"
+func resolveDouyinWorksBodyLabel(cfg *config.Config, secUserID, apiNickname, configName string) string {
+	nick := resolveDouyinWorksTitleNick(apiNickname, configName)
+	remark := lookupDouyinContactRemark(cfg, secUserID, nick)
+	if remark == "" && strings.TrimSpace(configName) != "" {
+		remark = lookupDouyinContactRemark(cfg, secUserID, strings.TrimSpace(configName))
+	}
+	if pair := formatDouyinNamePair(nick, remark); pair != "" {
+		return pair
+	}
+	return nick
+}
+
+// Deprecated name kept for any external callers; body label only.
+func resolveDouyinWorksDisplayName(cfg *config.Config, secUserID, apiNickname, configName string) string {
+	return resolveDouyinWorksBodyLabel(cfg, secUserID, apiNickname, configName)
+}
+
+func formatDouyinSenderLine(lineName, text string) string {
+	lineName = strings.TrimSpace(lineName)
+	text = strings.TrimSpace(text)
+	if lineName == "" {
+		return text
+	}
+	return lineName + "：" + text
+}
+
+func formatDouyinPrivateNotification(boxName, lineName, text, timeText string) string {
+	boxName = strings.TrimSpace(boxName)
+	if boxName == "" {
+		boxName = "抖音用户"
+	}
+	body := strings.TrimSpace(text)
+	// Reply stack already embeds sender across lines: keep as-is.
+	// Plain body → "名（备注）：内容".
+	if lineName != "" && !strings.Contains(body, "\n") {
+		if !strings.HasPrefix(body, lineName+"：") && !strings.HasPrefix(body, lineName+":") {
+			body = formatDouyinSenderLine(lineName, body)
+		}
+	}
+	// Title: nickname first 【昵称|抖音私信】
+	return fmt.Sprintf("【%s|抖音私信】\n%s\n%s", boxName, body, timeText)
 }
 
 func formatDouyinIMTime(createTime, receivedAt int64) string {
@@ -658,18 +902,23 @@ func canonicalDouyinPostURL(post douyinPost) string {
 }
 
 func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, post douyinPost) {
-	name := strings.TrimSpace(post.Nickname)
-	if name == "" {
-		name = strings.TrimSpace(item.Name)
+	// Weibo-aligned: title box = raw nick only; body = 小包（胡晓慧） / 一盆蘸酱菜（卢天惠）.
+	titleNick := resolveDouyinWorksTitleNick(post.Nickname, item.Name)
+	if titleNick == "" {
+		titleNick = item.SecUserID
 	}
-	if name == "" {
-		name = item.SecUserID
-	}
+	bodyLabel := resolveDouyinWorksBodyLabel(m.cfg, item.SecUserID, post.Nickname, item.Name)
 	typeName := "视频"
 	if post.Type == "note" {
 		typeName = "图文"
 	}
-	lines := []string{fmt.Sprintf("【%s｜抖音】发布了新%s", name, typeName)}
+	// 【昵称|抖音】 + 正文区「配对名发布了新视频」+ desc（对齐微博：标题只昵称，内容区再写名字）
+	lines := []string{fmt.Sprintf("【%s|抖音】", titleNick)}
+	if bodyLabel != "" && bodyLabel != titleNick {
+		lines = append(lines, fmt.Sprintf("%s发布了新%s", bodyLabel, typeName))
+	} else {
+		lines = append(lines, fmt.Sprintf("发布了新%s", typeName))
+	}
 	if post.Desc != "" {
 		lines = append(lines, truncateRunes(post.Desc, 600))
 	}
@@ -677,6 +926,7 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 	segments := make([]interface{}, 0, 12)
 	if item.AtAll {
 		segments = append(segments, napcat.AtSegment("all"))
+		segments = append(segments, napcat.TextSegment("\n"))
 	}
 	segments = append(segments, napcat.TextSegment(strings.Join(lines, "\n")+"\n"))
 	images := post.Images
@@ -930,22 +1180,28 @@ func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, tit
 	}
 	m.mu.Unlock()
 	for _, target := range targets {
-		name := eventName
-		if name == "" {
-			name = target.cfg.Name
+		titleNick := resolveDouyinWorksTitleNick(eventName, target.cfg.Name)
+		if titleNick == "" {
+			titleNick = target.cfg.SecUserID
 		}
-		if name == "" {
-			name = target.cfg.SecUserID
-		}
+		bodyLabel := resolveDouyinWorksBodyLabel(m.cfg, target.cfg.SecUserID, eventName, target.cfg.Name)
 		var text string
 		if online {
-			text = fmt.Sprintf("【%s｜抖音直播】\n已开播", name)
+			text = fmt.Sprintf("【%s|抖音直播】", titleNick)
+			if bodyLabel != "" && bodyLabel != titleNick {
+				text += "\n" + bodyLabel
+			}
+			text += "\n已开播"
 			if title != "" {
 				text += "\n" + title
 			}
 			text += "\nhttps://live.douyin.com/" + liveID
 		} else {
-			text = fmt.Sprintf("【%s｜抖音直播】\n直播已结束\n直播时长：%s", name, formatDouyinDuration(duration))
+			text = fmt.Sprintf("【%s|抖音直播】", titleNick)
+			if bodyLabel != "" && bodyLabel != titleNick {
+				text += "\n" + bodyLabel
+			}
+			text += "\n直播已结束\n直播时长：" + formatDouyinDuration(duration)
 			if peak > 0 {
 				text += fmt.Sprintf("\n最高在线人数：%d", peak)
 			}
