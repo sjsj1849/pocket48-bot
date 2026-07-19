@@ -226,6 +226,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleConfig(w, r)
 	case "/api/xiaohongshu/subscriptions":
 		s.handleXiaohongshuSubscriptions(w, r)
+	case "/api/douyin/subscriptions":
+		s.handleDouyinSubscriptions(w, r)
+	case "/api/weibo/subscriptions":
+		s.handleWeiboSubscriptions(w, r)
+	case "/api/pocket/rooms":
+		s.handlePocketRoomSubscriptions(w, r)
 	case "/api/service/restart":
 		s.handleRestart(w, r)
 	case "/api/browser/status":

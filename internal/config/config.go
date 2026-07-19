@@ -73,6 +73,12 @@ type Config struct {
 	AlertEmailTo                      string                                             `json:"ALERT_EMAIL_TO"`
 	AlertEmailFrom                    string                                             `json:"ALERT_EMAIL_FROM"`
 	AlertEmailCooldownMinutes         int                                                `json:"ALERT_EMAIL_COOLDOWN_MINUTES"`
+	AlertEmailSMTPHost              string                                             `json:"ALERT_EMAIL_SMTP_HOST"`
+	AlertEmailSMTPPort              int                                                `json:"ALERT_EMAIL_SMTP_PORT"`
+	AlertEmailSMTPUser              string                                             `json:"ALERT_EMAIL_SMTP_USER"`
+	AlertEmailSMTPPassword          string                                             `json:"ALERT_EMAIL_SMTP_PASSWORD"`
+	AdminPanelURL                   string                                             `json:"ADMIN_PANEL_URL"`
+	MediaDelivery                   string                                             `json:"MEDIA_DELIVERY"` // local | remote
 	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
 	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
 	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
@@ -240,7 +246,7 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.BrowserSidecarCmd = cfg.WeiboBrowserAuthCmd
 	}
 	if strings.TrimSpace(cfg.AlertEmailFrom) == "" {
-		cfg.AlertEmailFrom = "pocket48@jiufeng.cloud"
+		cfg.AlertEmailFrom = ""
 	}
 	if cfg.AlertEmailCooldownMinutes <= 0 {
 		cfg.AlertEmailCooldownMinutes = 60
@@ -248,8 +254,9 @@ func LoadConfig(path string) (*Config, error) {
 	if strings.TrimSpace(cfg.BrowserProfileDir) == "" {
 		cfg.BrowserProfileDir = cfg.WeiboBrowserProfileDir
 	}
+	// Prefer non-headless when unset so panel QR/Xvfb works; explicit config still wins.
 	if _, ok := raw["BROWSER_HEADLESS"]; !ok {
-		cfg.BrowserHeadless = cfg.WeiboBrowserHeadless
+		cfg.BrowserHeadless = false
 	}
 	if cfg.DouyinPollSeconds < 15 {
 		cfg.DouyinPollSeconds = 60
@@ -299,6 +306,21 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if _, ok := raw["WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"]; !ok || cfg.WeiboSuperCountDailySnapshotsV2 == nil {
 		cfg.WeiboSuperCountDailySnapshotsV2 = make(map[string]map[string]*WeiboSuperCountSnapshotItem)
+	}
+	if strings.TrimSpace(cfg.MediaDelivery) == "" {
+		cfg.MediaDelivery = "local"
+	} else {
+		mode := strings.ToLower(strings.TrimSpace(cfg.MediaDelivery))
+		if mode == "url" || mode == "direct" {
+			mode = "remote"
+		}
+		if mode != "remote" {
+			mode = "local"
+		}
+		cfg.MediaDelivery = mode
+	}
+	if cfg.AlertEmailSMTPPort < 0 {
+		cfg.AlertEmailSMTPPort = 0
 	}
 	cfg.filePath = path
 	return &cfg, nil

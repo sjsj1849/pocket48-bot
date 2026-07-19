@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"pocket48-bot/internal/config"
+	"pocket48-bot/internal/mailsend"
 	"pocket48-bot/internal/monitor"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/pocket48"
@@ -169,8 +170,38 @@ func truncateForLog(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-// sendAdminAlertEmail uses the same ALERT_EMAIL_* config + sendmail as pocket48-admin,
-// with the same HTML template (multipart/alternative).
+
+func mailConfigFrom(cfg *config.Config) mailsend.Config {
+	if cfg == nil {
+		return mailsend.Config{}
+	}
+	return mailsend.Config{
+		From:     strings.TrimSpace(cfg.AlertEmailFrom),
+		To:       strings.TrimSpace(cfg.AlertEmailTo),
+		SMTPHost: strings.TrimSpace(cfg.AlertEmailSMTPHost),
+		SMTPPort: cfg.AlertEmailSMTPPort,
+		SMTPUser: strings.TrimSpace(cfg.AlertEmailSMTPUser),
+		SMTPPass: cfg.AlertEmailSMTPPassword,
+		PanelURL: mailsend.NormalizePanelURL(cfg.AdminPanelURL),
+	}
+}
+
+func panelLinkLine(panelURL string) string {
+	if panelURL == "" {
+		return ""
+	}
+	return "\n管理面板：" + panelURL + "\n"
+}
+
+func panelButtonHTML(panelURL string) string {
+	panelURL = mailsend.NormalizePanelURL(panelURL)
+	if panelURL == "" {
+		return ""
+	}
+	return fmt.Sprintf(`<tr><td style="padding:0 32px 32px;" align="center"><a href="%s" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>`, html.EscapeString(panelURL))
+}
+
+// sendAdminAlertEmail uses the same ALERT_EMAIL_* config (SMTP or sendmail) as pocket48-admin.
 func sendAdminAlertEmail(cfg *config.Config, body string) error {
 	if cfg == nil || !cfg.AlertEmailEnabled {
 		return fmt.Errorf("email alert disabled")
@@ -181,7 +212,7 @@ func sendAdminAlertEmail(cfg *config.Config, body string) error {
 		return fmt.Errorf("ALERT_EMAIL_TO empty")
 	}
 	if from == "" {
-		from = "pocket48@jiufeng.cloud"
+		return fmt.Errorf("ALERT_EMAIL_FROM empty")
 	}
 	if _, err := mail.ParseAddress(to); err != nil {
 		return fmt.Errorf("invalid ALERT_EMAIL_TO: %w", err)
@@ -222,8 +253,9 @@ func sendAdminAlertEmail(cfg *config.Config, body string) error {
 		detail = title
 	}
 
-	plain := fmt.Sprintf("Pocket48 告警\n\n%s\n\n详情：\n%s\n\n时间：%s\n管理面板：https://pocket48.jiufeng.cloud\n",
-		title, detail, timeText)
+	panel := mailsend.NormalizePanelURL(cfg.AdminPanelURL)
+	plain := fmt.Sprintf("Pocket48 告警\n\n%s\n\n详情：\n%s\n\n时间：%s%s",
+		title, detail, timeText, panelLinkLine(panel))
 
 	esc := html.EscapeString
 	// Keep multi-line detail readable in HTML.
@@ -249,11 +281,11 @@ func sendAdminAlertEmail(cfg *config.Config, body string) error {
 <tr><td style="padding:15px 18px;color:#7a8495;font-size:13px;">时间</td><td style="padding:15px 18px;color:#172033;font-size:14px;">%s</td></tr>
 </table>
 </td></tr>
-<tr><td style="padding:0 32px 32px;" align="center"><a href="https://pocket48.jiufeng.cloud" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>
+%s
 <tr><td style="padding:20px 32px;border-top:1px solid #edf0f4;color:#98a1af;font-size:12px;line-height:1.6;">这是一封由 Pocket48 Console 自动发送的告警通知。</td></tr>
 </table>
 </td></tr></table>
-</body></html>`, esc(title), esc(title), detailHTML, esc(timeText))
+</body></html>`, esc(title), esc(title), detailHTML, esc(timeText), panelButtonHTML(panel))
 
 	const boundary = "pocket48-bot-alert-alternative"
 	var buf bytes.Buffer
@@ -264,11 +296,10 @@ func sendAdminAlertEmail(cfg *config.Config, body string) error {
 	fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, htmlBody)
 	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
 
-	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", from)
-	cmd.Stdin = bytes.NewReader(buf.Bytes())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(out)))
+	mc := mailConfigFrom(cfg)
+	mc.From, mc.To = from, to
+	if err := mailsend.Send(mc, buf.Bytes()); err != nil {
+		return err
 	}
 	log.Printf("[alert-email] sent to=%s subject=%s", to, subjectTitle)
 	return nil
@@ -296,7 +327,7 @@ func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody st
 		return fmt.Errorf("ALERT_EMAIL_TO empty")
 	}
 	if from == "" {
-		from = "pocket48@jiufeng.cloud"
+		return fmt.Errorf("ALERT_EMAIL_FROM empty")
 	}
 	if _, err := mail.ParseAddress(to); err != nil {
 		return fmt.Errorf("invalid ALERT_EMAIL_TO: %w", err)
@@ -393,11 +424,10 @@ func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody st
 		fmt.Fprintf(&buf, "--%s--\r\n", altBoundary)
 	}
 
-	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", from)
-	cmd.Stdin = bytes.NewReader(buf.Bytes())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(out)))
+	mc := mailConfigFrom(cfg)
+	mc.From, mc.To = from, to
+	if err := mailsend.Send(mc, buf.Bytes()); err != nil {
+		return err
 	}
 	log.Printf("[report-email] sent to=%s subject=%s attachments=%d", to, subjectTitle, len(attachments))
 	return nil

@@ -14,15 +14,33 @@ import (
 	"pocket48-bot/internal/pocket48"
 )
 
+func (b *Bot) mediaDeliveryMode() string {
+	if b == nil || b.cfg == nil {
+		return "local"
+	}
+	mode := strings.ToLower(strings.TrimSpace(b.cfg.MediaDelivery))
+	if mode == "url" || mode == "direct" {
+		return "remote"
+	}
+	if mode == "remote" {
+		return "remote"
+	}
+	return "local"
+}
+
 func (b *Bot) mediaPathForMessage(msg *pocket48.Message, mediaURL string) string {
 	mediaURL = normalizeMediaURL(strings.TrimSpace(mediaURL))
 	if mediaURL == "" {
 		return ""
 	}
-	// Always prefer local cache for NapCat. Passing remote HTTPS URLs makes
-	// llbot download+import the image on its hot path (often 2–6s) and reorders
-	// subsequent text messages behind that work. Bot-side download is ~0.2s on
-	// the same CDN and can run in the realtime prepare stage.
+	// MEDIA_DELIVERY=remote: pass CDN URL straight to NapCat (NapCat downloads).
+	// default/local: bot downloads first — faster on same CDN, avoids NapCat reordering.
+	if b.mediaDeliveryMode() == "remote" {
+		if msg != nil {
+			log.Printf("[Media] Remote delivery id=%s type=%s url=%s", msg.MsgIDServer, msg.Type, mediaURL)
+		}
+		return mediaURL
+	}
 	local := b.localMediaPath(mediaURL)
 	if local != "" && local != mediaURL {
 		if msg != nil {

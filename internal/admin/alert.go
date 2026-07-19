@@ -9,10 +9,11 @@ import (
 	"mime"
 	"net/mail"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"pocket48-bot/internal/mailsend"
 )
 
 const (
@@ -26,6 +27,11 @@ type alertConfig struct {
 	To              string `json:"ALERT_EMAIL_TO"`
 	From            string `json:"ALERT_EMAIL_FROM"`
 	CooldownMinutes int    `json:"ALERT_EMAIL_COOLDOWN_MINUTES"`
+	SMTPHost        string `json:"ALERT_EMAIL_SMTP_HOST"`
+	SMTPPort        int    `json:"ALERT_EMAIL_SMTP_PORT"`
+	SMTPUser        string `json:"ALERT_EMAIL_SMTP_USER"`
+	SMTPPassword    string `json:"ALERT_EMAIL_SMTP_PASSWORD"`
+	PanelURL        string `json:"ADMIN_PANEL_URL"`
 }
 
 type serviceAlertState struct {
@@ -59,7 +65,8 @@ func (s *Server) checkServiceAlerts(now time.Time) {
 		return
 	}
 	if cfg.From == "" {
-		cfg.From = "pocket48@jiufeng.cloud"
+		log.Printf("[email-alert] ALERT_EMAIL_FROM empty")
+		return
 	}
 	if cfg.CooldownMinutes <= 0 {
 		cfg.CooldownMinutes = 60
@@ -154,12 +161,15 @@ func (s *Server) saveAlertState(state alertStateFile) error {
 
 func sendServiceEmail(cfg alertConfig, service serviceState, recovered bool, now time.Time) error {
 	message := buildServiceEmail(cfg, service, recovered, now)
-	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", cfg.From)
-	cmd.Stdin = bytes.NewReader(message)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+	return mailsend.Send(mailsend.Config{
+		From:     cfg.From,
+		To:       cfg.To,
+		SMTPHost: cfg.SMTPHost,
+		SMTPPort: cfg.SMTPPort,
+		SMTPUser: cfg.SMTPUser,
+		SMTPPass: cfg.SMTPPassword,
+		PanelURL: mailsend.NormalizePanelURL(cfg.PanelURL),
+	}, message)
 }
 
 func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, now time.Time) []byte {
@@ -178,7 +188,12 @@ func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, no
 	}
 	subject := fmt.Sprintf("Pocket48 %s｜%s", choose(recovered, "服务恢复", "服务异常"), service.Name)
 	timeText := now.Format("2006-01-02 15:04:05 MST")
-	plain := fmt.Sprintf("Pocket48 %s\n\n%s\n\n服务：%s\n状态：%s\n说明：%s\n时间：%s\n\n管理面板：https://pocket48.jiufeng.cloud\n", title, summary, service.Name, service.StatusText, service.LastEvent, timeText)
+	panel := mailsend.NormalizePanelURL(cfg.PanelURL)
+	panelPlain := ""
+	if panel != "" {
+		panelPlain = "\n管理面板：" + panel + "\n"
+	}
+	plain := fmt.Sprintf("Pocket48 %s\n\n%s\n\n服务：%s\n状态：%s\n说明：%s\n时间：%s\n%s", title, summary, service.Name, service.StatusText, service.LastEvent, timeText, panelPlain)
 	escape := html.EscapeString
 	htmlBody := fmt.Sprintf(`<!doctype html>
 <html><body style="margin:0;padding:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
@@ -201,11 +216,11 @@ func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, no
 <tr><td style="padding:15px 18px;color:#7a8495;font-size:13px;">时间</td><td style="padding:15px 18px;color:#172033;font-size:14px;">%s</td></tr>
 </table>
 </td></tr>
-<tr><td style="padding:0 32px 32px;" align="center"><a href="https://pocket48.jiufeng.cloud" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>
+%s
 <tr><td style="padding:20px 32px;border-top:1px solid #edf0f4;color:#98a1af;font-size:12px;line-height:1.6;">这是一封由 Pocket48 Console 自动发送的服务状态通知。</td></tr>
 </table>
 </td></tr></table>
-</body></html>`, escape(badge), escape(title), escape(summary), escape(service.Name), escape(service.StatusText), escape(service.LastEvent), escape(timeText))
+</body></html>`, escape(badge), escape(title), escape(summary), escape(service.Name), escape(service.StatusText), escape(service.LastEvent), escape(timeText), panelButtonRow(panel))
 
 	const boundary = "pocket48-alert-alternative"
 	var message bytes.Buffer
@@ -216,4 +231,12 @@ func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, no
 	fmt.Fprintf(&message, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, htmlBody)
 	fmt.Fprintf(&message, "--%s--\r\n", boundary)
 	return message.Bytes()
+}
+
+func panelButtonRow(panelURL string) string {
+	panelURL = mailsend.NormalizePanelURL(panelURL)
+	if panelURL == "" {
+		return ""
+	}
+	return fmt.Sprintf(`<tr><td style="padding:0 32px 32px;" align="center"><a href="%s" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>`, html.EscapeString(panelURL))
 }
