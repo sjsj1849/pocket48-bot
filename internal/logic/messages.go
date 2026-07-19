@@ -19,15 +19,38 @@ func (b *Bot) mediaPathForMessage(msg *pocket48.Message, mediaURL string) string
 	if mediaURL == "" {
 		return ""
 	}
-	if msg != nil && msg.DirectMedia && (strings.HasPrefix(mediaURL, "https://") || strings.HasPrefix(mediaURL, "http://")) {
-		log.Printf("[Media] Direct URL via NapCat id=%s type=%s url=%s", msg.MsgIDServer, msg.Type, mediaURL)
-		return mediaURL
+	// Always prefer local cache for NapCat. Passing remote HTTPS URLs makes
+	// llbot download+import the image on its hot path (often 2–6s) and reorders
+	// subsequent text messages behind that work. Bot-side download is ~0.2s on
+	// the same CDN and can run in the realtime prepare stage.
+	local := b.localMediaPath(mediaURL)
+	if local != "" && local != mediaURL {
+		if msg != nil {
+			log.Printf("[Media] Local path for NapCat id=%s type=%s path=%s", msg.MsgIDServer, msg.Type, local)
+		}
+		return local
 	}
-	return b.localMediaPath(mediaURL)
+	if msg != nil {
+		log.Printf("[Media] Fallback remote URL id=%s type=%s url=%s", msg.MsgIDServer, msg.Type, mediaURL)
+	}
+	return mediaURL
 }
 
 func (b *Bot) shouldPollRoomMessages() bool {
 	return !b.cfg.NIMRoomMessageEnabled || b.cfg.NIMRoomMessagePollFallback
+}
+
+// shouldPollRoomMessagesFor decides REST polling for one room.
+// When QChat is connected and recently delivering for this room, skip REST
+// entirely — fan traffic must not keep the REST path warm as a fallback.
+func (b *Bot) shouldPollRoomMessagesFor(roomID int64) bool {
+	if !b.shouldPollRoomMessages() {
+		return false
+	}
+	if b.cfg.NIMRoomMessageEnabled && b.nimDanmaku != nil && b.nimDanmaku.RoomRealtimeActive(roomID) {
+		return false
+	}
+	return true
 }
 
 func (b *Bot) pollLoop() {
@@ -89,10 +112,9 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 	if b.isPocketAuthExpired() {
 		return false
 	}
-	// QChat is the low-latency path, but it is not a delivery guarantee. When
-	// fallback is enabled, keep REST polling and let message-ID deduplication
-	// collapse events delivered by both paths.
-	if !b.shouldPollRoomMessages() {
+	// QChat is the low-latency path. REST remains a safety net only while
+	// realtime is down/idle for this room — never as a fan-message fallback.
+	if !b.shouldPollRoomMessagesFor(roomID) {
 		return false
 	}
 
@@ -557,9 +579,18 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 			title = "直播开始了"
 		}
 		cover = b.mediaPathForMessage(msg, cover)
+		// Same layout as room message forward: @全体成员 / 【Owner|Channel】 / body / time
+		idolName := strings.TrimSpace(room.OwnerName)
+		if idolName == "" {
+			idolName = strings.TrimSuffix(strings.TrimSpace(room.ChannelName), "的房间")
+		}
+		channelName := strings.TrimSpace(room.ChannelName)
+		if channelName == "" {
+			channelName = "包间"
+		}
 		segments = []interface{}{
 			napcat.AtSegment("all"),
-			napcat.TextSegment(fmt.Sprintf("\n%s直播啦！—— %s\n", room.OwnerName, title)),
+			napcat.TextSegment(fmt.Sprintf("\n【%s|%s】\n%s直播啦！——%s\n", idolName, channelName, idolName, title)),
 		}
 		if cover != "" {
 			segments = append(segments, napcat.ImageSegment(cover))
@@ -851,12 +882,17 @@ func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr 
 		title = "直播开始了"
 	}
 
-	idolName := msg.Room.OwnerName
+	idolName := strings.TrimSpace(msg.Room.OwnerName)
 	if idolName == "" {
-		idolName = strings.TrimSuffix(msg.Room.ChannelName, "的房间")
+		idolName = strings.TrimSuffix(strings.TrimSpace(msg.Room.ChannelName), "的房间")
+	}
+	channelName := strings.TrimSpace(msg.Room.ChannelName)
+	if channelName == "" {
+		channelName = "包间"
 	}
 
-	textTop := fmt.Sprintf("\n%s直播啦！—— %s\n", idolName, title)
+	// Same layout as room message forward: @全体成员 / 【Owner|Channel】 / body / time
+	textTop := fmt.Sprintf("\n【%s|%s】\n%s直播啦！——%s\n", idolName, channelName, idolName, title)
 	textBottom := fmt.Sprintf("\n%s", timeStr)
 
 	var segments []interface{}

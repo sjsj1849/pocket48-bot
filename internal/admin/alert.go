@@ -15,7 +15,11 @@ import (
 	"time"
 )
 
-const alertCheckInterval = 30 * time.Second
+const (
+	alertCheckInterval = 30 * time.Second
+	// 持续异常才邮件：约 5 分钟（10 次 × 30s）。短时重连/计划重启可自愈，不打扰。
+	alertOfflineFailures = 10
+)
 
 type alertConfig struct {
 	Enabled         bool   `json:"ALERT_EMAIL_ENABLED"`
@@ -81,26 +85,23 @@ func (s *Server) checkServiceAlerts(now time.Time) {
 		unhealthy := service.Status != "healthy"
 		if unhealthy {
 			current.Failures++
-			if current.Failures >= 2 && !current.Alerted && now.Sub(current.LastSent) >= time.Duration(cfg.CooldownMinutes)*time.Minute {
+			// 只在持续异常且未告警、过冷却时发邮件；短时自愈不会触达阈值。
+			if current.Failures >= alertOfflineFailures && !current.Alerted && now.Sub(current.LastSent) >= time.Duration(cfg.CooldownMinutes)*time.Minute {
 				if err := sendServiceEmail(cfg, service, false, now); err != nil {
 					log.Printf("[email-alert] send offline alert for %s: %v", service.ID, err)
 				} else {
 					current.Alerted = true
 					current.LastSent = now
-					log.Printf("[email-alert] offline alert sent service=%s to=%s", service.ID, cfg.To)
+					log.Printf("[email-alert] offline alert sent service=%s failures=%d to=%s", service.ID, current.Failures, cfg.To)
 				}
 			}
 		} else {
-			current.Failures = 0
-			if current.Alerted {
-				if err := sendServiceEmail(cfg, service, true, now); err != nil {
-					log.Printf("[email-alert] send recovery alert for %s: %v", service.ID, err)
-				} else {
-					current.Alerted = false
-					current.LastSent = now
-					log.Printf("[email-alert] recovery alert sent service=%s to=%s", service.ID, cfg.To)
-				}
+			// 已恢复：清状态，不发邮件（能自愈的不打扰；只有恢复失败需人工才发 offline）。
+			if current.Failures > 0 || current.Alerted {
+				log.Printf("[email-alert] service=%s recovered silently (failures was %d, alerted=%v; no email)", service.ID, current.Failures, current.Alerted)
 			}
+			current.Failures = 0
+			current.Alerted = false
 		}
 		if state.Services[service.ID] != current {
 			state.Services[service.ID] = current
@@ -162,9 +163,14 @@ func sendServiceEmail(cfg alertConfig, service serviceState, recovered bool, now
 }
 
 func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, now time.Time) []byte {
-	title := "服务连接异常"
+	// recovered 路径已停用（自愈不发信）；保留参数仅为兼容调用签名/测试。
+	title := "服务持续异常，需人工处理"
 	badge := "需要处理"
-	summary := "监控发现服务连续两次处于异常状态，请检查实时链路。"
+	observeMinutes := (alertOfflineFailures * int(alertCheckInterval/time.Second)) / 60
+	if observeMinutes < 1 {
+		observeMinutes = 1
+	}
+	summary := fmt.Sprintf("监控确认该服务已持续约 %d 分钟处于非健康状态（已超过自动恢复观察窗口），请人工检查。", observeMinutes)
 	if recovered {
 		title = "服务已经恢复"
 		badge = "已恢复"
@@ -195,7 +201,7 @@ func buildServiceEmail(cfg alertConfig, service serviceState, recovered bool, no
 <tr><td style="padding:15px 18px;color:#7a8495;font-size:13px;">时间</td><td style="padding:15px 18px;color:#172033;font-size:14px;">%s</td></tr>
 </table>
 </td></tr>
-<tr><td style="padding:0 32px 32px;"><a href="https://pocket48.jiufeng.cloud" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>
+<tr><td style="padding:0 32px 32px;" align="center"><a href="https://pocket48.jiufeng.cloud" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>
 <tr><td style="padding:20px 32px;border-top:1px solid #edf0f4;color:#98a1af;font-size:12px;line-height:1.6;">这是一封由 Pocket48 Console 自动发送的服务状态通知。</td></tr>
 </table>
 </td></tr></table>

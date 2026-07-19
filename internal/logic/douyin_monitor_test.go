@@ -93,25 +93,85 @@ func TestFormatDouyinIMTime(t *testing.T) {
 }
 
 func TestFormatDouyinIMNotification(t *testing.T) {
-	got := formatDouyinIMNotification("【肥家｜抖音群】", "群主", "消息正文", "2026-07-17 10:00:00")
-	want := "【肥家｜抖音群】\n来自：群主\n消息正文\n2026-07-17 10:00:00"
+	got := formatDouyinIMNotification("【肥家|抖音群】", "一盆蘸酱菜", "消息正文", "2026-07-17 10:00:00")
+	want := "【肥家|抖音群】\n一盆蘸酱菜: 消息正文\n2026-07-17 10:00:00"
 	if got != want {
 		t.Fatalf("notification=%q", got)
 	}
 }
 
+func TestFormatDouyinIMGroupNotification(t *testing.T) {
+	got := formatDouyinIMGroupNotification("【一盆蘸酱菜|肥家】", "一盆蘸酱菜：[晚上好]", "2026-07-18 19:20:07")
+	want := "【一盆蘸酱菜|肥家】\n一盆蘸酱菜：[晚上好]\n2026-07-18 19:20:07"
+	if got != want {
+		t.Fatalf("group notification=%q", got)
+	}
+}
+
+func TestResolveDouyinSenderLabels(t *testing.T) {
+	box, line := resolveDouyinSenderLabels(douyinBrowserEvent{
+		SenderNickname: "葡萄吞十七",
+		SenderRemark:   "唐欣怡",
+		SenderName:     "唐欣怡",
+	})
+	// Title box uses 抖音昵称; body line keeps 名（备注）
+	if box != "葡萄吞十七" {
+		t.Fatalf("box=%q", box)
+	}
+	if line != "葡萄吞十七（唐欣怡）" {
+		t.Fatalf("line=%q", line)
+	}
+	// no remark → both use nickname
+	box, line = resolveDouyinSenderLabels(douyinBrowserEvent{SenderNickname: "一盆蘸酱菜"})
+	if box != "一盆蘸酱菜" || line != "一盆蘸酱菜" {
+		t.Fatalf("no-remark box=%q line=%q", box, line)
+	}
+	// equal
+	if got := formatDouyinNamePair("胡晓慧", "胡晓慧"); got != "胡晓慧" {
+		t.Fatalf("equal=%q", got)
+	}
+	// nick "胡晓慧（小包）" + remark "胡晓慧" → 正文「小包（胡晓慧）」；标题框用昵称
+	box, line = resolveDouyinSenderLabels(douyinBrowserEvent{
+		SenderNickname: "胡晓慧（小包）",
+		SenderRemark:   "胡晓慧",
+	})
+	if box != "胡晓慧（小包）" || line != "小包（胡晓慧）" {
+		t.Fatalf("huxiaohui box=%q line=%q", box, line)
+	}
+	// reverse containment (remark longer)
+	if got := formatDouyinNamePair("胡晓慧", "胡晓慧（小包）"); got != "胡晓慧（小包）" {
+		t.Fatalf("reverse containment=%q", got)
+	}
+	// already "小名（备注）"
+	if got := formatDouyinNamePair("小包（胡晓慧）", "胡晓慧"); got != "小包（胡晓慧）" {
+		t.Fatalf("already ordered=%q", got)
+	}
+}
+
 func TestFormatDouyinPrivateNotification(t *testing.T) {
-	got := formatDouyinPrivateNotification("测试昵称", "消息正文", "2026-07-17 10:00:00")
-	want := "【抖音私信|测试昵称】\n消息正文\n2026-07-17 10:00:00"
+	got := formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七（唐欣怡）", "消息正文", "2026-07-17 10:00:00")
+	want := "【葡萄吞十七|抖音私信】\n葡萄吞十七（唐欣怡）：消息正文\n2026-07-17 10:00:00"
 	if got != want {
 		t.Fatalf("notification=%q", got)
+	}
+	// reply stack (quote is self share card)
+	replyBody := formatDouyinReplyText("葡萄吞十七（唐欣怡）", "并排呀", "我", "[分享图文]")
+	got = formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七（唐欣怡）", replyBody, "2026-07-19 08:42:02")
+	want = "【葡萄吞十七|抖音私信】\n我：[分享图文]\n葡萄吞十七（唐欣怡）：并排呀\n2026-07-19 08:42:02"
+	if got != want {
+		t.Fatalf("reply notification=%q", got)
 	}
 }
 
 func TestFormatDouyinReplyText(t *testing.T) {
 	got := formatDouyinReplyText("发送人", "回复内容", "原发送人", "原消息")
-	if got != "原发送人:原消息\n发送人:回复内容" {
+	if got != "原发送人：原消息\n发送人：回复内容" {
 		t.Fatalf("reply=%q", got)
+	}
+	// quoted is self
+	got = formatDouyinReplyText("葡萄吞十七（唐欣怡）", "诱惑你快点去看小肥发了啥", "我", "我发的内容")
+	if got != "我：我发的内容\n葡萄吞十七（唐欣怡）：诱惑你快点去看小肥发了啥" {
+		t.Fatalf("self-quote reply=%q", got)
 	}
 }
 
@@ -134,5 +194,21 @@ func TestClassifyDouyinIMEventRejectsExplicitSelfUID(t *testing.T) {
 	event := douyinBrowserEvent{ConversationType: 1, SenderUID: "self", SelfUID: "self"}
 	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "" {
 		t.Fatalf("self message classified as %q", got)
+	}
+}
+
+func TestResolveDouyinWorksDisplayName(t *testing.T) {
+	// Title = raw nick; body = name pair (not stuffed into 【】).
+	if got := resolveDouyinWorksTitleNick("胡晓慧（小包）", "胡晓慧"); got != "胡晓慧（小包）" {
+		t.Fatalf("title nick=%q", got)
+	}
+	if got := formatDouyinNamePair("胡晓慧（小包）", "胡晓慧"); got != "小包（胡晓慧）" {
+		t.Fatalf("body pair=%q", got)
+	}
+	if got := formatDouyinNamePair("一盆蘸酱菜", "卢天惠"); got != "一盆蘸酱菜（卢天惠）" {
+		t.Fatalf("yipen pair=%q", got)
+	}
+	if got := formatDouyinNamePair("小狼hoho", "小狼hoho"); got != "小狼hoho" {
+		t.Fatalf("equal pair=%q", got)
 	}
 }

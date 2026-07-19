@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -75,6 +76,17 @@ func (s *Storage) SaveCursor(roomID int64, messageID string, messageTime int64) 
 	path := s.cursorPath(roomID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
+	}
+	// Never regress: concurrent REST/QChat writers must only move forward.
+	if existing, err := os.ReadFile(path); err == nil {
+		var prev Cursor
+		if json.Unmarshal(existing, &prev) == nil && messageTime > 0 && prev.LastMsgTime > messageTime {
+			return nil
+		}
+		// Keep previous message id when caller only supplies a newer time with empty id.
+		if strings.TrimSpace(messageID) == "" && strings.TrimSpace(prev.LastMsgID) != "" && messageTime >= prev.LastMsgTime {
+			messageID = prev.LastMsgID
+		}
 	}
 	data, err := json.Marshal(Cursor{LastMsgID: messageID, LastMsgTime: messageTime})
 	if err != nil {

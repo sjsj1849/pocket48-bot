@@ -19,6 +19,34 @@ func TestCursorRoundTripAndOverwrite(t *testing.T) {
 	}
 }
 
+func TestSaveCursorNeverRegresses(t *testing.T) {
+	store := NewStorage(t.TempDir(), "")
+	if err := store.SaveCursor(7, "new", 5000); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveCursor(7, "old", 4000); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := store.GetCursor(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor.LastMsgTime != 5000 || cursor.LastMsgID != "new" {
+		t.Fatalf("cursor regressed: %#v", cursor)
+	}
+	// empty id on newer/same time keeps previous id
+	if err := store.SaveCursor(7, "", 5000); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err = store.GetCursor(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor.LastMsgID != "new" || cursor.LastMsgTime != 5000 {
+		t.Fatalf("empty id overwrite broke cursor: %#v", cursor)
+	}
+}
+
 func TestQChatIdentityRoundTrip(t *testing.T) {
 	store := NewStorage(t.TempDir(), "")
 	want := QChatIdentity{Account: "opaque-accid", UserID: 63559, Nickname: "owner", UpdatedAt: 1234}

@@ -1,10 +1,17 @@
 package logic
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"html"
 	"log"
+	"mime"
+	"net/mail"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -130,12 +137,316 @@ func (b *Bot) reply(event *napcat.Event, msg string) {
 }
 
 func (b *Bot) notifyAdmins(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	// Service-status alerts only → email. Boot/shutdown/business reports use notifyAdminsQQ.
+	if err := sendAdminAlertEmail(b.cfg, msg); err != nil {
+		log.Printf("[alert-email] send failed: %v; message=%s", err, truncateForLog(msg, 200))
+	}
+}
+
+// notifyAdminsQQ sends non-alert notices to admin QQ (startup/shutdown, reports, private-style status).
+func (b *Bot) notifyAdminsQQ(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
 	for _, uid := range b.collectAdminRecipients() {
 		if uid == 0 {
 			continue
 		}
 		b.napcat.SendPrivateMessage(uid, napcat.TextSegment(msg))
 	}
+}
+
+func truncateForLog(s string, max int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if max <= 0 || len(runes) <= max {
+		return string(runes)
+	}
+	return string(runes[:max]) + "…"
+}
+
+// sendAdminAlertEmail uses the same ALERT_EMAIL_* config + sendmail as pocket48-admin,
+// with the same HTML template (multipart/alternative).
+func sendAdminAlertEmail(cfg *config.Config, body string) error {
+	if cfg == nil || !cfg.AlertEmailEnabled {
+		return fmt.Errorf("email alert disabled")
+	}
+	to := strings.TrimSpace(cfg.AlertEmailTo)
+	from := strings.TrimSpace(cfg.AlertEmailFrom)
+	if to == "" {
+		return fmt.Errorf("ALERT_EMAIL_TO empty")
+	}
+	if from == "" {
+		from = "pocket48@jiufeng.cloud"
+	}
+	if _, err := mail.ParseAddress(to); err != nil {
+		return fmt.Errorf("invalid ALERT_EMAIL_TO: %w", err)
+	}
+	if _, err := mail.ParseAddress(from); err != nil {
+		return fmt.Errorf("invalid ALERT_EMAIL_FROM: %w", err)
+	}
+
+	// Title: first non-empty line; strip leading emoji for cleaner subject.
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	title := "Bot 告警"
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			title = line
+			break
+		}
+	}
+	subjectTitle := strings.TrimSpace(strings.TrimLeft(title, "⚠️⚠︎ "))
+	if subjectTitle == "" {
+		subjectTitle = title
+	}
+	if len([]rune(subjectTitle)) > 48 {
+		subjectTitle = string([]rune(subjectTitle)[:48]) + "…"
+	}
+	subject := mime.QEncoding.Encode("utf-8", "Pocket48 告警｜"+subjectTitle)
+
+	now := time.Now()
+	timeText := now.Format("2006-01-02 15:04:05 MST")
+	// Detail = body without the first title line (if multi-line).
+	detail := strings.TrimSpace(body)
+	if idx := strings.Index(detail, "\n"); idx >= 0 {
+		detail = strings.TrimSpace(detail[idx+1:])
+	} else {
+		detail = ""
+	}
+	if detail == "" {
+		detail = title
+	}
+
+	plain := fmt.Sprintf("Pocket48 告警\n\n%s\n\n详情：\n%s\n\n时间：%s\n管理面板：https://pocket48.jiufeng.cloud\n",
+		title, detail, timeText)
+
+	esc := html.EscapeString
+	// Keep multi-line detail readable in HTML.
+	detailHTML := strings.ReplaceAll(esc(detail), "\n", "<br/>")
+	htmlBody := fmt.Sprintf(`<!doctype html>
+<html><body style="margin:0;padding:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
+<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="background:#f5f7fb;padding:32px 12px;"><tr><td align="center">
+<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:1px solid #e5eaf2;border-radius:8px;overflow:hidden;box-shadow:0 10px 30px rgba(31,52,89,.06);">
+<tr><td style="height:4px;background:#3478d4;font-size:0;line-height:0;">&nbsp;</td></tr>
+<tr><td style="padding:28px 32px 18px;">
+<table role="presentation" cellspacing="0" cellpadding="0"><tr><td style="width:36px;height:36px;border-radius:8px;background:#3478d4;color:#fff;font-size:13px;font-weight:700;text-align:center;vertical-align:middle;">P48</td><td style="padding-left:12px;font-size:17px;font-weight:650;color:#172033;">Pocket48 Console</td></tr></table>
+</td></tr>
+<tr><td style="padding:4px 32px 28px;">
+<span style="display:inline-block;padding:5px 9px;border-radius:6px;background:#edf4ff;color:#2466b3;font-size:12px;font-weight:650;">需要处理</span>
+<h1 style="margin:14px 0 8px;font-size:25px;line-height:1.35;letter-spacing:0;color:#172033;">%s</h1>
+<p style="margin:0;color:#667085;font-size:14px;line-height:1.7;">Bot 业务告警（非日常启动通知）。请根据下方详情检查对应链路。</p>
+</td></tr>
+<tr><td style="padding:0 32px 28px;">
+<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0;background:#f8fafc;border:1px solid #e7ebf1;border-radius:8px;">
+<tr><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#7a8495;font-size:13px;width:72px;">类型</td><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#172033;font-size:14px;font-weight:650;">Bot 告警</td></tr>
+<tr><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#7a8495;font-size:13px;">标题</td><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#172033;font-size:14px;">%s</td></tr>
+<tr><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#7a8495;font-size:13px;vertical-align:top;">详情</td><td style="padding:15px 18px;border-bottom:1px solid #e7ebf1;color:#172033;font-size:14px;line-height:1.6;">%s</td></tr>
+<tr><td style="padding:15px 18px;color:#7a8495;font-size:13px;">时间</td><td style="padding:15px 18px;color:#172033;font-size:14px;">%s</td></tr>
+</table>
+</td></tr>
+<tr><td style="padding:0 32px 32px;" align="center"><a href="https://pocket48.jiufeng.cloud" style="display:inline-block;padding:11px 17px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:650;">打开管理面板</a></td></tr>
+<tr><td style="padding:20px 32px;border-top:1px solid #edf0f4;color:#98a1af;font-size:12px;line-height:1.6;">这是一封由 Pocket48 Console 自动发送的告警通知。</td></tr>
+</table>
+</td></tr></table>
+</body></html>`, esc(title), esc(title), detailHTML, esc(timeText))
+
+	const boundary = "pocket48-bot-alert-alternative"
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "From: %s\r\nTo: %s\r\nSubject: %s\r\n", from, to, subject)
+	buf.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, plain)
+	fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, htmlBody)
+	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
+
+	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", from)
+	cmd.Stdin = bytes.NewReader(buf.Bytes())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[alert-email] sent to=%s subject=%s", to, subjectTitle)
+	return nil
+}
+
+// emailAttachment is an optional file attachment for admin report emails.
+type emailAttachment struct {
+	Name        string
+	ContentType string
+	// Text body (used when Data is empty). For binary attachments use Data.
+	Text string
+	// Binary body (PNG etc.). Preferred over Text when non-empty.
+	Data []byte
+}
+
+// sendAdminHTMLEmail sends a general HTML report (not an "alert" badge).
+// Optional attachments may be text (txt) or binary (png).
+func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody string, attachments ...emailAttachment) error {
+	if cfg == nil || !cfg.AlertEmailEnabled {
+		return fmt.Errorf("email alert disabled")
+	}
+	to := strings.TrimSpace(cfg.AlertEmailTo)
+	from := strings.TrimSpace(cfg.AlertEmailFrom)
+	if to == "" {
+		return fmt.Errorf("ALERT_EMAIL_TO empty")
+	}
+	if from == "" {
+		from = "pocket48@jiufeng.cloud"
+	}
+	if _, err := mail.ParseAddress(to); err != nil {
+		return fmt.Errorf("invalid ALERT_EMAIL_TO: %w", err)
+	}
+	if _, err := mail.ParseAddress(from); err != nil {
+		return fmt.Errorf("invalid ALERT_EMAIL_FROM: %w", err)
+	}
+	subjectTitle = strings.TrimSpace(subjectTitle)
+	if subjectTitle == "" {
+		subjectTitle = "Pocket48 日报"
+	}
+	if len([]rune(subjectTitle)) > 48 {
+		subjectTitle = string([]rune(subjectTitle)[:48]) + "…"
+	}
+	subject := mime.QEncoding.Encode("utf-8", subjectTitle)
+	if plainBody == "" {
+		plainBody = subjectTitle
+	}
+
+	const mixedBoundary = "pocket48-bot-mixed"
+	const altBoundary = "pocket48-bot-alt"
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "From: %s\r\nTo: %s\r\nSubject: %s\r\n", from, to, subject)
+	buf.WriteString("MIME-Version: 1.0\r\n")
+
+	hasAttach := false
+	for _, a := range attachments {
+		if len(a.Data) > 0 || strings.TrimSpace(a.Text) != "" {
+			hasAttach = true
+			break
+		}
+	}
+
+	if hasAttach {
+		fmt.Fprintf(&buf, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", mixedBoundary)
+		fmt.Fprintf(&buf, "--%s\r\nContent-Type: multipart/alternative; boundary=%q\r\n\r\n", mixedBoundary, altBoundary)
+		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, plainBody)
+		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, htmlBody)
+		fmt.Fprintf(&buf, "--%s--\r\n", altBoundary)
+		for _, a := range attachments {
+			if len(a.Data) == 0 && strings.TrimSpace(a.Text) == "" {
+				continue
+			}
+			name := strings.TrimSpace(a.Name)
+			if name == "" {
+				if len(a.Data) > 0 {
+					name = "report.png"
+				} else {
+					name = "report.txt"
+				}
+			}
+			ct := strings.TrimSpace(a.ContentType)
+			if ct == "" {
+				if strings.HasSuffix(strings.ToLower(name), ".png") {
+					ct = "image/png"
+				} else if strings.HasSuffix(strings.ToLower(name), ".jpg") || strings.HasSuffix(strings.ToLower(name), ".jpeg") {
+					ct = "image/jpeg"
+				} else {
+					ct = "text/plain; charset=UTF-8"
+				}
+			}
+			dispName := mime.QEncoding.Encode("utf-8", name)
+			if len(a.Data) > 0 {
+				fmt.Fprintf(&buf, "--%s\r\nContent-Type: %s; name=%q\r\n", mixedBoundary, ct, name)
+				fmt.Fprintf(&buf, "Content-Disposition: attachment; filename=%s\r\n", dispName)
+				buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+				// RFC 2045: base64 lines <= 76 chars
+				enc := base64.StdEncoding.EncodeToString(a.Data)
+				for i := 0; i < len(enc); i += 76 {
+					end := i + 76
+					if end > len(enc) {
+						end = len(enc)
+					}
+					buf.WriteString(enc[i:end])
+					buf.WriteString("\r\n")
+				}
+			} else {
+				fmt.Fprintf(&buf, "--%s\r\nContent-Type: %s; name=%q\r\n", mixedBoundary, ct, name)
+				fmt.Fprintf(&buf, "Content-Disposition: attachment; filename=%s\r\n", dispName)
+				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+				buf.WriteString(a.Text)
+				if !strings.HasSuffix(a.Text, "\n") {
+					buf.WriteString("\r\n")
+				} else {
+					buf.WriteString("\r\n")
+				}
+			}
+		}
+		fmt.Fprintf(&buf, "--%s--\r\n", mixedBoundary)
+	} else {
+		fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", altBoundary)
+		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, plainBody)
+		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, htmlBody)
+		fmt.Fprintf(&buf, "--%s--\r\n", altBoundary)
+	}
+
+	cmd := exec.Command("/usr/sbin/sendmail", "-t", "-oi", "-f", from)
+	cmd.Stdin = bytes.NewReader(buf.Bytes())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sendmail: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[report-email] sent to=%s subject=%s attachments=%d", to, subjectTitle, len(attachments))
+	return nil
+}
+
+func (b *Bot) notifyAdminsEmailReport(subject, htmlBody, plainBody string, attachments ...emailAttachment) {
+	if err := sendAdminHTMLEmail(b.cfg, subject, htmlBody, plainBody, attachments...); err != nil {
+		log.Printf("[report-email] send failed: %v; subject=%s", err, truncateForLog(subject, 80))
+	}
+}
+
+// renderHTMLToPNG renders HTML to PNG via Playwright Chromium (scripts/html_to_png.mjs).
+func renderHTMLToPNG(htmlBody string) ([]byte, error) {
+	htmlBody = strings.TrimSpace(htmlBody)
+	if htmlBody == "" {
+		return nil, fmt.Errorf("empty html")
+	}
+	tmpDir, err := os.MkdirTemp("", "pocket48-report-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	htmlPath := filepath.Join(tmpDir, "report.html")
+	pngPath := filepath.Join(tmpDir, "report.png")
+	if err := os.WriteFile(htmlPath, []byte(htmlBody), 0o600); err != nil {
+		return nil, err
+	}
+	// Prefer repo-relative script (bot WorkingDirectory is /root/pocket48-bot)
+	script := "scripts/html_to_png.mjs"
+	if _, err := os.Stat(script); err != nil {
+		// fallback absolute
+		script = "/root/pocket48-bot/scripts/html_to_png.mjs"
+	}
+	cmd := exec.Command("node", script, htmlPath, pngPath, "920")
+	cmd.Env = append(os.Environ(),
+		"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("html_to_png: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	data, err := os.ReadFile(pngPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < 100 {
+		return nil, fmt.Errorf("png too small (%d bytes): %s", len(data), strings.TrimSpace(string(out)))
+	}
+	return data, nil
 }
 
 func (b *Bot) collectAdminRecipients() []int64 {
@@ -213,14 +524,15 @@ type qchatRESTIdentity struct {
 }
 
 type Bot struct {
-	cfg           *config.Config
-	pocket        *pocket48.Client
-	napcat        *napcat.Client
-	weiboMonitor  *monitor.WeiboMonitor
-	storage       *storage.Storage
-	nimDanmaku    *NimDanmakuBridge
-	weiboAuth     *WeiboAuthBridge
-	douyinMonitor *DouyinMonitor
+	cfg                *config.Config
+	pocket             *pocket48.Client
+	napcat             *napcat.Client
+	weiboMonitor       *monitor.WeiboMonitor
+	storage            *storage.Storage
+	nimDanmaku         *NimDanmakuBridge
+	weiboAuth          *WeiboAuthBridge
+	douyinMonitor      *DouyinMonitor
+	xiaohongshuMonitor *XiaohongshuMonitor
 
 	lastMsgTime            map[int64]int64
 	cursorLoaded           map[int64]bool
@@ -333,6 +645,9 @@ func NewBot(cfg *config.Config) *Bot {
 	bot.douyinMonitor = NewDouyinMonitor(cfg, napcatClient, bot.notifyAdmins)
 	bot.douyinMonitor.SetBrowserBridge(bot.weiboAuth)
 	bot.weiboAuth.SetDouyinCallback(bot.douyinMonitor.HandleBrowserEvent)
+	bot.xiaohongshuMonitor = NewXiaohongshuMonitor(cfg, napcatClient, bot.notifyAdmins)
+	bot.xiaohongshuMonitor.SetBrowserBridge(bot.weiboAuth)
+	bot.weiboAuth.SetXiaohongshuCallback(bot.xiaohongshuMonitor.HandleBrowserEvent)
 	weiboMon.OnCookieInvalid = bot.notifyWeiboCookieInvalid
 	bot.weiboAuth.SetCallbacks(
 		bot.handleWeiboAuthCookies,
@@ -415,6 +730,8 @@ func (b *Bot) Start() error {
 	// Register Event Handlers
 	b.napcat.OnGroupMessage = b.handleGroupMessage
 	b.napcat.OnPrivateMessage = b.handlePrivateMessage
+	// NapCat 断线/重连：后台静默自动重连，不在 QQ 私聊刷状态。
+	// 面板看 bot.log 的 [NapCat] status=...；持续异常由 admin 邮件告警负责。
 
 	// Login to Pocket48
 	b.LogInfo("Checking Pocket48 login credentials...")
@@ -485,7 +802,7 @@ func (b *Bot) Start() error {
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()
-	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled || b.cfg.XiaohongshuEnabled {
 		go b.startWeiboAuthBridge()
 	}
 	if b.cfg.DouyinEnabled {
@@ -517,7 +834,7 @@ func (b *Bot) Start() error {
 	}
 
 	startupMsg := fmt.Sprintf("🤖 机器人已启动\n本次启动时间：%s\n上次启动时间：%s", startTimeStr, lastTimeStr)
-	b.notifyAdmins(startupMsg)
+	b.notifyAdminsQQ(startupMsg)
 
 	// Update LastStartupTime
 	b.cfg.LastStartupTime = startTime.Unix()
@@ -529,7 +846,7 @@ func (b *Bot) Start() error {
 
 	sig := <-stopChan
 	b.LogInfo("Received signal: %v. Shutting down...", sig)
-	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled || b.cfg.XiaohongshuEnabled {
 		b.weiboAuth.BeginStop()
 	}
 
@@ -542,14 +859,14 @@ func (b *Bot) Start() error {
 
 	// Send Shutdown Notification
 	shutdownMsg := fmt.Sprintf("⚠️ 机器人即将下线，服务暂时不可用。\n本次运行时间：%s", runTimeStr)
-	b.notifyAdmins(shutdownMsg)
+	b.notifyAdminsQQ(shutdownMsg)
 	time.Sleep(1 * time.Second)
 
 	b.cfg.Save()
 	if b.cfg.NIMEnabled || b.cfg.NIMRoomMessageEnabled {
 		b.nimDanmaku.Stop()
 	}
-	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled {
+	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled || b.cfg.XiaohongshuEnabled {
 		b.weiboAuth.Stop()
 	}
 	if b.douyinMonitor != nil {

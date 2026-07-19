@@ -23,8 +23,15 @@ type Client struct {
 	OnGroupMessage   func(event *Event)
 	OnPrivateMessage func(event *Event)
 	OnMemberJoin     func(event *Event)
+	// OnConnectionChange is optional. Prefer silent reconnect: bot should NOT spam QQ here.
+	// Panel/email observe [NapCat] status= lines in bot.log instead.
+	OnConnectionChange func(connected bool, detail string)
 
 	isClosing bool
+	// wasConnected: true after the first successful session.
+	wasConnected bool
+	// loggedDown: true after we already logged status=disconnected for this outage.
+	loggedDown bool
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -50,12 +57,53 @@ func (c *Client) manager() {
 			err := c.connect()
 			if err != nil {
 				log.Printf("❌ Failed to connect to NapCat: %v. Retrying in 5s...", err)
+				c.notifyDown(err.Error())
 				time.Sleep(5 * time.Second)
 				continue
 			}
 		}
 		// If connected, wait (conn should block until disconnect)
 		time.Sleep(1 * time.Second)
+	}
+}
+
+func (c *Client) emitConnection(connected bool, detail string) {
+	if c.OnConnectionChange == nil {
+		return
+	}
+	go c.OnConnectionChange(connected, detail)
+}
+
+// notifyDown logs a single status=disconnected per outage for panel/email.
+// Reconnect stays silent: no QQ pings, no repeated status spam every dial attempt.
+func (c *Client) notifyDown(detail string) {
+	c.mu.Lock()
+	// Cold start before first ever connect: keep retrying quietly (manager already logs dial fails).
+	if !c.wasConnected {
+		c.mu.Unlock()
+		return
+	}
+	if c.loggedDown {
+		c.mu.Unlock()
+		return
+	}
+	c.loggedDown = true
+	c.mu.Unlock()
+	log.Printf("[NapCat] status=disconnected message=%s", detail)
+	c.emitConnection(false, detail)
+}
+
+func (c *Client) notifyUp() {
+	c.mu.Lock()
+	first := !c.wasConnected
+	wasDown := c.loggedDown
+	c.wasConnected = true
+	c.loggedDown = false
+	c.mu.Unlock()
+	log.Printf("[NapCat] status=connected message=OneBot/llbot WebSocket 已连接")
+	// Optional hook only on real recovery (not cold start). Callers must not spam QQ.
+	if !first && wasDown {
+		c.emitConnection(true, "connected")
 	}
 }
 
@@ -73,8 +121,11 @@ func (c *Client) connect() error {
 		}
 		return err
 	}
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 	log.Println("✅ Connected to NapCat successfully")
+	c.notifyUp()
 
 	// The writer is client-scoped so reconnects cannot create competing queue
 	// consumers. A new reader is required for each websocket connection.
@@ -85,21 +136,26 @@ func (c *Client) connect() error {
 
 func (c *Client) readLoop() {
 	defer func() {
+		c.mu.Lock()
 		if c.conn != nil {
 			c.conn.Close()
 			c.conn = nil
 		}
+		c.mu.Unlock()
+		c.notifyDown("read loop ended")
 	}()
 
 	for {
-		if c.conn == nil {
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn == nil {
 			return
 		}
-		_, message, err := c.conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
-			// Check if clean close?
 			log.Printf("⚠️ NapCat read error (disconnected?): %v", err)
-			return // Exit readLoop -> manager will detect conn is nil (or we set it)
+			return
 		}
 
 		var event Event

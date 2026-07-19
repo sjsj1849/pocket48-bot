@@ -53,3 +53,18 @@ func TestAlertStateRoundTrip(t *testing.T) {
 		t.Fatalf("state = %#v", got)
 	}
 }
+
+func TestBuildServiceEmailOfflineNeedsManualCopy(t *testing.T) {
+	cfg := alertConfig{From: "bot@example.com", To: "owner@example.com"}
+	service := serviceState{Name: "Bot", StatusText: "已停止", LastEvent: "pocket48-bot.service"}
+	message := string(buildServiceEmail(cfg, service, false, time.Date(2026, 7, 19, 2, 40, 0, 0, time.Local)))
+	for _, want := range []string{"服务持续异常，需人工处理", "需要处理", "Bot", "请人工检查"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("offline email missing %q", want)
+		}
+	}
+	// recovery 文案不应出现在 offline 邮件里
+	if strings.Contains(message, "服务已经恢复") {
+		t.Fatal("offline email should not claim recovered")
+	}
+}

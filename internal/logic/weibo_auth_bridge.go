@@ -21,57 +21,66 @@ import (
 )
 
 type weiboAuthEvent struct {
-	Type             string       `json:"type"`
-	WebCookie        string       `json:"webCookie,omitempty"`
-	MobileCookie     string       `json:"mobileCookie,omitempty"`
-	Reason           string       `json:"reason,omitempty"`
-	ImageBase64      string       `json:"imageBase64,omitempty"`
-	ExpiresIn        int          `json:"expiresIn,omitempty"`
-	Status           string       `json:"status,omitempty"`
-	Message          string       `json:"message,omitempty"`
-	SecUserID        string       `json:"secUserId,omitempty"`
-	ProfileURL       string       `json:"profileUrl,omitempty"`
-	Nickname         string       `json:"nickname,omitempty"`
-	LiveID           string       `json:"liveId,omitempty"`
-	Posts            []douyinPost `json:"posts,omitempty"`
-	GroupName        string       `json:"groupName,omitempty"`
-	GroupNumber      string       `json:"groupNumber,omitempty"`
-	ConversationID   string       `json:"conversationId,omitempty"`
-	ConversationType int          `json:"conversationType,omitempty"`
-	OwnerUID         string       `json:"ownerUid,omitempty"`
-	SelfUID          string       `json:"selfUid,omitempty"`
-	SenderUID        string       `json:"senderUid,omitempty"`
-	SenderSecUID     string       `json:"senderSecUid,omitempty"`
-	SenderName       string       `json:"senderName,omitempty"`
-	ServerMessageID  string       `json:"serverMessageId,omitempty"`
-	MessageType      int          `json:"messageType,omitempty"`
-	CreateTime       int64        `json:"createTime,omitempty"`
-	ReceivedAt       int64        `json:"receivedAt,omitempty"`
-	QuotedName       string       `json:"quotedName,omitempty"`
-	QuotedText       string       `json:"quotedText,omitempty"`
-	QuotedSenderUID  string       `json:"quotedSenderUid,omitempty"`
-	Text             string       `json:"text,omitempty"`
-	Link             string       `json:"link,omitempty"`
-	Index            string       `json:"index,omitempty"`
+	Type             string            `json:"type"`
+	WebCookie        string            `json:"webCookie,omitempty"`
+	MobileCookie     string            `json:"mobileCookie,omitempty"`
+	Reason           string            `json:"reason,omitempty"`
+	ImageBase64      string            `json:"imageBase64,omitempty"`
+	ExpiresIn        int               `json:"expiresIn,omitempty"`
+	Status           string            `json:"status,omitempty"`
+	Message          string            `json:"message,omitempty"`
+	SecUserID        string            `json:"secUserId,omitempty"`
+	ProfileURL       string            `json:"profileUrl,omitempty"`
+	Nickname         string            `json:"nickname,omitempty"`
+	LiveID           string            `json:"liveId,omitempty"`
+	Posts            []douyinPost      `json:"posts,omitempty"`
+	GroupName        string            `json:"groupName,omitempty"`
+	GroupNumber      string            `json:"groupNumber,omitempty"`
+	ConversationID   string            `json:"conversationId,omitempty"`
+	ConversationType int               `json:"conversationType,omitempty"`
+	OwnerUID         string            `json:"ownerUid,omitempty"`
+	SelfUID          string            `json:"selfUid,omitempty"`
+	SenderUID        string            `json:"senderUid,omitempty"`
+	SenderSecUID     string            `json:"senderSecUid,omitempty"`
+	SenderName       string            `json:"senderName,omitempty"`
+	SenderNickname   string            `json:"senderNickname,omitempty"`
+	SenderRemark     string            `json:"senderRemark,omitempty"`
+	ServerMessageID  string            `json:"serverMessageId,omitempty"`
+	MessageType      int               `json:"messageType,omitempty"`
+	CreateTime       int64             `json:"createTime,omitempty"`
+	ReceivedAt       int64             `json:"receivedAt,omitempty"`
+	QuotedName       string            `json:"quotedName,omitempty"`
+	QuotedText       string            `json:"quotedText,omitempty"`
+	QuotedSenderUID  string            `json:"quotedSenderUid,omitempty"`
+	Text             string            `json:"text,omitempty"`
+	Link             string            `json:"link,omitempty"`
+	Index            string            `json:"index,omitempty"`
+	UserID           string            `json:"userId,omitempty"`
+	Notes            []xiaohongshuNote `json:"notes,omitempty"`
+	LiveActive       bool              `json:"liveActive,omitempty"`
+	LiveURL          string            `json:"liveUrl,omitempty"`
 }
 
 type weiboAuthCommand struct {
-	Cmd                    string                 `json:"cmd"`
-	ProfileDir             string                 `json:"profileDir,omitempty"`
-	Headless               bool                   `json:"headless"`
-	RefreshMinutes         int                    `json:"refreshMinutes,omitempty"`
-	WebCookie              string                 `json:"webCookie,omitempty"`
-	MobileCookie           string                 `json:"mobileCookie,omitempty"`
-	AllowQRCode            bool                   `json:"allowQRCode"`
-	Reason                 string                 `json:"reason,omitempty"`
-	WeiboEnabled           bool                   `json:"weiboEnabled"`
-	DouyinEnabled          bool                   `json:"douyinEnabled"`
-	DouyinPollSeconds      int                    `json:"douyinPollSeconds,omitempty"`
-	DouyinAccounts         []douyinAccountCommand `json:"douyinAccounts,omitempty"`
-	DouyinIMEnabled        bool                   `json:"douyinIMEnabled"`
-	DouyinIMPrivateEnabled bool                   `json:"douyinIMPrivateEnabled"`
-	DouyinIMGroupName      string                 `json:"douyinIMGroupName,omitempty"`
-	DouyinIMGroupNumber    string                 `json:"douyinIMGroupNumber,omitempty"`
+	Cmd                    string                      `json:"cmd"`
+	ProfileDir             string                      `json:"profileDir,omitempty"`
+	Headless               bool                        `json:"headless"`
+	RefreshMinutes         int                         `json:"refreshMinutes,omitempty"`
+	WebCookie              string                      `json:"webCookie,omitempty"`
+	MobileCookie           string                      `json:"mobileCookie,omitempty"`
+	AllowQRCode            bool                        `json:"allowQRCode"`
+	Reason                 string                      `json:"reason,omitempty"`
+	WeiboEnabled           bool                        `json:"weiboEnabled"`
+	DouyinEnabled          bool                        `json:"douyinEnabled"`
+	DouyinPollSeconds      int                         `json:"douyinPollSeconds,omitempty"`
+	DouyinAccounts         []douyinAccountCommand      `json:"douyinAccounts,omitempty"`
+	DouyinIMEnabled        bool                        `json:"douyinIMEnabled"`
+	DouyinIMPrivateEnabled bool                        `json:"douyinIMPrivateEnabled"`
+	DouyinIMGroupName      string                      `json:"douyinIMGroupName,omitempty"`
+	DouyinIMGroupNumber    string                      `json:"douyinIMGroupNumber,omitempty"`
+	XiaohongshuEnabled     bool                        `json:"xiaohongshuEnabled"`
+	XiaohongshuPollSeconds int                         `json:"xiaohongshuPollSeconds,omitempty"`
+	XiaohongshuAccounts    []xiaohongshuAccountCommand `json:"xiaohongshuAccounts,omitempty"`
 }
 
 type WeiboAuthBridge struct {
@@ -86,15 +95,25 @@ type WeiboAuthBridge struct {
 	stopRun  bool
 	wg       sync.WaitGroup
 
-	onCookies func(webCookie, mobileCookie, reason string)
-	onQRCode  func(imageBase64 string, expiresIn int)
-	onStatus  func(status, message string)
-	onError   func(error)
-	onDouyin  func(douyinBrowserEvent)
+	onCookies     func(webCookie, mobileCookie, reason string)
+	onQRCode      func(imageBase64 string, expiresIn int)
+	onStatus      func(status, message string)
+	onError       func(error)
+	onDouyin      func(douyinBrowserEvent)
+	onXiaohongshu func(xiaohongshuBrowserEvent)
+
+	// cookieWaiters are one-shot channels closed when a "cookies" event arrives.
+	// Used by alert path: RequestRefresh → WaitCookies → re-check → alert only if still bad.
+	cookieWaitersMu sync.Mutex
+	cookieWaiters   []chan struct{}
 }
 
 func (b *WeiboAuthBridge) SetDouyinCallback(callback func(douyinBrowserEvent)) {
 	b.onDouyin = callback
+}
+
+func (b *WeiboAuthBridge) SetXiaohongshuCallback(callback func(xiaohongshuBrowserEvent)) {
+	b.onXiaohongshu = callback
 }
 
 func NewWeiboAuthBridge(cfg *config.Config) *WeiboAuthBridge {
@@ -266,6 +285,9 @@ func (b *WeiboAuthBridge) Start() error {
 		DouyinIMPrivateEnabled: b.cfg.DouyinIMPrivateEnabled,
 		DouyinIMGroupName:      b.cfg.DouyinIMGroupName,
 		DouyinIMGroupNumber:    b.cfg.DouyinIMGroupNumber,
+		XiaohongshuEnabled:     b.cfg.XiaohongshuEnabled,
+		XiaohongshuPollSeconds: b.cfg.XiaohongshuPollSeconds,
+		XiaohongshuAccounts:    xiaohongshuAccountsFromConfig(b.cfg),
 	}); err != nil {
 		b.Stop()
 		return err
@@ -312,6 +334,7 @@ func (b *WeiboAuthBridge) readLoop() {
 			if b.onCookies != nil {
 				b.onCookies(event.WebCookie, event.MobileCookie, event.Reason)
 			}
+			b.signalCookies()
 		case "qrcode":
 			if b.onQRCode != nil {
 				b.onQRCode(event.ImageBase64, event.ExpiresIn)
@@ -337,10 +360,20 @@ func (b *WeiboAuthBridge) readLoop() {
 					ConversationID: event.ConversationID, ConversationType: event.ConversationType,
 					OwnerUID: event.OwnerUID, SelfUID: event.SelfUID, SenderUID: event.SenderUID,
 					SenderSecUID: event.SenderSecUID, SenderName: event.SenderName,
+					SenderNickname: event.SenderNickname, SenderRemark: event.SenderRemark,
 					ServerMessageID: event.ServerMessageID, MessageType: event.MessageType,
 					CreateTime: event.CreateTime, ReceivedAt: event.ReceivedAt,
 					QuotedName: event.QuotedName, QuotedText: event.QuotedText, QuotedSenderUID: event.QuotedSenderUID,
 					Text: event.Text, Link: event.Link, Index: event.Index,
+				})
+			}
+		case "xiaohongshu_account", "xiaohongshu_notes", "xiaohongshu_qrcode", "xiaohongshu_status", "xiaohongshu_account_error", "xiaohongshu_error":
+			if b.onXiaohongshu != nil {
+				b.onXiaohongshu(xiaohongshuBrowserEvent{
+					Type: strings.TrimPrefix(event.Type, "xiaohongshu_"), UserID: event.UserID,
+					ProfileURL: event.ProfileURL, Nickname: event.Nickname, Notes: event.Notes,
+					LiveActive: event.LiveActive, LiveURL: event.LiveURL, ImageBase64: event.ImageBase64,
+					ExpiresIn: event.ExpiresIn, Status: event.Status, Message: event.Message,
 				})
 			}
 		}
@@ -366,6 +399,51 @@ func (b *WeiboAuthBridge) send(command weiboAuthCommand) error {
 
 func (b *WeiboAuthBridge) RequestRefresh(reason string) error {
 	return b.send(weiboAuthCommand{Cmd: "refresh", AllowQRCode: true, Reason: reason})
+}
+
+func (b *WeiboAuthBridge) signalCookies() {
+	b.cookieWaitersMu.Lock()
+	waiters := b.cookieWaiters
+	b.cookieWaiters = nil
+	b.cookieWaitersMu.Unlock()
+	for _, ch := range waiters {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+}
+
+// WaitCookies blocks until the next cookies event or timeout.
+// Returns true if a cookies event was observed (not necessarily healthy).
+func (b *WeiboAuthBridge) WaitCookies(timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	ch := make(chan struct{})
+	b.cookieWaitersMu.Lock()
+	b.cookieWaiters = append(b.cookieWaiters, ch)
+	b.cookieWaitersMu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-timer.C:
+		// remove self if still pending
+		b.cookieWaitersMu.Lock()
+		kept := b.cookieWaiters[:0]
+		for _, w := range b.cookieWaiters {
+			if w != ch {
+				kept = append(kept, w)
+			}
+		}
+		b.cookieWaiters = kept
+		b.cookieWaitersMu.Unlock()
+		return false
+	}
 }
 
 func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
@@ -414,6 +492,18 @@ func (b *WeiboAuthBridge) ScanDouyin() error {
 
 func (b *WeiboAuthBridge) RequestDouyinLogin() error {
 	return b.send(weiboAuthCommand{Cmd: "douyin_login"})
+}
+
+func (b *WeiboAuthBridge) SyncXiaohongshu() error {
+	return b.send(weiboAuthCommand{Cmd: "xiaohongshu_sync", XiaohongshuEnabled: true, XiaohongshuPollSeconds: b.cfg.XiaohongshuPollSeconds, XiaohongshuAccounts: xiaohongshuAccountsFromConfig(b.cfg)})
+}
+
+func (b *WeiboAuthBridge) ScanXiaohongshu() error {
+	return b.send(weiboAuthCommand{Cmd: "xiaohongshu_scan"})
+}
+
+func (b *WeiboAuthBridge) RequestXiaohongshuLogin() error {
+	return b.send(weiboAuthCommand{Cmd: "xiaohongshu_login"})
 }
 
 func (b *WeiboAuthBridge) IsStarted() bool {
@@ -521,7 +611,7 @@ func (b *Bot) handleWeiboAuthCookies(webCookie, mobileCookie, reason string) {
 		log.Printf("[Weibo-auth] browser cookies hot-updated (reason=%s)", reason)
 	}
 	if reason == "login_restored" {
-		b.notifyAdmins("✅ 微博浏览器登录态已恢复，weibo.com 与 m.weibo.cn Cookie 已热更新。")
+		b.notifyAdminsQQ("✅ 微博浏览器登录态已恢复，weibo.com 与 m.weibo.cn Cookie 已热更新。")
 	}
 }
 
@@ -532,8 +622,10 @@ func (b *Bot) handleWeiboAuthQRCode(imageBase64 string, expiresIn int) {
 	if expiresIn <= 0 {
 		expiresIn = 600
 	}
+	// Text alert via email; QR image still needs QQ (image payload).
+	b.notifyAdmins(fmt.Sprintf("⚠️ 微博浏览器登录态已失效。请尽快在管理面板/侧卡完成扫码登录（二维码约 %d 分钟内有效）。二维码图片已尝试私聊发送。", expiresIn/60))
 	message := []napcat.MessageSegment{
-		napcat.TextSegment(fmt.Sprintf("⚠️ 微博浏览器登录态已失效。请使用微博 App 扫描下方二维码完成登录，二维码约 %d 分钟内有效。", expiresIn/60)),
+		napcat.TextSegment(fmt.Sprintf("微博登录二维码（约 %d 分钟有效），请用微博 App 扫码。", expiresIn/60)),
 		napcat.ImageSegment("base64://" + imageBase64),
 	}
 	for _, adminID := range b.collectAdminRecipients() {
@@ -552,6 +644,12 @@ func (b *Bot) handleWeiboAuthStatus(status, message string) {
 
 func (b *Bot) handleWeiboAuthError(err error) {
 	if err == nil {
+		return
+	}
+	msg := strings.TrimSpace(err.Error())
+	// Noise from probe clients / protocol alias mistakes — log only, never alert.
+	if msg == "" || strings.Contains(msg, "unknown command") {
+		log.Printf("[Weibo-auth] ignored non-fatal sidecar message: %v", err)
 		return
 	}
 	log.Printf("[Weibo-auth] %v", err)

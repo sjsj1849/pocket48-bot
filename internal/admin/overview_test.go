@@ -2,6 +2,40 @@ package admin
 
 import "testing"
 
+func TestCPUUsageFromDelta(t *testing.T) {
+	// 100 total jiffies, 25 idle → 75% used
+	got := cpuUsageFromDelta(0, 0, 25, 100)
+	if got != 75 {
+		t.Fatalf("cpuUsageFromDelta() = %v, want 75", got)
+	}
+	// No progress
+	if cpuUsageFromDelta(10, 100, 10, 100) != 0 {
+		t.Fatalf("zero delta should be 0")
+	}
+	// Fully idle
+	if cpuUsageFromDelta(0, 0, 100, 100) != 0 {
+		t.Fatalf("full idle should be 0")
+	}
+}
+
+func TestReadResourcesSanity(t *testing.T) {
+	res := readResources()
+	if res.CPUPercent < 0 || res.CPUPercent > 100 {
+		t.Fatalf("CPUPercent = %v", res.CPUPercent)
+	}
+	if res.MemoryPercent < 0 || res.MemoryPercent > 100 {
+		t.Fatalf("MemoryPercent = %v", res.MemoryPercent)
+	}
+	if res.DiskPercent < 0 || res.DiskPercent > 100 {
+		t.Fatalf("DiskPercent = %v", res.DiskPercent)
+	}
+	// Second call should still be sane (uses previous sample, no forced sleep path after first).
+	res2 := readResources()
+	if res2.CPUPercent < 0 || res2.CPUPercent > 100 {
+		t.Fatalf("CPUPercent2 = %v", res2.CPUPercent)
+	}
+}
+
 func TestParseActivityFiltersNoiseAndOrdersNewestFirst(t *testing.T) {
 	lines := []string{
 		"2026/07/16 12:00:00 [NIM-room] active live discovery",
@@ -68,6 +102,39 @@ func TestDouyinLoginErrorIsDown(t *testing.T) {
 			t.Fatalf("Douyin state = %#v", state)
 		}
 	}
+}
+
+func TestNapCatFailedToConnectIsDown(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/18 10:01:12 ❌ Failed to connect to NapCat: dial tcp 127.0.0.1:3001: connect: connection refused. Retrying in 5s...",
+	})
+	for _, state := range states {
+		if state.ID != "napcat" {
+			continue
+		}
+		if state.Status != "down" || state.StatusText != "连接中断" {
+			t.Fatalf("napcat state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("napcat state not found")
+}
+
+func TestNapCatStatusDisconnectedIsDown(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/18 10:00:00 ✅ Connected to NapCat successfully",
+		"2026/07/18 10:05:00 [NapCat] status=disconnected message=read loop ended",
+	})
+	for _, state := range states {
+		if state.ID != "napcat" {
+			continue
+		}
+		if state.Status != "down" {
+			t.Fatalf("napcat state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("napcat state not found")
 }
 
 func TestNIMHealthPopulatesQChatAndLiveStates(t *testing.T) {

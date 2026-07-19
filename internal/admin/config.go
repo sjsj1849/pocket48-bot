@@ -73,13 +73,15 @@ var editableConfig = map[string]fieldDefinition{
 	"DOUYIN_IM_GROUP_NUMBER":         {"抖音", "目标群号", "精确匹配目标抖音群", kindString},
 	"DOUYIN_LIVE_WS_URL":             {"抖音", "直播 WebSocket", "抖音直播事件服务地址", kindString},
 	"DOUYIN_LIVE_SIDECAR_CMD":        {"抖音", "直播侧卡命令", "留空表示使用外部服务", kindString},
-	"ALERT_EMAIL_ENABLED":            {"告警", "邮件告警", "服务连续异常后发送掉线与恢复通知", kindBoolean},
-	"ALERT_EMAIL_TO":                 {"告警", "收件邮箱", "接收服务掉线与恢复通知的邮箱", kindString},
+	"XIAOHONGSHU_ENABLED":            {"小红书", "小红书监控", "启用帖子监控与可用时的开播提醒", kindBoolean},
+	"XIAOHONGSHU_POLL_SECONDS":       {"小红书", "帖子轮询间隔", "个人主页检查周期（秒，最低 30 秒）", kindInteger},
+	"ALERT_EMAIL_ENABLED":            {"告警", "邮件告警", "服务持续异常且超过自愈窗口后才发邮件；可自愈/已恢复不发", kindBoolean},
+	"ALERT_EMAIL_TO":                 {"告警", "收件邮箱", "接收需人工处理的服务异常邮件", kindString},
 	"ALERT_EMAIL_FROM":               {"告警", "发件地址", "建议使用 jiufeng.cloud 域名地址", kindString},
-	"ALERT_EMAIL_COOLDOWN_MINUTES":   {"告警", "告警冷却", "同一服务重复告警的最短间隔（分钟）", kindInteger},
+	"ALERT_EMAIL_COOLDOWN_MINUTES":   {"告警", "告警冷却", "同一服务重复异常告警的最短间隔（分钟）", kindInteger},
 }
 
-var configGroupOrder = []string{"基础", "连接", "QChat", "浏览器", "抖音", "告警"}
+var configGroupOrder = []string{"基础", "连接", "QChat", "浏览器", "抖音", "小红书", "告警"}
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -142,6 +144,10 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if definition.Kind == kindSecret && value == "" {
 			continue
+		}
+		if key == "XIAOHONGSHU_POLL_SECONDS" && value.(int64) < 30 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "帖子轮询间隔：不能小于 30 秒"})
+			return
 		}
 		validated[key] = value
 	}
