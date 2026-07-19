@@ -106,6 +106,15 @@ type DouyinMonitor struct {
 	// Captcha window: count account_error "验证码中间页" hits that block post lists.
 	captchaHits      []time.Time
 	captchaLastAlert time.Time
+
+	// IM disconnect watchdog: soft alert → sidecar restart → bot process restart → re-alert.
+	imDisconnectedAt     time.Time
+	imLastDisconnectAlert time.Time
+	imSidecarRestartAt   time.Time
+	imBotRestartAt       time.Time
+	imWatchdogStop       chan struct{}
+	imWatchdogOnce       sync.Once
+	requestBotRestart    func(reason string)
 }
 
 type douyinIMTarget struct {
@@ -121,6 +130,13 @@ func (m *DouyinMonitor) SetBrowserBridge(browser *WeiboAuthBridge) {
 	m.mu.Unlock()
 }
 
+// SetRequestBotRestart wires a process-level restart callback (systemd Restart=always).
+func (m *DouyinMonitor) SetRequestBotRestart(fn func(reason string)) {
+	m.mu.Lock()
+	m.requestBotRestart = fn
+	m.mu.Unlock()
+}
+
 func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins func(string)) *DouyinMonitor {
 	return &DouyinMonitor{
 		cfg:          cfg,
@@ -129,6 +145,7 @@ func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins fu
 		liveCancels:     make(map[string]context.CancelFunc),
 		liveStates:      make(map[string]*douyinLiveState),
 		imConversations: make(map[string]douyinIMTarget),
+		imWatchdogStop:  make(chan struct{}),
 	}
 }
 
@@ -383,10 +400,7 @@ func (m *DouyinMonitor) HandleBrowserEvent(event douyinBrowserEvent) {
 	case "im_message":
 		m.handleIMMessage(event)
 	case "im_status":
-		m.mu.Lock()
-		m.imConnected = event.Status == "connected"
-		m.mu.Unlock()
-		log.Printf("[Douyin-IM] status=%s message=%s", event.Status, event.Message)
+		m.handleIMStatus(event)
 	case "account_error", "error":
 		log.Printf("[Douyin] %s %s: %s", event.Type, event.SecUserID, event.Message)
 		m.noteDouyinCaptchaError(event.SecUserID, event.Message)
@@ -441,6 +455,142 @@ func (m *DouyinMonitor) noteDouyinCaptchaError(secUserID, message string) {
 	))
 }
 
+
+
+func (m *DouyinMonitor) handleIMStatus(event douyinBrowserEvent) {
+	status := strings.TrimSpace(event.Status)
+	msg := strings.TrimSpace(event.Message)
+	now := time.Now()
+	m.mu.Lock()
+	wasConnected := m.imConnected
+	connected := status == "connected"
+	m.imConnected = connected
+	if connected {
+		// Recovered: clear disconnect clock (do not spam recovery alerts).
+		if !m.imDisconnectedAt.IsZero() {
+			downFor := now.Sub(m.imDisconnectedAt)
+			m.imDisconnectedAt = time.Time{}
+			m.mu.Unlock()
+			log.Printf("[Douyin-IM] status=connected message=%s (recovered after %s)", msg, downFor.Round(time.Second))
+			return
+		}
+		m.mu.Unlock()
+		log.Printf("[Douyin-IM] status=connected message=%s", msg)
+		return
+	}
+	// disconnected / error / other non-connected
+	if m.imDisconnectedAt.IsZero() {
+		m.imDisconnectedAt = now
+	}
+	// Soft alert once when first leaving connected state.
+	softAlert := wasConnected || m.imLastDisconnectAlert.IsZero()
+	if softAlert && (m.imLastDisconnectAlert.IsZero() || now.Sub(m.imLastDisconnectAlert) >= 10*time.Minute) {
+		m.imLastDisconnectAlert = now
+		notify := m.notifyAdmins
+		m.mu.Unlock()
+		log.Printf("[Douyin-IM] status=%s message=%s", status, msg)
+		if notify != nil {
+			notify(fmt.Sprintf("⚠️ 抖音 IM 连接异常：%s\n将自动重连；若 %s 仍未恢复会尝试重启侧车/Bot。", firstNonEmptyText(msg, status), "2 分钟"))
+		}
+		return
+	}
+	m.mu.Unlock()
+	log.Printf("[Douyin-IM] status=%s message=%s", status, msg)
+}
+
+func firstNonEmptyText(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// StartIMWatchdog monitors prolonged IM disconnect and escalates:
+// 1) after 2m: restart weibo-auth sidecar (IM lives there)
+// 2) after 5m still down: exit process so systemd restarts bot
+// 3) if still down after bot restart window: re-alert admins every 15m
+func (m *DouyinMonitor) StartIMWatchdog() {
+	m.imWatchdogOnce.Do(func() {
+		if m.imWatchdogStop == nil {
+			m.imWatchdogStop = make(chan struct{})
+		}
+		go m.runIMWatchdog()
+	})
+}
+
+func (m *DouyinMonitor) runIMWatchdog() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.imWatchdogStop:
+			return
+		case <-ticker.C:
+			m.tickIMWatchdog()
+		}
+	}
+}
+
+func (m *DouyinMonitor) tickIMWatchdog() {
+	if m.cfg == nil || !m.cfg.DouyinIMEnabled {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	connected := m.imConnected
+	since := m.imDisconnectedAt
+	browser := m.browser
+	restartFn := m.requestBotRestart
+	if connected || since.IsZero() {
+		m.mu.Unlock()
+		return
+	}
+	downFor := now.Sub(since)
+	// Stage 1: sidecar restart after 2 minutes.
+	if downFor >= 2*time.Minute && (m.imSidecarRestartAt.IsZero() || now.Sub(m.imSidecarRestartAt) >= 10*time.Minute) {
+		m.imSidecarRestartAt = now
+		m.mu.Unlock()
+		log.Printf("[Douyin-IM] still down for %s → restart weibo-auth sidecar", downFor.Round(time.Second))
+		if browser != nil {
+			if err := browser.Restart(); err != nil {
+				log.Printf("[Douyin-IM] sidecar restart failed: %v", err)
+			} else {
+				log.Printf("[Douyin-IM] sidecar restart requested")
+			}
+		}
+		return
+	}
+	// Stage 2: bot process restart after 5 minutes.
+	if downFor >= 5*time.Minute && (m.imBotRestartAt.IsZero() || now.Sub(m.imBotRestartAt) >= 20*time.Minute) {
+		m.imBotRestartAt = now
+		m.mu.Unlock()
+		log.Printf("[Douyin-IM] still down for %s → restart bot process", downFor.Round(time.Second))
+		if restartFn != nil {
+			restartFn(fmt.Sprintf("douyin IM disconnected for %s", downFor.Round(time.Second)))
+		} else {
+			// Fallback: exit so systemd Restart=always picks us up.
+			log.Printf("[Douyin-IM] no restart callback; exiting for systemd restart")
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				os.Exit(1)
+			}()
+		}
+		return
+	}
+	// Stage 3: still down after bot restart attempt → re-alert.
+	if downFor >= 8*time.Minute && (m.imLastDisconnectAlert.IsZero() || now.Sub(m.imLastDisconnectAlert) >= 15*time.Minute) {
+		m.imLastDisconnectAlert = now
+		notify := m.notifyAdmins
+		m.mu.Unlock()
+		if notify != nil {
+			notify(fmt.Sprintf("🚨 抖音 IM 仍未恢复\n已断开约 %s\n已尝试侧车重启/Bot 重启，请检查浏览器登录态与侧卡日志。", downFor.Round(time.Second)))
+		}
+		return
+	}
+	m.mu.Unlock()
+}
 
 func parseDouyinIMGroupNumbers(raw string) map[string]struct{} {
 	out := map[string]struct{}{}
@@ -665,7 +815,7 @@ func formatDouyinIMNotification(title, name, text, timeText string) string {
 }
 
 // resolveDouyinSenderLabels returns (boxName, lineName):
-//   - boxName: 抖音昵称优先（标题框【昵称|抖音私信】）；无昵称再回落备注
+//   - boxName: 抖音昵称优先（标题框【昵称|抖音】）；无昵称再回落备注
 //   - lineName: "抖音名(备注)" if both differ; else single display name
 func resolveDouyinSenderLabels(event douyinBrowserEvent) (boxName, lineName string) {
 	nick := strings.TrimSpace(event.SenderNickname)
@@ -680,7 +830,7 @@ func resolveDouyinSenderLabels(event douyinBrowserEvent) (boxName, lineName stri
 		}
 		return "抖音用户", "抖音用户"
 	}
-	// Title box: nickname first (user wants 【葡萄吞十七|抖音私信】 not remark-only).
+	// Title box: nickname first (user wants 【葡萄吞十七|抖音】 not remark-only).
 	if nick != "" {
 		boxName = nick
 	} else {
@@ -836,8 +986,8 @@ func formatDouyinPrivateNotification(boxName, lineName, text, timeText string) s
 			body = formatDouyinSenderLine(lineName, body)
 		}
 	}
-	// Title: nickname first 【昵称|抖音私信】
-	return fmt.Sprintf("【%s|抖音私信】\n%s\n%s", boxName, body, timeText)
+	// Title: nickname first 【昵称|抖音】
+	return fmt.Sprintf("【%s|抖音】\n%s\n%s", boxName, body, timeText)
 }
 
 func formatDouyinIMTime(createTime, receivedAt int64) string {

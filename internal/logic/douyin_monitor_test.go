@@ -152,14 +152,14 @@ func TestResolveDouyinSenderLabels(t *testing.T) {
 
 func TestFormatDouyinPrivateNotification(t *testing.T) {
 	got := formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七(唐欣怡)", "消息正文", "2026-07-17 10:00:00")
-	want := "【葡萄吞十七|抖音私信】\n葡萄吞十七(唐欣怡)：消息正文\n2026-07-17 10:00:00"
+	want := "【葡萄吞十七|抖音】\n葡萄吞十七(唐欣怡)：消息正文\n2026-07-17 10:00:00"
 	if got != want {
 		t.Fatalf("notification=%q", got)
 	}
 	// reply stack (quote is self share card)
 	replyBody := formatDouyinReplyText("葡萄吞十七(唐欣怡)", "并排呀", "我", "[分享图文]")
 	got = formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七(唐欣怡)", replyBody, "2026-07-19 08:42:02")
-	want = "【葡萄吞十七|抖音私信】\n我：[分享图文]\n葡萄吞十七(唐欣怡)：并排呀\n2026-07-19 08:42:02"
+	want = "【葡萄吞十七|抖音】\n我：[分享图文]\n葡萄吞十七(唐欣怡)：并排呀\n2026-07-19 08:42:02"
 	if got != want {
 		t.Fatalf("reply notification=%q", got)
 	}

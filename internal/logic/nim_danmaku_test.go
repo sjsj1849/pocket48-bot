@@ -2,6 +2,7 @@ package logic
 
 import (
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -449,6 +450,8 @@ func TestQChatOwnerIdentityRejectsNonOwnerRESTSender(t *testing.T) {
 }
 
 func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
+	_ = os.Remove(liveSessionPath(123))
+	t.Cleanup(func() { _ = os.Remove(liveSessionPath(123)) })
 	bot := &Bot{liveSessions: make(map[int64]*LiveGiftSession)}
 	room := &pocket48.RoomInfo{ChannelID: 123, OwnerID: 456, OwnerName: "测试成员"}
 	if !bot.beginLiveSession(room, "live-1", 789, 12) {
@@ -468,6 +471,8 @@ func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
 }
 
 func TestBeginLiveSessionDoesNotResetSameLive(t *testing.T) {
+	_ = os.Remove(liveSessionPath(123))
+	t.Cleanup(func() { _ = os.Remove(liveSessionPath(123)) })
 	bot := &Bot{liveSessions: make(map[int64]*LiveGiftSession)}
 	room := &pocket48.RoomInfo{ChannelID: 123, OwnerName: "测试成员"}
 	bot.beginLiveSession(room, "live-1", 789, 10)

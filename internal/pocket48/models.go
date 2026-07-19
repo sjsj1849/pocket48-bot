@@ -220,14 +220,22 @@ func (user *LiveUser) UnmarshalJSON(data []byte) error {
 	type alias LiveUser
 	aux := struct {
 		*alias
-		UserID flexibleInt64 `json:"userId"`
-		RoomID flexibleInt64 `json:"roomId"`
+		UserID     flexibleInt64 `json:"userId"`
+		RoomID     flexibleInt64 `json:"roomId"`
+		UserName   string        `json:"userName"`
+		UserAvatar string        `json:"userAvatar"`
 	}{alias: (*alias)(user)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
 	user.UserID = int64(aux.UserID)
 	user.RoomID = int64(aux.RoomID)
+	if user.Nickname == "" {
+		user.Nickname = strings.TrimSpace(aux.UserName)
+	}
+	if user.Avatar == "" {
+		user.Avatar = strings.TrimSpace(aux.UserAvatar)
+	}
 	return nil
 }
 
@@ -254,6 +262,14 @@ func (item *LiveListItem) UnmarshalJSON(data []byte) error {
 		MemberID   flexibleInt64 `json:"memberId"`
 		UserID     flexibleInt64 `json:"userId"`
 		LiveRoomID flexibleInt64 `json:"roomId"`
+		// 2026 API: cover is coverPath; owner lives under userInfo.
+		CoverPath string `json:"coverPath"`
+		UserInfo  *struct {
+			UserID       flexibleInt64 `json:"userId"`
+			Nickname     string        `json:"nickname"`
+			RealNickName string        `json:"realNickName"`
+			StarName     string        `json:"starName"`
+		} `json:"userInfo"`
 	}{alias: (*alias)(item)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -263,6 +279,27 @@ func (item *LiveListItem) UnmarshalJSON(data []byte) error {
 	item.MemberID = int64(aux.MemberID)
 	item.UserID = int64(aux.UserID)
 	item.LiveRoomID = int64(aux.LiveRoomID)
+	if item.LiveCover == "" && strings.TrimSpace(aux.CoverPath) != "" {
+		item.LiveCover = strings.TrimSpace(aux.CoverPath)
+	}
+	if aux.UserInfo != nil {
+		if item.UserID == 0 {
+			item.UserID = int64(aux.UserInfo.UserID)
+		}
+		if item.MemberID == 0 {
+			item.MemberID = int64(aux.UserInfo.UserID)
+		}
+		if item.MemberName == "" {
+			item.MemberName = strings.TrimSpace(aux.UserInfo.StarName)
+		}
+		if item.NickName == "" {
+			item.NickName = firstNonEmptyLive(
+				strings.TrimSpace(aux.UserInfo.Nickname),
+				strings.TrimSpace(aux.UserInfo.RealNickName),
+				strings.TrimSpace(aux.UserInfo.StarName),
+			)
+		}
+	}
 	return nil
 }
 
@@ -286,6 +323,7 @@ func (item *LiveOne) UnmarshalJSON(data []byte) error {
 		OnlineNum flexibleInt64 `json:"onlineNum"`
 		LiveType  flexibleInt64 `json:"liveType"`
 		RoomID    flexibleInt64 `json:"roomId"`
+		CoverPath string        `json:"coverPath"`
 	}{alias: (*alias)(item)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -294,7 +332,19 @@ func (item *LiveOne) UnmarshalJSON(data []byte) error {
 	item.OnlineNum = int64(aux.OnlineNum)
 	item.LiveType = int(aux.LiveType)
 	item.RoomID = int64(aux.RoomID)
+	if item.Cover == "" && strings.TrimSpace(aux.CoverPath) != "" {
+		item.Cover = strings.TrimSpace(aux.CoverPath)
+	}
 	return nil
+}
+
+func firstNonEmptyLive(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // LoginResponseContent is the content of a successful login response

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage } from './douyin-im.mjs';
+import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, formatDouyinType110 } from './douyin-im.mjs';
 
 function varint(value) {
   let current = BigInt(value);
@@ -453,3 +453,33 @@ test('light interaction sticker with image url_list forwards images', () => {
   assert.ok(decoded.images.includes('https://p3-emoticon.byteimg.com/sticker/heart.png'));
 });
 
+test('type 110 empty body maps to pet-feed reminder', () => {
+  assert.equal(formatDouyinType110({}, {}), '[你还没有喂精灵～]');
+  assert.equal(formatDouyinType110({}, { 'a:video_emoji_rec': '1' }), '[表情]');
+  assert.equal(formatDouyinType110({ text: '自定义提示' }, {}), '[自定义提示]');
+});
+
+test('decode type 110 empty content to pet-feed label', () => {
+  const message = [
+    ...field(1, 'conv-pet-1'),
+    ...intField(2, 1n),
+    ...field(3, 'msg-110-pet'),
+    ...field(4, '1'),
+    ...field(5, 'short-110'),
+    ...intField(6, 110n),
+    ...field(7, '97608817768'),
+    ...field(8, ''), // empty content like prod 2026-07-19 20:56:58
+    ...intField(10, 1784465818000n),
+  ];
+  const notify = [...field(2, 'conv-pet-1'), ...intField(3, 1n), ...field(5, message)];
+  const body = field(500, notify);
+  const payload = field(6, body);
+  const frame = [
+    ...field(6, 'gzip'),
+    ...field(7, 'pb'),
+    ...field(8, gzipSync(Buffer.from(payload))),
+  ];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 110);
+  assert.equal(decoded.text, '[你还没有喂精灵～]');
+});

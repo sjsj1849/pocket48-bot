@@ -719,6 +719,14 @@ func NewBot(cfg *config.Config) *Bot {
 	}
 	bot.douyinMonitor = NewDouyinMonitor(cfg, napcatClient, bot.notifyAdmins)
 	bot.douyinMonitor.SetBrowserBridge(bot.weiboAuth)
+	bot.douyinMonitor.SetRequestBotRestart(func(reason string) {
+		log.Printf("[Bot] restart requested: %s", reason)
+		// systemd Restart=always will bring the process back.
+		go func() {
+			time.Sleep(800 * time.Millisecond)
+			os.Exit(1)
+		}()
+	})
 	bot.weiboAuth.SetDouyinCallback(bot.douyinMonitor.HandleBrowserEvent)
 	bot.xiaohongshuMonitor = NewXiaohongshuMonitor(cfg, napcatClient, bot.notifyAdmins)
 	bot.xiaohongshuMonitor.SetBrowserBridge(bot.weiboAuth)
@@ -877,6 +885,9 @@ func (b *Bot) reloadSubscriptions() {
 }
 
 func (b *Bot) Start() error {
+	// Recover in-progress live gift/score sessions before NIM live discovery.
+	b.loadLiveSessionsFromDisk()
+
 	// Connect to NapCat
 	if err := b.napcat.Connect(); err != nil {
 		return fmt.Errorf("failed to connect to NapCat: %v", err)
@@ -973,6 +984,9 @@ func (b *Bot) Start() error {
 				b.notifyAdmins(fmt.Sprintf("⚠️ 抖音监控侧卡启动失败：%v", err))
 			}
 		}()
+	}
+	if b.cfg.DouyinIMEnabled && b.douyinMonitor != nil {
+		b.douyinMonitor.StartIMWatchdog()
 	}
 
 	// Start Polling Loop
