@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -815,12 +816,14 @@ func (b *Bot) refreshNIMLiveRooms() {
 		}
 		for _, live := range lives {
 			ownerMatches := live.UserID == room.OwnerID || live.MemberID == room.OwnerID
-			nameMatches := room.OwnerName != "" && (live.MemberName == room.OwnerName || live.NickName == room.OwnerName)
+			nameMatches := room.OwnerName != "" && (live.MemberName == room.OwnerName || live.NickName == room.OwnerName ||
+				strings.Contains(live.NickName, room.OwnerName) || strings.Contains(live.MemberName, room.OwnerName))
 			if !ownerMatches && !nameMatches {
 				continue
 			}
 			// getLiveList discovers the active liveId. Its roomId is not the
 			// authoritative NIM chatroom id; getLiveOne supplies that value.
+			log.Printf("[NIM-live] discovery match room=%d owner=%s liveId=%s title=%s", roomID, room.OwnerName, live.LiveID, live.LiveTitle)
 			b.connectDanmakuForLive(live.LiveID, 0, room)
 			break
 		}
@@ -1284,17 +1287,33 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 	if g == nil {
 		return
 	}
-	_, totalLegs, _ := extractChickenLegFromRaw(g.Raw, g.GiftName, int64(g.GiftNum))
+	_, totalLegs, legSource := extractChickenLegFromRaw(g.Raw, g.GiftName, int64(g.GiftNum))
 	var score float64
 	if scoreGift, ok := parseAnnualScoreGiftMessage(string(g.Raw)); ok {
 		score = scoreGift.TotalScore
 	}
 	b.liveSessionsMu.Lock()
-	if session := b.liveSessions[roomID]; session != nil && !session.Ended {
-		session.ChickenLegs += totalLegs
-		session.AnnualScore += score
+	session := b.liveSessions[roomID]
+	if session != nil && !session.Ended {
+		if totalLegs > 0 {
+			session.ChickenLegs += totalLegs
+		}
+		if score > 0 {
+			session.AnnualScore += score
+		}
+		snap := *session
+		b.liveSessionsMu.Unlock()
+		b.persistLiveSession(roomID, &snap)
+		if totalLegs > 0 || score > 0 {
+			log.Printf("[NIM-live] gift in room=%d from=%s gift=%s x%d legs+=%d totalLegs=%d score+=%s totalScore=%s source=%s",
+				roomID, g.From, g.GiftName, g.GiftNum, totalLegs, snap.ChickenLegs, formatScoreValue(score), formatScoreValue(snap.AnnualScore), legSource)
+		} else {
+			log.Printf("[NIM-live] gift in room=%d from=%s gift=%s x%d (no leg/score parsed)", roomID, g.From, g.GiftName, g.GiftNum)
+		}
+		return
 	}
 	b.liveSessionsMu.Unlock()
+	log.Printf("[NIM-live] gift ignored (no active session) room=%d from=%s gift=%s x%d", roomID, g.From, g.GiftName, g.GiftNum)
 }
 
 func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID, initialOnline int64) bool {
@@ -1302,18 +1321,51 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 		return false
 	}
 	b.liveSessionsMu.Lock()
-	defer b.liveSessionsMu.Unlock()
 	current := b.liveSessions[room.ChannelID]
 	if current != nil && current.LiveID == liveID {
+		changed := false
 		if initialOnline > current.PeakOnline {
 			current.PeakOnline = initialOnline
+			changed = true
 		}
-		return !current.Ended
+		active := !current.Ended
+		var snap LiveGiftSession
+		if changed {
+			snap = *current
+		}
+		b.liveSessionsMu.Unlock()
+		if changed {
+			b.persistLiveSession(room.ChannelID, &snap)
+		}
+		return active
 	}
-	b.liveSessions[room.ChannelID] = &LiveGiftSession{
+	// Prefer disk restore if present for same liveId (restart recovery).
+	if current == nil {
+		if raw, err := os.ReadFile(liveSessionPath(room.ChannelID)); err == nil {
+			var disk LiveGiftSession
+			if json.Unmarshal(raw, &disk) == nil && !disk.Ended && disk.LiveID == liveID {
+				if initialOnline > disk.PeakOnline {
+					disk.PeakOnline = initialOnline
+				}
+				cp := disk
+				b.liveSessions[room.ChannelID] = &cp
+				b.liveSessionsMu.Unlock()
+				log.Printf("[NIM-live] resume session room=%d liveId=%s legs=%d score=%s peak=%d",
+					room.ChannelID, disk.LiveID, disk.ChickenLegs, formatScoreValue(disk.AnnualScore), disk.PeakOnline)
+				b.persistLiveSession(room.ChannelID, &cp)
+				return true
+			}
+		}
+	}
+	session := &LiveGiftSession{
 		LiveID: liveID, LiveRoomID: nimRoomID, LiveOwnerID: room.OwnerID,
 		LiveOwnerName: room.OwnerName, StartedAt: time.Now().UnixMilli(), PeakOnline: initialOnline,
 	}
+	b.liveSessions[room.ChannelID] = session
+	snap := *session
+	b.liveSessionsMu.Unlock()
+	b.persistLiveSession(room.ChannelID, &snap)
+	log.Printf("[NIM-live] begin session room=%d liveId=%s peak=%d", room.ChannelID, liveID, initialOnline)
 	return true
 }
 
@@ -1322,8 +1374,13 @@ func (b *Bot) handleLiveUpdate(roomID int64, update *LiveUpdate) {
 		return
 	}
 	b.liveSessionsMu.Lock()
-	if session := b.liveSessions[roomID]; session != nil && !session.Ended && update.OnlineNum > session.PeakOnline {
+	session := b.liveSessions[roomID]
+	if session != nil && !session.Ended && update.OnlineNum > session.PeakOnline {
 		session.PeakOnline = update.OnlineNum
+		snap := *session
+		b.liveSessionsMu.Unlock()
+		b.persistLiveSession(roomID, &snap)
+		return
 	}
 	b.liveSessionsMu.Unlock()
 }
@@ -1362,6 +1419,7 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	session.Ended = true
 	snapshot := *session
 	b.liveSessionsMu.Unlock()
+	b.removeLiveSessionFile(roomID)
 
 	name := strings.TrimSpace(snapshot.LiveOwnerName)
 	if name == "" {
@@ -1381,6 +1439,8 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	if snapshot.PeakOnline > 0 {
 		text += fmt.Sprintf("\n最高在线人数：%d", snapshot.PeakOnline)
 	}
+	log.Printf("[NIM-live] finish session room=%d liveId=%s legs=%d score=%s peak=%d",
+		roomID, snapshot.LiveID, snapshot.ChickenLegs, formatScoreValue(snapshot.AnnualScore), snapshot.PeakOnline)
 	for _, gid := range b.getTargetGroupsForRoom(roomID) {
 		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
 	}

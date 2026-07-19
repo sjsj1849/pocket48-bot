@@ -391,6 +391,36 @@ function isDouyinControlCommand(messageType, content = {}, ext = {}) {
   return false;
 }
 
+// Type 110: client-rendered special cards / video-emoji.
+// - 2026-07-17: video_emoji_rec / use_default_emoji → no body text (show [表情])
+// - 2026-07-19 20:56:58 张若昀 private: empty content, UI 「你还没有喂精灵～」, push has zero text/hex
+//   → heuristic label so QQ is readable. If a future 110 carries real text, prefer that.
+function formatDouyinType110(content = {}, ext = {}) {
+  const fromContent =
+    (typeof content?.text === 'string' && content.text.trim())
+    || (typeof content?.title === 'string' && content.title.trim())
+    || (typeof content?.msgHint === 'string' && content.msgHint.trim())
+    || (typeof content?.hint === 'string' && content.hint.trim())
+    || '';
+  if (fromContent) return fromContent.startsWith('[') ? fromContent : `[${fromContent}]`;
+
+  if (
+    ext['a:video_emoji_rec']
+    || ext['a:use_default_emoji']
+    || ext.video_emoji_rec
+    || ext.use_default_emoji
+  ) {
+    return '[表情]';
+  }
+
+  // Empty body: pet-feed / interactive reminder cards render only on client.
+  const keys = content && typeof content === 'object' ? Object.keys(content) : [];
+  if (keys.length === 0) {
+    return '[你还没有喂精灵～]';
+  }
+  return '';
+}
+
 // Compact share / card previews for quote lines: keep 「[分享图文]」 not the whole essay.
 function compactDouyinShareQuote(text) {
   const raw = String(text || '').trim();
@@ -703,6 +733,8 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   } else if (isDouyinSystemNotice(messageType, content)) {
     // Keep a short label for logs; mark as internal so QQ does not forward machine scenes.
     text = formatDouyinSystemNotice(content);
+  } else if (messageType === 110) {
+    text = formatDouyinType110(content, ext);
   } else {
     if (!text) {
       text = extractChatBody(content, ext);
@@ -778,7 +810,14 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     if (text === '[暂不支持的消息]') text = '[图片]';
   }
   if (!text) {
-    text = ({ 5: '[表情]', 17: '[语音]', 27: '[图片]', 50002: '[表情]', 70002: '[表情]' })[messageType] || '[暂不支持的消息]';
+    text = ({
+      5: '[表情]',
+      17: '[语音]',
+      27: '[图片]',
+      110: '[你还没有喂精灵～]',
+      50002: '[表情]',
+      70002: '[表情]',
+    })[messageType] || '[暂不支持的消息]';
   }
   // If content carried image URLs but type was not 27, still surface them (rare).
   if (images.length === 0 && (messageType === 27 || /url_list|cover_url|image_url|static_url|animate_url/i.test(JSON.stringify(content || {}).slice(0, 500)))) {
@@ -905,6 +944,7 @@ export function isOwnDouyinIMMessage(senderUid, selfUid) {
 
 export {
   compactDouyinShareQuote,
+  formatDouyinType110,
   isDouyinControlCommand,
   isDouyinSystemNotice,
   looksLikeDouyinShareCardText,
