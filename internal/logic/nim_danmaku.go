@@ -1287,10 +1287,18 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 	if g == nil {
 		return
 	}
-	_, totalLegs, legSource := extractChickenLegFromRaw(g.Raw, g.GiftName, int64(g.GiftNum))
+	// Score gifts and chicken-leg gifts are exclusive buckets.
 	var score float64
-	if scoreGift, ok := parseAnnualScoreGiftMessage(string(g.Raw)); ok {
+	scoreGift, isScore := parseAnnualScoreGiftMessage(string(g.Raw))
+	if isScore {
 		score = scoreGift.TotalScore
+	}
+	var totalLegs int64
+	var legSource string
+	if !isScore {
+		_, totalLegs, legSource = extractChickenLegFromRaw(g.Raw, g.GiftName, int64(g.GiftNum))
+	} else {
+		legSource = "score-only"
 	}
 	b.liveSessionsMu.Lock()
 	session := b.liveSessions[roomID]
@@ -1493,21 +1501,14 @@ func (b *Bot) isKnownStar(userID int64) bool {
 	if userID == 0 {
 		return false
 	}
-	b.mu.RLock()
-	cached, ok := b.userDetailCache[userID]
-	b.mu.RUnlock()
-	if ok && time.Now().Before(cached.expiresAt) {
-		return cached.info != nil && cached.info.IsStar
-	}
-	detail, err := b.pocket.GetUserDetailInfo(userID)
-	if err != nil {
-		log.Printf("[NIM-live] lookup user %d: %v", userID, err)
+	// NIM chatroom notifications often carry opaque/accid-like tokens that only
+	// happen to parse as int64. Pocket member ids in practice are smaller; skip
+	// obvious junk to avoid hammering user APIs (still allow normal member ids).
+	if userID < 0 {
 		return false
 	}
-	b.mu.Lock()
-	b.userDetailCache[userID] = cachedUserDetail{info: detail, expiresAt: time.Now().Add(10 * time.Minute)}
-	b.mu.Unlock()
-	return detail.IsStar
+	_, isStar, _ := b.resolveUserStarDetail(userID)
+	return isStar
 }
 
 func (b *Bot) handleDanmakuConnected(roomID int64) {

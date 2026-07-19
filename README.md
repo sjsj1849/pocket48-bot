@@ -26,8 +26,9 @@
 - **QChat 实时推送**：连接成功后停止对应房间的 REST 轮询，断线自动恢复轮询
 - 回复消息、翻牌（FlipCard）消息解析
 - 直播开播通知（含封面图）
-- 礼物消息（含年度青春盛典记分礼物）；直播间礼物/鸡腿/总选记分**后台累计**，下播汇总推送
+- 礼物消息（含年度青春盛典记分礼物）；直播间**记分与鸡腿分桶累计**，下播汇总推送
 - 本场统计落盘 `storage/live-sessions/`，Bot 重启后同场 `liveId` 可恢复累计
+- 成员/star 校验走档案接口 + 负缓存（修复用户主页接口 404 导致校验失灵）
 - 上麦提醒
 - **自适应轮询**：有消息 300ms 快速拉取，安静期 1s 保底
 - **媒体缓存**：图片/语音/视频预下载到本地，加快 NapCat 发送
@@ -117,11 +118,17 @@ cd ../..
 
 - Bot 会使用有效的 `POCKET_TOKEN` 调用 `/im/api/v1/im/userinfo`，自动取得并保存云信 AccID/Token，通常不需要手工配置 `NIM_ACCOUNT/NIM_TOKEN`。
 - `NIM_ENABLED` 只控制直播 Chatroom；`NIM_ROOM_MESSAGE_ENABLED` 独立控制普通房间 QChat，两项可分别启用。
-- 直播弹幕只转发**口袋资料 `IsStar` 为真的其他成员**（全站身份，不是「仅订阅房间列表」）；排除本场房主与普通粉丝。普通观众弹幕和单条礼物不转发 QQ。
-- 礼物事件静默累计鸡腿/总选记分（日志 `[NIM-live] gift in ...`）；**不**实时刷屏。列表接口 `getLiveList` 现从 `userInfo` 解析主播身份以便发现进行中的直播。
+- 直播弹幕/进出房只转发**判定为口袋成员（star）的其他用户**（排除本场房主与粉丝）。判星优先 `GetStarArchives(memberId)`（`/user/api/v1/user/star/archives`），再 fallback 用户主页接口；**负缓存**失败/非成员，避免对同一 ID 反复 404 刷日志。全站身份，不是「仅订阅房间列表」。
+- 普通观众弹幕和单条礼物**不**实时转发 QQ。
+- 礼物累计分桶（互斥）：
+  - **总选记分**：`isScore/is_score=true` 且有 `tpNum` 等 → 只加 `AnnualScore`
+  - **鸡腿**：非记分礼物，且 raw 含明确 `chickenLeg` / `totalChickenLeg` → 只加 `ChickenLegs`
+  - 仅有 `price/money` 等泛金额字段 → 两边都不加（避免「鎏光碟影」等记分礼物误入鸡腿）
+- 日志 `[NIM-live] gift in ... source=score-only|…unitChicken`；**不**实时刷屏。`getLiveList` 从 `userInfo` 解析主播以便发现进行中的直播。
 - 本场累计写入 `storage/live-sessions/<房间ID>.json`（git 忽略），重启后同 `liveId` 会 `resume session` 接着累。
-- 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知含时长、鸡腿值（>0）、总选记分（>0）、最高在线（有上报时）。
-- `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开直播间的事件，并在同时收到进出事件时计算停留时长；NIM 未广播或断线期间的事件无法补齐。
+- 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知格式：
+  `⏹️ 名字的直播已结束` + 可选行：直播时长 / 本场鸡腿值 / 本场总选记分收入 / 最高在线人数（对应值 >0 才输出）。
+- `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开**当前已连接**直播间的事件；无法跟踪未订阅房间/未连接直播间的全站行踪。
 - 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
 - 侧卡仅监听 `127.0.0.1` 的随机端口，不对局域网或公网开放。
 
@@ -248,7 +255,7 @@ npm run test:douyin-im
 ```bash
 git clone git@github.com:sjsj1849/pocket48-bot.git
 cd pocket48-bot
-git checkout v0.2.2   # 或最新 tag
+git checkout v0.2.3   # 或最新 tag
 go build -o pocket48-bot ./cmd/bot
 # 可选：管理面板二进制（内嵌 admin-ui）
 go build -o pocket48-admin ./cmd/admin
