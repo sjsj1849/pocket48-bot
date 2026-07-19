@@ -26,7 +26,8 @@
 - **QChat 实时推送**：连接成功后停止对应房间的 REST 轮询，断线自动恢复轮询
 - 回复消息、翻牌（FlipCard）消息解析
 - 直播开播通知（含封面图）
-- 礼物消息（含年度青春盛典记分礼物）
+- 礼物消息（含年度青春盛典记分礼物）；直播间礼物/鸡腿/总选记分**后台累计**，下播汇总推送
+- 本场统计落盘 `storage/live-sessions/`，Bot 重启后同场 `liveId` 可恢复累计
 - 上麦提醒
 - **自适应轮询**：有消息 300ms 快速拉取，安静期 1s 保底
 - **媒体缓存**：图片/语音/视频预下载到本地，加快 NapCat 发送
@@ -47,6 +48,8 @@
 - 开播、下播实时通知，直播结束汇总直播时长和最高在线人数
 - 多群独立订阅与作品游标，支持按群配置 `@全体成员`
 - **IM 只读转发**（可选）：私信 + 指定群的群主消息 → QQ（不回写抖音）
+- 私信标题格式：`【昵称|抖音】`；图片消息经桥接透传 URL；部分客户端卡片（如 type=110 空正文）有可读占位
+- IM 断连自愈：软告警 → 侧重启 → Bot 进程重启（systemd）→ 仍未恢复再告警
 
 ### 📕 小红书监控
 - 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
@@ -114,8 +117,10 @@ cd ../..
 
 - Bot 会使用有效的 `POCKET_TOKEN` 调用 `/im/api/v1/im/userinfo`，自动取得并保存云信 AccID/Token，通常不需要手工配置 `NIM_ACCOUNT/NIM_TOKEN`。
 - `NIM_ENABLED` 只控制直播 Chatroom；`NIM_ROOM_MESSAGE_ENABLED` 独立控制普通房间 QChat，两项可分别启用。
-- 直播弹幕固定只转发其他口袋成员发送的内容（排除本直播间主人）。普通观众弹幕和单条礼物不会转发；礼物鸡腿值、总选记分只在直播结束时汇总。
-- 直播结束优先由 NIM `CLOSELIVE` 实时事件触发，并以直播列表消失作兜底；结束通知会包含本场鸡腿值、存在时的总选记分收入，以及协议有上报时的最高在线人数。
+- 直播弹幕只转发**口袋资料 `IsStar` 为真的其他成员**（全站身份，不是「仅订阅房间列表」）；排除本场房主与普通粉丝。普通观众弹幕和单条礼物不转发 QQ。
+- 礼物事件静默累计鸡腿/总选记分（日志 `[NIM-live] gift in ...`）；**不**实时刷屏。列表接口 `getLiveList` 现从 `userInfo` 解析主播身份以便发现进行中的直播。
+- 本场累计写入 `storage/live-sessions/<房间ID>.json`（git 忽略），重启后同 `liveId` 会 `resume session` 接着累。
+- 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知含时长、鸡腿值（>0）、总选记分（>0）、最高在线（有上报时）。
 - `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开直播间的事件，并在同时收到进出事件时计算停留时长；NIM 未广播或断线期间的事件无法补齐。
 - 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
 - 侧卡仅监听 `127.0.0.1` 的随机端口，不对局域网或公网开放。
@@ -196,7 +201,8 @@ cd ../..
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
 - 需要监控的账号通过 `DOUYIN_SUBSCRIPTIONS` 或 `bot douyin add` 手动维护。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
-- 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群。
+- 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群；QQ 文案标题为 `【昵称|抖音】`（不再写「抖音私信」）。
+- IM WebSocket 长时间断开时：先告警，约 2 分钟重启浏览器侧车，约 5 分钟退出进程由 systemd 拉起 Bot，约 8 分钟仍未恢复再告警（有冷却，避免刷屏）。
 - 抖音 IM 模块没有创建会话、回复或发送消息的实现，也不会向抖音群或私聊主动发消息。首次启用只会建立当前消息基线，不转发历史消息。
 
 可在已经登录的机器上执行只读联调（只输出群名、群号和特别关注数量）：
@@ -225,7 +231,7 @@ npm run test:douyin-im
 > - 登录态与微博/抖音共用 `BROWSER_PROFILE_DIR`，**按账号凭据保护**，勿提交 Git。
 > - 风控：建议轮询 ≥60 秒；程序强制最低 30 秒，并串行访问账号。
 
-- 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；保存后 Bot 会安全重启。
+- 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；订阅与轮询等多数字段热重载，总开关等标「需重启」的项仍需重启 Bot。
 - 命令：`bot xiaohongshu add <个人主页链接|内部 user_id> [at_all]` 等，见下方命令表。
 - 首次扫描只记最新帖为基线，不转发历史；之后按发布时间推送图文/视频、标题、封面和链接。
 - `bot xiaohongshu login` 把登录二维码私聊给管理员。
@@ -235,41 +241,46 @@ npm run test:douyin-im
 
 ### 1. 下载或编译
 
-**方式一：下载 Release（推荐）**
+**方式一：从源码编译（推荐运维机）**
 
-从 [Releases](https://github.com/sjsj1849/pocket48-bot/releases) 下载对应平台的压缩包：
+需要 Go 1.22+（见 `go.mod`）。在**目标机器同架构**上编译最省事：
+
+```bash
+git clone git@github.com:sjsj1849/pocket48-bot.git
+cd pocket48-bot
+git checkout v0.2.2   # 或最新 tag
+go build -o pocket48-bot ./cmd/bot
+# 可选：管理面板二进制（内嵌 admin-ui）
+go build -o pocket48-admin ./cmd/admin
+./pocket48-bot
+```
+
+启用 NIM / 浏览器侧卡时还需在对应目录 `npm ci`（见上文侧卡章节），并保证 `sidecar/` 与二进制同工作目录。
+
+**方式二：下载 Release 预编译包（可选）**
+
+从 [Releases](https://github.com/sjsj1849/pocket48-bot/releases) 下载与你系统匹配的压缩包（若该版本附带了 assets）：
 
 | 你的平台 | 下载哪个 |
 | :--- | :--- |
 | Linux 服务器 (x86_64) | `pocket48-bot-*-linux-amd64.gz` |
 | Linux 服务器 (ARM) | `pocket48-bot-*-linux-arm64.gz` |
-| Windows 电脑 | `pocket48-bot-*-windows-amd64.zip` |
-| macOS Intel | `pocket48-bot-*-darwin-amd64.gz` |
-| macOS M1/M2/M3 | `pocket48-bot-*-darwin-arm64.gz` |
+| Windows | `pocket48-bot-*-windows-amd64.zip` |
+| macOS Intel / Apple Silicon | `*-darwin-amd64.gz` / `*-darwin-arm64.gz` |
 
-解压后得到一个可执行文件：
+> **为什么要分平台打包？**  
+> Go 默认编译出的是**当前机器架构的本地可执行文件**，不能像脚本一样跨系统直接跑：  
+> - `linux-amd64` 不能在 Windows / macOS 上执行  
+> - `darwin-arm64`（Apple Silicon）不能在 Intel Mac 或常见 Linux 云主机上执行  
+> 分平台包 = 用 `GOOS`/`GOARCH` 交叉编译后分别上传，方便没有 Go 环境的用户「下了就能跑」。  
+> **若你始终在服务器上 `go build`，其实只需要源码 tag，不必依赖多平台包。**  
+> 预编译包通常**不含** `node_modules`；NIM/浏览器侧卡仍需本机安装 Node 依赖。
 
 ```bash
-# Linux / macOS
+# Linux / macOS 预编译示例
 gunzip pocket48-bot-*.gz
 chmod +x pocket48-bot-*
 ./pocket48-bot-*
-```
-
-```powershell
-# Windows — 解压 zip 后双击或命令行运行
-pocket48-bot-*.exe
-```
-
-**方式二：自行编译**
-
-需要安装 Go 1.21+：
-
-```bash
-git clone git@github.com:sjsj1849/pocket48-bot.git
-cd pocket48-bot
-go build -o pocket48-bot ./cmd/bot
-./pocket48-bot
 ```
 
 ### 2. 安装 NapCat
@@ -361,7 +372,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
 | `XIAOHONGSHU_ENABLED` | 启用小红书帖子与开播提醒 |
 
-`POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交。也可用短信登录：
+`POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交（`loginType=MOBILE_PWD`）。部分账号会被官方要求「请使用手机号验证码登录」，此时密码自动登录会失败，请改用短信或手填 `POCKET_TOKEN`。也可用短信登录：
 
 ```
 bot login sms <手机号>    # 发送验证码
@@ -397,6 +408,10 @@ bot code <验证码>          # 输入验证码完成登录
 | `DOUYIN_IM_PRIVATE_ENABLED` | 将收到的抖音私信仅转发给 Bot 管理员 | `false` |
 | `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |
 | `DOUYIN_IM_GROUP_NUMBER` | 目标抖音群号（优先精确匹配） | `""` |
+| `MEDIA_DELIVERY` | 媒体发送：`local` 本机缓存后发 / `remote` 直链给 NapCat | `"local"` |
+| `WEIBO_SUPER_COUNT_DELIVERY` | 超话日报：`email`（默认）/ `qq` / `both` | `"email"` |
+| `WEIBO_SUPER_COUNT_QQ` | 日报额外 QQ（空=仅管理员） | `[]` |
+| `NIM_LIVE_DANMAKU_ENABLED` | 直播弹幕/礼物 Chatroom（需 `NIM_ENABLED`） | `true` |
 
 
 ### 5. 运行
@@ -409,9 +424,11 @@ bot code <验证码>          # 输入验证码完成登录
 ./pocket48-bot
 ```
 
-程序会自动读取同目录下的 `config.json`，启动后自动登录口袋48并开始轮询。
+程序会自动读取同目录下的 `config.json`，启动后检查口袋登录并开始监控。
 
-也可用管理面板（`cmd/admin`）在浏览器里改配置、管理各平台订阅，保存后会安全重启 Bot。
+也可用管理面板（`cmd/admin`，默认 `http://127.0.0.1:8787`）在浏览器里改配置、管理各平台订阅。多数订阅与开关保存后 **SIGHUP 热重载**；NapCat 地址/Token、口袋账号密码/Token、各平台总开关、浏览器侧卡等会标「需重启」。另有「说明」手册页与可筛选日志页。
+
+`config.json` 与 `storage/`（含浏览器 Profile、直播场次缓存、密码文件）**切勿提交 Git**。
 
 ### 6. 添加房间监控
 
