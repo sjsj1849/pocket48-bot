@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/logic"
+	"pocket48-bot/internal/pocket48"
 )
 
 // --- 口袋房间订阅 ---
@@ -17,6 +19,9 @@ type pocketRoomSub struct {
 	GroupID int64  `json:"groupId"`
 	RoomID  int64  `json:"roomId"`
 	Name    string `json:"name,omitempty"`
+	// Edit: move room/group. Old* used by PUT.
+	OldGroupID int64 `json:"oldGroupId,omitempty"`
+	OldRoomID  int64 `json:"oldRoomId,omitempty"`
 }
 
 func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +37,18 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 	switch r.Method {
 	case http.MethodGet:
 		result := make([]pocketRoomSub, 0)
+		var client *pocket48.Client
+		if cfg, err := config.LoadConfig(s.opts.ConfigPath); err == nil && strings.TrimSpace(cfg.PocketToken) != "" {
+			client = pocket48.NewClient(cfg)
+		}
 		for groupText, rooms := range subs {
 			gid, _ := strconv.ParseInt(groupText, 10, 64)
 			for _, roomID := range rooms {
-				result = append(result, pocketRoomSub{GroupID: gid, RoomID: roomID})
+				name := ""
+				if client != nil {
+					name = enrichPocketRoomName(client, roomID)
+				}
+				result = append(result, pocketRoomSub{GroupID: gid, RoomID: roomID, Name: name})
 			}
 		}
 		sort.Slice(result, func(i, j int) bool {
@@ -63,11 +76,62 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 			}
 		}
 		subs[gk] = append(subs[gk], body.RoomID)
-		if err := s.applyConfig(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "房间已添加，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "房间已添加"})
+	case http.MethodPut:
+		var body pocketRoomSub
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		oldG := body.OldGroupID
+		oldR := body.OldRoomID
+		// Allow 0 for old values (group 0 subscriptions are valid)
+		oldGSpecified := oldR > 0 || body.OldRoomID == 0
+		if !oldGSpecified || oldG <= 0 {
+			oldG = body.GroupID
+		}
+		if oldR <= 0 {
+			oldR = body.RoomID
+		}
+		if body.GroupID <= 0 || body.RoomID <= 0 || oldG <= 0 || oldR <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效的 QQ 群号与房间 ID"})
+			return
+		}
+		// remove old
+		ogk := strconv.FormatInt(oldG, 10)
+		rooms := subs[ogk]
+		next := rooms[:0]
+		for _, id := range rooms {
+			if id != oldR {
+				next = append(next, id)
+			}
+		}
+		if len(next) == 0 {
+			delete(subs, ogk)
+		} else {
+			subs[ogk] = next
+		}
+		// add new
+		ngk := strconv.FormatInt(body.GroupID, 10)
+		exists := false
+		for _, id := range subs[ngk] {
+			if id == body.RoomID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			subs[ngk] = append(subs[ngk], body.RoomID)
+		}
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "房间订阅已更新"})
 	case http.MethodDelete:
 		var body pocketRoomSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -87,11 +151,11 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 		} else {
 			subs[gk] = next
 		}
-		if err := s.applyConfig(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "房间已删除，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "房间已删除"})
 	default:
 		methodNotAllowed(w)
 	}
@@ -100,14 +164,18 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 // --- 微博 UID 订阅 ---
 
 type weiboPanelSub struct {
-	GroupID int64  `json:"groupId"`
-	UID     string `json:"uid"`
-	AtAll   bool   `json:"atAll"`
-	LastID  string `json:"lastId,omitempty"`
+	GroupID    int64  `json:"groupId"`
+	UID        string `json:"uid"`
+	Name       string `json:"name,omitempty"`
+	AtAll      bool   `json:"atAll"`
+	LastID     string `json:"lastId,omitempty"`
+	OldGroupID int64  `json:"oldGroupId,omitempty"`
+	OldUID     string `json:"oldUid,omitempty"`
 }
 
 type weiboStoredSub struct {
 	UID    string `json:"uid"`
+	Name   string `json:"name,omitempty"`
 	AtAll  bool   `json:"at_all"`
 	LastID string `json:"last_id,omitempty"`
 }
@@ -126,6 +194,8 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 	switch r.Method {
 	case http.MethodGet:
 		result := make([]weiboPanelSub, 0)
+		cookie := weiboCookieFromRaw(raw)
+		nameDirty := false
 		for groupText, group := range subs {
 			gid, _ := strconv.ParseInt(groupText, 10, 64)
 			for uid, item := range group {
@@ -136,7 +206,15 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 				if id == "" {
 					id = uid
 				}
-				result = append(result, weiboPanelSub{GroupID: gid, UID: id, AtAll: item.AtAll, LastID: item.LastID})
+				name := strings.TrimSpace(item.Name)
+				if name == "" && cookie != "" {
+					if fetched := fetchWeiboScreenName(id, cookie); fetched != "" {
+						name = fetched
+						item.Name = fetched
+						nameDirty = true
+					}
+				}
+				result = append(result, weiboPanelSub{GroupID: gid, UID: id, Name: name, AtAll: item.AtAll, LastID: item.LastID})
 			}
 		}
 		sort.Slice(result, func(i, j int) bool {
@@ -145,6 +223,10 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 			}
 			return result[i].GroupID < result[j].GroupID
 		})
+		if nameDirty {
+			// persist discovered nicknames without restart spam: write only subscriptions
+			_ = s.writeConfigNoRestart(map[string]any{"WEIBO_SUBSCRIPTIONS": subs})
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"subscriptions": result})
 	case http.MethodPost:
 		var body weiboPanelSub
@@ -167,12 +249,77 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		}
 		item.UID = body.UID
 		item.AtAll = body.AtAll
+		if n := strings.TrimSpace(body.Name); n != "" {
+			item.Name = n
+		}
 		subs[gk][body.UID] = item
-		if err := s.applyConfig(map[string]any{"WEIBO_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "微博订阅已保存，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "微博订阅已保存"})
+	case http.MethodPut:
+		var body weiboPanelSub
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		body.UID = strings.TrimSpace(body.UID)
+		oldUID := strings.TrimSpace(body.OldUID)
+		if oldUID == "" {
+			oldUID = body.UID
+		}
+		oldG := body.OldGroupID
+		// If oldUID is set and oldG is 0, it's legit (group 0 items exist, e.g. from QQ commands without specifying group).
+		// Only use new GroupID as old when oldG wasn't literally sent (both 0 and missing).
+		oldGSpecified := oldUID != "" && (body.OldGroupID > 0 || body.OldGroupID == 0)
+		if oldUID == "" {
+			oldUID = body.UID
+		}
+		if !oldGSpecified {
+			oldG = body.GroupID
+		}
+		if body.GroupID <= 0 || !regexp.MustCompile(`^\d{5,20}$`).MatchString(body.UID) || oldUID == "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号和微博 UID"})
+			return
+		}
+		ogk := strconv.FormatInt(oldG, 10)
+		var preservedLast string
+		var preservedName string
+		if g := subs[ogk]; g != nil {
+			if old := g[oldUID]; old != nil {
+				preservedLast = old.LastID
+				preservedName = old.Name
+			}
+			delete(g, oldUID)
+			if len(g) == 0 {
+				delete(subs, ogk)
+			}
+		}
+		ngk := strconv.FormatInt(body.GroupID, 10)
+		if subs[ngk] == nil {
+			subs[ngk] = map[string]*weiboStoredSub{}
+		}
+		item := subs[ngk][body.UID]
+		if item == nil {
+			item = &weiboStoredSub{UID: body.UID, LastID: preservedLast, Name: preservedName}
+		}
+		item.UID = body.UID
+		item.AtAll = body.AtAll
+		if n := strings.TrimSpace(body.Name); n != "" {
+			item.Name = n
+		} else if item.Name == "" {
+			item.Name = preservedName
+		}
+		if item.LastID == "" {
+			item.LastID = preservedLast
+		}
+		subs[ngk][body.UID] = item
+		if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUBSCRIPTIONS": subs}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "微博订阅已更新"})
 	case http.MethodDelete:
 		var body weiboPanelSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -186,11 +333,11 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 				delete(subs, gk)
 			}
 		}
-		if err := s.applyConfig(map[string]any{"WEIBO_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "微博订阅已删除，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "微博订阅已删除"})
 	default:
 		methodNotAllowed(w)
 	}
@@ -206,6 +353,8 @@ type douyinPanelSub struct {
 	Name       string `json:"name,omitempty"`
 	AtAll      bool   `json:"atAll"`
 	LiveID     string `json:"liveId,omitempty"`
+	OldGroupID int64  `json:"oldGroupId,omitempty"`
+	OldSec     string `json:"oldSecUserId,omitempty"`
 }
 
 type douyinStoredSub struct {
@@ -219,26 +368,29 @@ type douyinStoredSub struct {
 	Auto          bool   `json:"auto,omitempty"`
 }
 
+func loadDouyinSubs(encoded json.RawMessage) map[string]map[string]*douyinStoredSub {
+	subs := map[string]map[string]*douyinStoredSub{}
+	if len(encoded) == 0 {
+		return subs
+	}
+	if err := json.Unmarshal(encoded, &subs); err != nil {
+		var asInt map[int64]map[string]*douyinStoredSub
+		if err2 := json.Unmarshal(encoded, &asInt); err2 == nil {
+			for gid, g := range asInt {
+				subs[strconv.FormatInt(gid, 10)] = g
+			}
+		}
+	}
+	return subs
+}
+
 func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]json.RawMessage
 	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
-	// JSON may store group keys as strings (same as xhs) — support both via generic decode into map[string]
-	subs := map[string]map[string]*douyinStoredSub{}
-	if encoded := raw["DOUYIN_SUBSCRIPTIONS"]; len(encoded) > 0 {
-		// Try string keys first
-		if err := json.Unmarshal(encoded, &subs); err != nil {
-			// Fallback: int64 keys
-			var asInt map[int64]map[string]*douyinStoredSub
-			if err2 := json.Unmarshal(encoded, &asInt); err2 == nil {
-				for gid, g := range asInt {
-					subs[strconv.FormatInt(gid, 10)] = g
-				}
-			}
-		}
-	}
+	subs := loadDouyinSubs(raw["DOUYIN_SUBSCRIPTIONS"])
 	switch r.Method {
 	case http.MethodGet:
 		result := make([]douyinPanelSub, 0)
@@ -303,12 +455,90 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		item.ProfileURL = profile
 		item.AtAll = body.AtAll
 		item.Auto = false
+		if n := strings.TrimSpace(body.Name); n != "" {
+			item.Name = n
+		}
 		subs[gk][sec] = item
 		if err := s.applyConfig(map[string]any{"DOUYIN_ENABLED": true, "DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已保存，Bot 已重新启动", "secUserId": sec, "profileUrl": profile})
+	case http.MethodPut:
+		var body douyinPanelSub
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		oldSec := strings.TrimSpace(body.OldSec)
+		if oldSec == "" {
+			oldSec = strings.TrimSpace(body.SecUserID)
+		}
+		oldG := body.OldGroupID
+		if oldG <= 0 {
+			oldG = body.GroupID
+		}
+		if body.GroupID <= 0 || oldSec == "" || oldG <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 sec_user_id"})
+			return
+		}
+		// resolve new sec if target provided, else keep old
+		newSec := oldSec
+		newProfile := ""
+		resolveInput := strings.TrimSpace(body.Target)
+		if resolveInput == "" {
+			resolveInput = strings.TrimSpace(body.ProfileURL)
+		}
+		if resolveInput == "" {
+			resolveInput = strings.TrimSpace(body.SecUserID)
+		}
+		if resolveInput != "" && resolveInput != oldSec {
+			sec, profile, err := logic.ResolveDouyinTarget(r.Context(), resolveInput)
+			if err != nil || sec == "" {
+				msg := "无法解析抖音目标"
+				if err != nil {
+					msg = err.Error()
+				}
+				writeJSON(w, http.StatusBadRequest, apiError{Error: msg})
+				return
+			}
+			newSec = sec
+			newProfile = profile
+		}
+		ogk := strconv.FormatInt(oldG, 10)
+		var preserved *douyinStoredSub
+		if g := subs[ogk]; g != nil {
+			if old := g[oldSec]; old != nil {
+				cp := *old
+				preserved = &cp
+			}
+			delete(g, oldSec)
+			if len(g) == 0 {
+				delete(subs, ogk)
+			}
+		}
+		ngk := strconv.FormatInt(body.GroupID, 10)
+		if subs[ngk] == nil {
+			subs[ngk] = map[string]*douyinStoredSub{}
+		}
+		item := &douyinStoredSub{SecUserID: newSec}
+		if preserved != nil {
+			*item = *preserved
+			item.SecUserID = newSec
+		}
+		if newProfile != "" {
+			item.ProfileURL = newProfile
+		}
+		item.AtAll = body.AtAll
+		if n := strings.TrimSpace(body.Name); n != "" {
+			item.Name = n
+		}
+		subs[ngk][newSec] = item
+		if err := s.applyConfig(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已更新，Bot 已重新启动"})
 	case http.MethodDelete:
 		var body douyinPanelSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -331,4 +561,3 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		methodNotAllowed(w)
 	}
 }
-

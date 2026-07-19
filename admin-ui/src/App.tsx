@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Activity, Bot, LogOut, Menu, Monitor, ScrollText, Settings2, X } from 'lucide-react'
+import { Activity, BookOpen, Bot, LogOut, Menu, Monitor, ScrollText, Settings2, X } from 'lucide-react'
 import { api, APIError } from './api'
 import type { Page } from './types'
 import { Overview } from './pages/Overview'
 import { Configuration } from './pages/Configuration'
 import { BrowserSession } from './pages/BrowserSession'
 import { Logs } from './pages/Logs'
+import { Docs } from './pages/Docs'
 
 const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: '总览', icon: Activity },
   { id: 'config', label: '配置', icon: Settings2 },
+  { id: 'docs', label: '说明', icon: BookOpen },
   { id: 'browser', label: '浏览器', icon: Monitor },
   { id: 'logs', label: '日志', icon: ScrollText },
 ]
@@ -65,6 +67,18 @@ export function App() {
 
   useEffect(() => { void verify() }, [verify])
 
+  useEffect(() => {
+    const onNav = (event: Event) => {
+      const page = (event as CustomEvent<Page>).detail
+      if (page) {
+        setPage(page)
+        setDrawer(false)
+      }
+    }
+    window.addEventListener('pocket48-navigate', onNav)
+    return () => window.removeEventListener('pocket48-navigate', onNav)
+  }, [])
+
   async function logout() {
     try { await api('auth/logout', { method: 'POST' }) } finally { setAuthenticated(false) }
   }
@@ -79,7 +93,8 @@ export function App() {
 
   const content = page === 'overview' ? <Overview onNavigate={navigate} />
     : page === 'config' ? <Configuration />
-      : page === 'browser' ? <BrowserSession /> : <Logs />
+      : page === 'docs' ? <Docs />
+        : page === 'browser' ? <BrowserSession /> : <Logs />
 
   return (
     <div className="app-shell">

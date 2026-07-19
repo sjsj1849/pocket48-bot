@@ -1076,8 +1076,15 @@ async function publishDouyinIMMessage(message) {
   if (!senderName) log(`Douyin IM nickname unresolved sender_uid=${message.senderUid} sender_sec_uid=${message.senderSecUid || '-'}`);
   // Diagnostics: always log quote extraction for private type-7 replies; full dump when body unsupported or quote empty but refs present.
   const hasQuoteRef = Boolean(message.quotedText || message.quotedName || message.quotedServerMessageId || message.quotedClientMessageId);
+  const isPlaceholderMedia = (
+    (message.messageType === 27 && message.text === '[图片]' && !(message.images && message.images.length))
+    || ([5, 50002, 70002].includes(message.messageType)
+      && (message.text === '[表情]' || !message.text)
+      && !(message.images && message.images.length))
+  );
   if (
     message.text === '[暂不支持的消息]'
+    || isPlaceholderMedia
     || ![5, 7, 8, 17, 27, 77, 50002, 70002].includes(message.messageType)
     || (isPrivate && message.messageType === 7 && !message.quotedText)
   ) {
@@ -1105,6 +1112,7 @@ async function publishDouyinIMMessage(message) {
       `Douyin IM publish type=${message.messageType} convType=${message.conversationType}`
       + ` sender=${message.senderUid} name=${senderName || '-'} nick=${senderNickname || '-'} remark=${senderRemark || '-'}`
       + ` text=${String(message.text || '').slice(0, 80)}`
+      + ` images=${Array.isArray(message.images) ? message.images.length : 0}`
       + (hasQuoteRef ? ` quoted=${JSON.stringify({
         name: message.quotedName || '',
         text: String(message.quotedText || '').slice(0, 60),

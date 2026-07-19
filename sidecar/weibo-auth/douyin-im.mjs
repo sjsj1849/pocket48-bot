@@ -309,20 +309,29 @@ function parseMaybeJSON(value) {
 
 // Type 50002 / 70002 are Douyin "light interaction" stickers (续火花 / 打招呼 / 早点睡…).
 // Payload often lives in ext["a:light_interaction"] rather than content.text.
-function extractLightInteractionLabel(content, ext = {}) {
-  const bags = [
+// Some frames also carry sticker image URL(s) we can forward to QQ as real images.
+function lightInteractionBags(content, ext = {}) {
+  return [
     content,
     parseMaybeJSON(ext['a:light_interaction']),
     parseMaybeJSON(ext['a:light_interaction_mob']),
     parseMaybeJSON(ext.light_interaction),
     parseMaybeJSON(ext.light_interaction_mob),
+    parseMaybeJSON(ext['a:sticker']),
+    parseMaybeJSON(ext.sticker),
+    parseMaybeJSON(content?.sticker),
+    parseMaybeJSON(content?.emoji),
+    parseMaybeJSON(content?.emoticon),
     ext,
   ].filter(Boolean);
+}
 
+function extractLightInteractionLabel(content, ext = {}) {
+  const bags = lightInteractionBags(content, ext);
   const keys = [
     'text', 'content', 'name', 'title', 'label', 'emoji_name', 'emojiName',
     'interaction_name', 'interactionName', 'sticker_name', 'stickerName',
-    'display_name', 'displayName', 'hint', 'msg',
+    'display_name', 'displayName', 'hint', 'msg', 'desc', 'emoji_desc',
   ];
   for (const bag of bags) {
     const label = firstText(bag, keys);
@@ -333,6 +342,22 @@ function extractLightInteractionLabel(content, ext = {}) {
     return formatDouyinStickerText(label, 5) || `[${label}]`;
   }
   return '';
+}
+
+function extractStickerImageURLs(content = {}, ext = {}) {
+  const out = [];
+  for (const bag of lightInteractionBags(content, ext)) {
+    collectURLCandidates(bag, out);
+  }
+  // Also walk raw content for classic sticker shapes (url_list / static_url / animate_url).
+  collectURLCandidates(content, out);
+  const cleaned = [];
+  for (const url of out) {
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (url.startsWith('data:')) continue;
+    if (!cleaned.includes(url)) cleaned.push(url);
+  }
+  return cleaned.slice(0, 9);
 }
 
 function isLightInteractionMessage(messageType, content, ext = {}) {
@@ -456,6 +481,66 @@ function summarizeExt(ext = {}, maxEntries = 12, maxValue = 120) {
 }
 
 // Prefer human chat body from content/ext; never pick machine scene ids.
+
+// Type 27 image messages: content is JSON with url / url_list / cover etc, no text.
+// Return absolute http(s) URLs so QQ can fetch them.
+function collectURLCandidates(value, out, depth = 0) {
+  if (depth > 5 || value == null || out.length >= 9) return;
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (/^https?:\/\//i.test(s) && !out.includes(s)) {
+      // Prefer image-looking URLs; still accept generic CDN links for type 27.
+      out.push(s);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectURLCandidates(item, out, depth + 1);
+    return;
+  }
+  if (typeof value !== 'object') return;
+  // Prefer explicit image keys first.
+  const preferred = [
+    'url_list', 'urlList', 'origin_url_list', 'originUrlList',
+    'download_url_list', 'downloadUrlList', 'big_url_list', 'bigUrlList',
+    'url', 'image_url', 'imageUrl', 'resource_url', 'resourceUrl',
+    'cover_url', 'coverUrl', 'content_thumb', 'contentThumb',
+    'uri', 'src', 'large', 'origin', 'thumb', 'medium',
+  ];
+  for (const key of preferred) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      collectURLCandidates(value[key], out, depth + 1);
+    }
+  }
+  // Then walk remaining object values (skip huge binary-ish keys).
+  for (const [key, child] of Object.entries(value)) {
+    if (preferred.includes(key)) continue;
+    if (/base64|encrypt|token|ticket|hex/i.test(key)) continue;
+    collectURLCandidates(child, out, depth + 1);
+  }
+}
+
+function extractImageURLs(content = {}, ext = {}, messageType = 0) {
+  const out = [];
+  collectURLCandidates(content, out);
+  // Ext may carry image JSON blobs.
+  for (const [key, value] of Object.entries(ext || {})) {
+    if (!/image|pic|media|cover|thumb|resource|url/i.test(key)) continue;
+    const parsed = parseMaybeJSON(value);
+    collectURLCandidates(parsed || value, out);
+  }
+  // Prefer larger / original looking URLs: de-dup keep order, drop data: and non-http.
+  const cleaned = [];
+  for (const url of out) {
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (url.startsWith('data:')) continue;
+    if (!cleaned.includes(url)) cleaned.push(url);
+  }
+  // If type is image and we found nothing, still empty — caller keeps [图片].
+  if (messageType === 27 && cleaned.length === 0) return [];
+  return cleaned.slice(0, 9);
+}
+
 function extractChatBody(content = {}, ext = {}) {
   const preferredKeys = [
     'text', 'content', 'message', 'msg', 'title', 'description', 'content_title',
@@ -680,8 +765,28 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     || isDouyinControlCommand(messageType, content, ext)
     || text === 'go_to_maya_notice'
     || text === '[控制消息]';
+  // Extract image URLs for type 27 (and sticker/emoji frames when present).
+  let images = extractImageURLs(content, ext, messageType);
+  if ([5, 50002, 70002].includes(messageType) || isLightInteractionMessage(messageType, content, ext)) {
+    for (const url of extractStickerImageURLs(content, ext)) {
+      if (!images.includes(url)) images.push(url);
+    }
+    images = images.slice(0, 9);
+  }
+  if (messageType === 27) {
+    if (!text) text = '[图片]';
+    if (text === '[暂不支持的消息]') text = '[图片]';
+  }
   if (!text) {
     text = ({ 5: '[表情]', 17: '[语音]', 27: '[图片]', 50002: '[表情]', 70002: '[表情]' })[messageType] || '[暂不支持的消息]';
+  }
+  // If content carried image URLs but type was not 27, still surface them (rare).
+  if (images.length === 0 && (messageType === 27 || /url_list|cover_url|image_url|static_url|animate_url/i.test(JSON.stringify(content || {}).slice(0, 500)))) {
+    images = extractImageURLs(content, ext, messageType);
+  }
+  // When sticker only has image, keep a short caption.
+  if (!text && images.length > 0 && [5, 27, 50002, 70002].includes(messageType)) {
+    text = messageType === 27 ? '[图片]' : '[表情]';
   }
   const contentKeyList = Object.keys(content || {});
   const rawRuns = (!contentParseOk && contentBytes)
@@ -717,6 +822,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     extSummary: summarizeExt(ext),
     text,
     link,
+    images,
   };
 }
 

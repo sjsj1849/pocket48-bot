@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"pocket48-bot/internal/napcat"
 )
 
 func TestUnseenDouyinPosts(t *testing.T) {
@@ -114,11 +116,11 @@ func TestResolveDouyinSenderLabels(t *testing.T) {
 		SenderRemark:   "唐欣怡",
 		SenderName:     "唐欣怡",
 	})
-	// Title box uses 抖音昵称; body line keeps 名（备注）
+	// Title box uses 抖音昵称; body line keeps 名(备注)
 	if box != "葡萄吞十七" {
 		t.Fatalf("box=%q", box)
 	}
-	if line != "葡萄吞十七（唐欣怡）" {
+	if line != "葡萄吞十七(唐欣怡)" {
 		t.Fatalf("line=%q", line)
 	}
 	// no remark → both use nickname
@@ -130,34 +132,34 @@ func TestResolveDouyinSenderLabels(t *testing.T) {
 	if got := formatDouyinNamePair("胡晓慧", "胡晓慧"); got != "胡晓慧" {
 		t.Fatalf("equal=%q", got)
 	}
-	// nick "胡晓慧（小包）" + remark "胡晓慧" → 正文「小包（胡晓慧）」；标题框用昵称
+	// nick "胡晓慧（小包）" + remark "胡晓慧" → 正文「小包(胡晓慧)」；标题框用昵称
 	box, line = resolveDouyinSenderLabels(douyinBrowserEvent{
 		SenderNickname: "胡晓慧（小包）",
 		SenderRemark:   "胡晓慧",
 	})
-	if box != "胡晓慧（小包）" || line != "小包（胡晓慧）" {
+	if box != "胡晓慧（小包）" || line != "小包(胡晓慧)" {
 		t.Fatalf("huxiaohui box=%q line=%q", box, line)
 	}
 	// reverse containment (remark longer)
-	if got := formatDouyinNamePair("胡晓慧", "胡晓慧（小包）"); got != "胡晓慧（小包）" {
+	if got := formatDouyinNamePair("胡晓慧", "胡晓慧（小包）"); got != "胡晓慧(小包)" {
 		t.Fatalf("reverse containment=%q", got)
 	}
-	// already "小名（备注）"
-	if got := formatDouyinNamePair("小包（胡晓慧）", "胡晓慧"); got != "小包（胡晓慧）" {
+	// already "小名(备注)" / Chinese source normalized
+	if got := formatDouyinNamePair("小包（胡晓慧）", "胡晓慧"); got != "小包(胡晓慧)" {
 		t.Fatalf("already ordered=%q", got)
 	}
 }
 
 func TestFormatDouyinPrivateNotification(t *testing.T) {
-	got := formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七（唐欣怡）", "消息正文", "2026-07-17 10:00:00")
-	want := "【葡萄吞十七|抖音私信】\n葡萄吞十七（唐欣怡）：消息正文\n2026-07-17 10:00:00"
+	got := formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七(唐欣怡)", "消息正文", "2026-07-17 10:00:00")
+	want := "【葡萄吞十七|抖音私信】\n葡萄吞十七(唐欣怡)：消息正文\n2026-07-17 10:00:00"
 	if got != want {
 		t.Fatalf("notification=%q", got)
 	}
 	// reply stack (quote is self share card)
-	replyBody := formatDouyinReplyText("葡萄吞十七（唐欣怡）", "并排呀", "我", "[分享图文]")
-	got = formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七（唐欣怡）", replyBody, "2026-07-19 08:42:02")
-	want = "【葡萄吞十七|抖音私信】\n我：[分享图文]\n葡萄吞十七（唐欣怡）：并排呀\n2026-07-19 08:42:02"
+	replyBody := formatDouyinReplyText("葡萄吞十七(唐欣怡)", "并排呀", "我", "[分享图文]")
+	got = formatDouyinPrivateNotification("葡萄吞十七", "葡萄吞十七(唐欣怡)", replyBody, "2026-07-19 08:42:02")
+	want = "【葡萄吞十七|抖音私信】\n我：[分享图文]\n葡萄吞十七(唐欣怡)：并排呀\n2026-07-19 08:42:02"
 	if got != want {
 		t.Fatalf("reply notification=%q", got)
 	}
@@ -169,8 +171,8 @@ func TestFormatDouyinReplyText(t *testing.T) {
 		t.Fatalf("reply=%q", got)
 	}
 	// quoted is self
-	got = formatDouyinReplyText("葡萄吞十七（唐欣怡）", "诱惑你快点去看小肥发了啥", "我", "我发的内容")
-	if got != "我：我发的内容\n葡萄吞十七（唐欣怡）：诱惑你快点去看小肥发了啥" {
+	got = formatDouyinReplyText("葡萄吞十七(唐欣怡)", "诱惑你快点去看小肥发了啥", "我", "我发的内容")
+	if got != "我：我发的内容\n葡萄吞十七(唐欣怡)：诱惑你快点去看小肥发了啥" {
 		t.Fatalf("self-quote reply=%q", got)
 	}
 }
@@ -202,13 +204,35 @@ func TestResolveDouyinWorksDisplayName(t *testing.T) {
 	if got := resolveDouyinWorksTitleNick("胡晓慧（小包）", "胡晓慧"); got != "胡晓慧（小包）" {
 		t.Fatalf("title nick=%q", got)
 	}
-	if got := formatDouyinNamePair("胡晓慧（小包）", "胡晓慧"); got != "小包（胡晓慧）" {
+	if got := formatDouyinNamePair("胡晓慧（小包）", "胡晓慧"); got != "小包(胡晓慧)" {
 		t.Fatalf("body pair=%q", got)
 	}
-	if got := formatDouyinNamePair("一盆蘸酱菜", "卢天惠"); got != "一盆蘸酱菜（卢天惠）" {
+	if got := formatDouyinNamePair("一盆蘸酱菜", "卢天惠"); got != "一盆蘸酱菜(卢天惠)" {
 		t.Fatalf("yipen pair=%q", got)
 	}
 	if got := formatDouyinNamePair("小狼hoho", "小狼hoho"); got != "小狼hoho" {
 		t.Fatalf("equal pair=%q", got)
+	}
+}
+
+func TestAppendTextWithQQFacesDouyinEmoji(t *testing.T) {
+	// Douyin uses [尬笑]; QQ classic name is 尴尬 — alias should expand to face.
+	segs := appendTextWithQQFaces(nil, "谢谢其实我真觉得明显[尬笑]")
+	if len(segs) < 2 {
+		t.Fatalf("want text+face, got %d segs: %#v", len(segs), segs)
+	}
+	// last should be face id 10
+	last, ok := segs[len(segs)-1].(napcat.MessageSegment)
+	if !ok || last.Type != "face" || last.Data["id"] != "10" {
+		t.Fatalf("last segment=%#v", segs[len(segs)-1])
+	}
+	first, ok := segs[0].(napcat.MessageSegment)
+	if !ok || first.Type != "text" || first.Data["text"] != "谢谢其实我真觉得明显" {
+		t.Fatalf("first segment=%#v", segs[0])
+	}
+	// unknown bracket stays text
+	segs = appendTextWithQQFaces(nil, "hello[未知表情]world")
+	if len(segs) != 1 {
+		t.Fatalf("unknown should stay single text, got %#v", segs)
 	}
 }

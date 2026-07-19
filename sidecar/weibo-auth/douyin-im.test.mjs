@@ -387,3 +387,69 @@ test('recovers chat text from alternate protobuf field when field 8 is empty', (
   assert.ok(Array.isArray(decoded.fieldHits));
   assert.ok(decoded.fieldHits.some((h) => h.includes('这是要干嘛')));
 });
+
+test('decodes type 27 image messages with url_list', () => {
+  const content = JSON.stringify({
+    url_list: [
+      'https://p3-im.byteimg.com/img/example~tplv-obj.jpeg',
+      'https://p9-im.byteimg.com/img/example~tplv-obj.jpeg',
+    ],
+    width: 1080,
+    height: 1440,
+  });
+  const message = [...field(1, 'group-conv'), ...intField(2, 2), ...intField(3, 27), ...intField(6, 27), ...intField(7, 12345), ...field(8, content)];
+  const notify = [...field(2, 'group-conv'), ...intField(3, 2), ...field(5, message)];
+  const frame = [...field(7, 'pb'), ...field(8, field(6, field(500, notify)))];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 27);
+  assert.equal(decoded.text, '[图片]');
+  assert.deepEqual(decoded.images, [
+    'https://p3-im.byteimg.com/img/example~tplv-obj.jpeg',
+    'https://p9-im.byteimg.com/img/example~tplv-obj.jpeg',
+  ]);
+});
+
+test('type 27 without urls still falls back to [图片]', () => {
+  const content = JSON.stringify({ width: 1, height: 1 });
+  const message = [...field(1, 'group-conv'), ...intField(2, 2), ...intField(3, 28), ...intField(6, 27), ...intField(7, 12345), ...field(8, content)];
+  const notify = [...field(2, 'group-conv'), ...intField(3, 2), ...field(5, message)];
+  const frame = [...field(7, 'pb'), ...field(8, field(6, field(500, notify)))];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.text, '[图片]');
+  assert.deepEqual(decoded.images || [], []);
+});
+
+test('light interaction sticker with image url_list forwards images', () => {
+  const content = JSON.stringify({});
+  const light = JSON.stringify({
+    name: '比心',
+    text: '比心',
+    url_list: ['https://p3-emoticon.byteimg.com/sticker/heart.png'],
+    static_url: 'https://p3-emoticon.byteimg.com/sticker/heart.png',
+  });
+  const message = [
+    ...field(1, '7660087481085248037'),
+    ...intField(2, 2n),
+    ...field(3, 'msg-sticker-img'),
+    ...field(4, '1'),
+    ...field(5, 'short-1'),
+    ...intField(6, 50002n),
+    ...field(7, '1643123816276426'),
+    ...field(8, content),
+    ...field(9, mapEntry('a:light_interaction', light)),
+    ...intField(10, 1784302422000n),
+  ];
+  const notify = [...field(2, '7660087481085248037'), ...intField(3, 2n), ...field(5, message)];
+  const body = field(500, notify);
+  const payload = field(6, body);
+  const frame = [
+    ...field(6, 'gzip'),
+    ...field(7, 'pb'),
+    ...field(8, gzipSync(Buffer.from(payload))),
+  ];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 50002);
+  assert.equal(decoded.text, '[比心]');
+  assert.ok(decoded.images.includes('https://p3-emoticon.byteimg.com/sticker/heart.png'));
+});
+

@@ -450,6 +450,8 @@ func normalizeContainerID(uid, containerID string) string {
 	return canonical
 }
 
+
+// Reconfigure replaces all monitored weibo subscriptions with the new set.
 func (m *WeiboMonitor) AddConfig(groupID int64, uid string, atAll bool, lastID string, onNew func(string, string)) error {
 	config := &WeiboConfig{
 		GroupID:    groupID,

@@ -27,6 +27,8 @@ type xiaohongshuPanelSubscription struct {
 	LastNoteTime    int64  `json:"lastNoteTime,omitempty"`
 	LiveInitialized bool   `json:"liveInitialized,omitempty"`
 	LiveActive      bool   `json:"liveActive,omitempty"`
+	OldGroupID      int64  `json:"oldGroupId,omitempty"`
+	OldUserID       string `json:"oldUserId,omitempty"`
 }
 
 type xiaohongshuStoredSubscription struct {
@@ -141,11 +143,80 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 			item.ProfileURL = "https://www.xiaohongshu.com/user/profile/" + body.UserID
 		}
 		subs[groupKey][body.UserID] = item
-		if err := s.applyConfig(map[string]any{"XIAOHONGSHU_ENABLED": true, "XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"XIAOHONGSHU_ENABLED": true, "XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "订阅已保存，Bot 已重新启动", "userId": body.UserID, "profileUrl": body.ProfileURL})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "订阅已保存", "userId": body.UserID, "profileUrl": body.ProfileURL})
+	case http.MethodPut:
+		var body xiaohongshuPanelSubscription
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		oldUser := strings.TrimSpace(body.OldUserID)
+		if oldUser == "" {
+			oldUser = strings.TrimSpace(body.UserID)
+		}
+		oldG := body.OldGroupID
+		if oldG <= 0 {
+			oldG = body.GroupID
+		}
+		if body.GroupID <= 0 || oldUser == "" || oldG <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 user_id"})
+			return
+		}
+		newUser := oldUser
+		newProfile := ""
+		resolveInput := strings.TrimSpace(body.Target)
+		if resolveInput == "" {
+			resolveInput = strings.TrimSpace(body.ProfileURL)
+		}
+		if resolveInput == "" {
+			resolveInput = strings.TrimSpace(body.UserID)
+		}
+		if resolveInput != "" && resolveInput != oldUser {
+			uid, profile, err := logic.ResolveXiaohongshuTarget(r.Context(), resolveInput)
+			if err == nil && xiaohongshuPanelUserIDPattern.MatchString(uid) {
+				newUser, newProfile = uid, profile
+			} else if match := xiaohongshuPanelProfilePattern.FindStringSubmatch(resolveInput); len(match) == 2 {
+				newUser, newProfile = match[1], resolveInput
+			}
+		}
+		ogk := strconv.FormatInt(oldG, 10)
+		var preserved *xiaohongshuStoredSubscription
+		if g := subs[ogk]; g != nil {
+			if old := g[oldUser]; old != nil {
+				cp := *old
+				preserved = &cp
+			}
+			delete(g, oldUser)
+			if len(g) == 0 {
+				delete(subs, ogk)
+			}
+		}
+		ngk := strconv.FormatInt(body.GroupID, 10)
+		if subs[ngk] == nil {
+			subs[ngk] = make(map[string]*xiaohongshuStoredSubscription)
+		}
+		item := &xiaohongshuStoredSubscription{UserID: newUser}
+		if preserved != nil {
+			*item = *preserved
+			item.UserID = newUser
+		}
+		if newProfile != "" {
+			item.ProfileURL = newProfile
+		}
+		item.AtAll = body.AtAll
+		if n := strings.TrimSpace(body.Name); n != "" {
+			item.Name = n
+		}
+		subs[ngk][newUser] = item
+		if err := s.writeConfigAndReloadBot(map[string]any{"XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "订阅已更新"})
 	case http.MethodDelete:
 		var body xiaohongshuPanelSubscription
 		if err := decodeJSON(r, &body); err != nil {
@@ -159,11 +230,11 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 				delete(subs, groupKey)
 			}
 		}
-		if err := s.applyConfig(map[string]any{"XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "订阅已删除，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "订阅已删除"})
 	default:
 		methodNotAllowed(w)
 	}

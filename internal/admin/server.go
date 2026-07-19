@@ -232,6 +232,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleWeiboSubscriptions(w, r)
 	case "/api/pocket/rooms":
 		s.handlePocketRoomSubscriptions(w, r)
+	case "/api/pocket/search":
+		s.handlePocketRoomSearch(w, r)
+	case "/api/weibo/super-count/topics":
+		s.handleWeiboSuperCountTopics(w, r)
+	case "/api/weibo/super-sign/topics":
+		s.handleWeiboSuperSignTopics(w, r)
 	case "/api/service/restart":
 		s.handleRestart(w, r)
 	case "/api/browser/status":

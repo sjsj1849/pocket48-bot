@@ -28,6 +28,32 @@ func IsAuthorizationExpired(err error) bool {
 	return ok && apiErr.Status == 401003
 }
 
+// IsInconclusiveTokenCheck reports probe failures that do not prove the token is dead.
+// CheckToken hits a dummy channel; Pocket often answers "频道不存在" even with a valid token.
+func IsInconclusiveTokenCheck(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		return false
+	}
+	msg := strings.TrimSpace(apiErr.Message)
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "频道不存在") ||
+		strings.Contains(strings.ToLower(msg), "channel not") ||
+		strings.Contains(msg, "channelId")
+}
+
+// IsPasswordLoginSMSRequired is true when the server rejects MOBILE_PWD and demands SMS.
+func IsPasswordLoginSMSRequired(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		return strings.Contains(err.Error(), "请使用手机号验证码登录")
+	}
+	return strings.Contains(apiErr.Message, "请使用手机号验证码登录") ||
+		strings.Contains(apiErr.Message, "验证码登录")
+}
+
 // MessageType represents the type of a Pocket48 message
 type MessageType string
 
@@ -60,6 +86,7 @@ type RoomInfo struct {
 	ChannelID   int64  `json:"channelId"`
 	StarID      int64  `json:"-"` // Set separately
 	BgImg       string `json:"-"` // Set separately
+	IsLiveRoom  bool   // Set by caller; true if original channel type is live/直播
 }
 
 // User represents a Pocket48 user

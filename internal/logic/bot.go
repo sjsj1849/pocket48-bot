@@ -39,6 +39,8 @@ var qqFaceNameToID = map[string]string{
 	"睡":   "8",
 	"大哭":  "9",
 	"尴尬":  "10",
+	"尬笑":  "10",
+	"捂脸":  "10",
 	"发怒":  "11",
 	"调皮":  "12",
 	"呲牙":  "13",
@@ -55,6 +57,7 @@ var qqFaceNameToID = map[string]string{
 	"困":   "25",
 	"惊恐":  "26",
 	"流汗":  "27",
+	"汗":   "27",
 	"憨笑":  "28",
 	"悠闲":  "29",
 	"奋斗":  "30",
@@ -150,16 +153,57 @@ func (b *Bot) notifyAdmins(msg string) {
 
 // notifyAdminsQQ sends non-alert notices to admin QQ (startup/shutdown, reports, private-style status).
 func (b *Bot) notifyAdminsQQ(msg string) {
+	b.notifyQQUsers(msg, b.collectAdminRecipients()...)
+}
+
+// notifyQQUsers sends a private QQ message to the given user IDs (deduped, skips 0).
+func (b *Bot) notifyQQUsers(msg string, uids ...int64) {
 	msg = strings.TrimSpace(msg)
-	if msg == "" {
+	if msg == "" || b == nil || b.napcat == nil {
 		return
 	}
-	for _, uid := range b.collectAdminRecipients() {
+	seen := make(map[int64]struct{}, len(uids))
+	for _, uid := range uids {
 		if uid == 0 {
 			continue
 		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
 		b.napcat.SendPrivateMessage(uid, napcat.TextSegment(msg))
 	}
+}
+
+// collectWeiboSuperCountQQRecipients returns admin QQ plus optional WEIBO_SUPER_COUNT_QQ extras.
+func (b *Bot) collectWeiboSuperCountQQRecipients() []int64 {
+	out := b.collectAdminRecipients()
+	if b == nil || b.cfg == nil {
+		return out
+	}
+	extra := strings.FieldsFunc(b.cfg.WeiboSuperCountQQ, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '	' || r == ';' || r == '|'
+	})
+	seen := make(map[int64]struct{}, len(out))
+	for _, uid := range out {
+		seen[uid] = struct{}{}
+	}
+	for _, raw := range extra {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		uid, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || uid == 0 {
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	return out
 }
 
 func truncateForLog(s string, max int) string {
@@ -580,7 +624,8 @@ type Bot struct {
 	roomRealtimeTails      map[int64]chan struct{}
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
-	lastWeiboAuthErrorAt   time.Time
+	lastWeiboAuthErrorAt     time.Time
+	lastWeiboAuthRestartAt  time.Time
 	weiboAutoSignMu        sync.Mutex
 	mu                     sync.RWMutex
 
@@ -751,6 +796,86 @@ func (b *Bot) getCachedRoomInfo(roomID int64) (*pocket48.RoomInfo, error) {
 	return info, nil
 }
 
+
+
+
+
+// reloadSubscriptions re-reads config.json and hot-applies fields that do not need a process restart.
+// Subscription maps, report delivery, email/SMTP, poll intervals, and similar switches update here.
+// NapCat URL/token, platform master switches, NIM/browser sidecar lifecycle still need full restart.
+func (b *Bot) reloadSubscriptions() {
+	cfg, err := config.LoadConfig(b.cfg.ConfigPath())
+	if err != nil {
+		b.LogInfo("热重载失败: %v", err)
+		return
+	}
+
+	// Subscriptions (monitors read maps dynamically / next cycle)
+	b.cfg.WeiboSubscriptions = cfg.WeiboSubscriptions
+	b.cfg.GroupSubscriptions = cfg.GroupSubscriptions
+	b.cfg.DouyinSubscriptions = cfg.DouyinSubscriptions
+	b.cfg.XiaohongshuSubscriptions = cfg.XiaohongshuSubscriptions
+	b.cfg.WeiboSuperPostSubscriptions = cfg.WeiboSuperPostSubscriptions
+	b.cfg.WeiboSuperTopics = cfg.WeiboSuperTopics
+	b.cfg.WeiboSuperCountTopics = cfg.WeiboSuperCountTopics
+	b.cfg.WeiboSuperCountGroups = cfg.WeiboSuperCountGroups
+
+	// Bot / alert / report (no process spawn)
+	b.cfg.BoundGroupID = cfg.BoundGroupID
+	b.cfg.CommandPrefix = cfg.CommandPrefix
+	b.cfg.DisableGroupCommands = cfg.DisableGroupCommands
+	b.cfg.MediaDelivery = cfg.MediaDelivery
+	b.cfg.AdminQQ = cfg.AdminQQ
+	b.cfg.SuperAdmin = cfg.SuperAdmin
+	b.cfg.AdminPanelURL = cfg.AdminPanelURL
+	b.cfg.AlertEmailEnabled = cfg.AlertEmailEnabled
+	b.cfg.AlertEmailTo = cfg.AlertEmailTo
+	b.cfg.AlertEmailFrom = cfg.AlertEmailFrom
+	b.cfg.AlertEmailCooldownMinutes = cfg.AlertEmailCooldownMinutes
+	b.cfg.AlertEmailSMTPHost = cfg.AlertEmailSMTPHost
+	b.cfg.AlertEmailSMTPPort = cfg.AlertEmailSMTPPort
+	b.cfg.AlertEmailSMTPUser = cfg.AlertEmailSMTPUser
+	b.cfg.AlertEmailSMTPPassword = cfg.AlertEmailSMTPPassword
+
+	// Weibo day-to-day toggles + cookies + report delivery
+	b.cfg.WeiboCookie = cfg.WeiboCookie
+	b.cfg.WeiboMWeiboCookie = cfg.WeiboMWeiboCookie
+	b.cfg.WeiboBrowserRefreshMinutes = cfg.WeiboBrowserRefreshMinutes
+	b.cfg.WeiboSuperAutoEnabled = cfg.WeiboSuperAutoEnabled
+	b.cfg.WeiboSuperCountEnabled = cfg.WeiboSuperCountEnabled
+	b.cfg.WeiboSuperCountDelivery = cfg.WeiboSuperCountDelivery
+	b.cfg.WeiboSuperCountQQ = cfg.WeiboSuperCountQQ
+
+	// Douyin / 小红书 poll + IM routing (not master enable)
+	b.cfg.DouyinPollSeconds = cfg.DouyinPollSeconds
+	b.cfg.DouyinIMEnabled = cfg.DouyinIMEnabled
+	b.cfg.DouyinIMPrivateEnabled = cfg.DouyinIMPrivateEnabled
+	b.cfg.DouyinIMGroupName = cfg.DouyinIMGroupName
+	b.cfg.DouyinIMGroupNumber = cfg.DouyinIMGroupNumber
+	b.cfg.XiaohongshuPollSeconds = cfg.XiaohongshuPollSeconds
+	b.cfg.PollingInterval = cfg.PollingInterval
+
+	// Pocket / NIM feature flags (read from b.cfg on each message / poll cycle)
+	b.cfg.LiveMonitoring = cfg.LiveMonitoring
+	b.cfg.NIMEnabled = cfg.NIMEnabled
+	b.cfg.NIMRoomMessageEnabled = cfg.NIMRoomMessageEnabled
+	b.cfg.NIMRoomMessagePollFallback = cfg.NIMRoomMessagePollFallback
+	b.cfg.NIMLiveDanmakuEnabled = cfg.NIMLiveDanmakuEnabled
+	b.cfg.NIMViewerEventEnabled = cfg.NIMViewerEventEnabled
+
+	// Push cookies into weibo monitor if present
+	if b.weiboMonitor != nil {
+		if strings.TrimSpace(cfg.WeiboCookie) != "" {
+			b.weiboMonitor.SetCookie(cfg.WeiboCookie)
+		}
+		if strings.TrimSpace(cfg.WeiboMWeiboCookie) != "" {
+			b.weiboMonitor.SetMWeiboCookie(cfg.WeiboMWeiboCookie)
+		}
+	}
+
+	b.LogInfo("热重载完成：订阅与可热更新配置已同步")
+}
+
 func (b *Bot) Start() error {
 	// Connect to NapCat
 	if err := b.napcat.Connect(); err != nil {
@@ -772,8 +897,14 @@ func (b *Bot) Start() error {
 			b.LogInfo("Pocket48 (Token Mode) logged in successfully")
 			b.clearPocketAuthExpired()
 			b.refreshNIMCredentials()
+		} else if pocket48.IsInconclusiveTokenCheck(err) {
+			// Dummy channel probe often returns "频道不存在"; keep token and continue.
+			b.LogInfo("Pocket48 token check inconclusive (%v); keeping existing token", err)
+			b.clearPocketAuthExpired()
+			b.refreshNIMCredentials()
 		} else {
-			log.Printf("Token invalid or expired: %v", err)
+			// Soft line for restart noise; only true 401003 escalates via handlePocketAuthError.
+			b.LogInfo("Pocket48 token check failed: %v", err)
 			if !b.tryPocketPasswordLogin() {
 				b.handlePocketAuthError(err)
 			}
@@ -873,6 +1004,14 @@ func (b *Bot) Start() error {
 	// Graceful Shutdown Logic
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
+	// SIGHUP goroutine for config hot-reload (no restart needed)
+	go func() {
+		sighup := make(chan os.Signal, 1)
+		signal.Notify(sighup, syscall.SIGHUP)
+		for range sighup {
+			b.reloadSubscriptions()
+		}
+	}()
 
 	sig := <-stopChan
 	b.LogInfo("Received signal: %v. Shutting down...", sig)
