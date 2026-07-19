@@ -336,17 +336,18 @@ func (c *Client) GetRoomInfoByChannelID(roomID int64) (*RoomInfo, error) {
 
 	info := &content.ChannelInfo
 
-	// Fix: If ChannelName is "直播", try to find the real name via Search
+	// Detect live rooms
 	if info.ChannelName == "直播" {
-		// Attempt fallback default first
-		info.ChannelName = info.OwnerName + "的房间"
+		info.IsLiveRoom = true
+		// Rename for display: use owner name
+		info.ChannelName = info.OwnerName + "的直播"
 
-		// Try to find better name via Search
+		// Try to find better display name via Search
 		results, err := c.Search(info.OwnerName)
 		if err == nil {
 			for _, res := range results {
 				if res.ServerID == info.ServerID {
-					info.ChannelName = res.ServerName
+					info.ChannelName = res.ServerName + "的直播"
 					break
 				}
 			}

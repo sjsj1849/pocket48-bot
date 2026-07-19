@@ -712,7 +712,12 @@ func (b *Bot) tryPocketPasswordLogin() bool {
 	}
 	b.LogInfo("Trying Pocket48 password login for %s...", maskMobile(mobile))
 	if err := b.pocket.LoginWithPassword(mobile, password); err != nil {
-		log.Printf("[Pocket48] password login failed: %v", err)
+		// Server-side SMS-only policy is expected on many accounts; don't spam restart as ERROR.
+		if pocket48.IsPasswordLoginSMSRequired(err) {
+			b.LogInfo("Pocket48 password login unavailable (server requires SMS verification): %v", err)
+		} else {
+			b.LogInfo("Pocket48 password login failed: %v", err)
+		}
 		return false
 	}
 	b.clearPocketAuthExpired()

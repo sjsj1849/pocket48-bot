@@ -582,6 +582,18 @@ func (b *WeiboAuthBridge) Stop() {
 	log.Printf("[Weibo-auth] sidecar stopped")
 }
 
+// Restart kills the sidecar process and re-starts it from scratch.
+// Safe to call from any goroutine (error handler, admin API, etc.).
+func (b *WeiboAuthBridge) Restart() error {
+	b.mu.Lock()
+	wasStarted := b.started && !b.stopRun && !b.stopping
+	b.mu.Unlock()
+	if wasStarted {
+		b.Stop()
+	}
+	return b.Start()
+}
+
 func (b *Bot) startWeiboAuthBridge() {
 	if err := b.weiboAuth.Start(); err != nil {
 		log.Printf("[Browser] failed to start bridge: %v", err)
@@ -663,4 +675,25 @@ func (b *Bot) handleWeiboAuthError(err error) {
 	if shouldNotify {
 		b.notifyAdmins(fmt.Sprintf("⚠️ 微博浏览器认证侧卡异常：%v\n自动告警已进入 1 小时冷却；若持续异常，请检查侧卡日志或重启 Bot。", err))
 	}
+
+	// Auto-restart the sidecar — lighter than restarting the whole bot.
+	// Use a separate goroutine so the error handler doesn't block.
+	// Limit restart frequency: at most once per 30 seconds.
+	go func() {
+		b.mu.Lock()
+		lastRestart := b.lastWeiboAuthRestartAt
+		now := time.Now()
+		if !lastRestart.IsZero() && now.Sub(lastRestart) < 30*time.Second {
+			b.mu.Unlock()
+			return
+		}
+		b.lastWeiboAuthRestartAt = now
+		b.mu.Unlock()
+		time.Sleep(3 * time.Second)
+		if err := b.weiboAuth.Restart(); err != nil {
+			log.Printf("[Weibo-auth] auto-restart failed: %v", err)
+		} else {
+			b.LogInfo("微博认证侧车已自动重启")
+		}
+	}()
 }

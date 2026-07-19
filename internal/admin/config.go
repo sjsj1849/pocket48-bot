@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -18,9 +17,9 @@ type configKind string
 
 const (
 	kindString     configKind = "string"
-	kindSecret     configKind = "secret"
-	kindBoolean    configKind = "boolean"
 	kindInteger    configKind = "integer"
+	kindBoolean    configKind = "boolean"
+	kindSecret     configKind = "secret"
 	kindStringList configKind = "stringList"
 )
 
@@ -30,67 +29,58 @@ type configField struct {
 	Label       string     `json:"label"`
 	Description string     `json:"description"`
 	Kind        configKind `json:"kind"`
+	Configured  bool       `json:"configured,omitempty"` // for secrets
+	RestartRequired bool   `json:"restartRequired,omitempty"`
 	Value       any        `json:"value"`
-	Configured  bool       `json:"configured,omitempty"`
 }
 
-type fieldDefinition struct {
-	Group       string
-	Label       string
-	Description string
-	Kind        configKind
-}
-
-// Groups: Bot 本体 → 各平台（口袋/微博/抖音/小红书）。不暴露 headless、侧卡路径、NIM 账号等运维内部项。
-var editableConfig = map[string]fieldDefinition{
+var configFields = map[string]configField{
 	// Bot
-	"NAPCAT_WS_URL":                {"Bot", "QQ / NapCat 地址", "OneBot WebSocket，例如 ws://127.0.0.1:3001", kindString},
-	"NAPCAT_ACCESS_TOKEN":          {"Bot", "NapCat Token", "留空保持现有值", kindSecret},
-	"BOUND_GROUP_ID":               {"Bot", "默认通知群", "系统通知、抖音私信等默认转发的 QQ 群号", kindInteger},
-	"COMMAND_PREFIX":               {"Bot", "命令前缀", "群内机器人命令前缀，默认 bot", kindString},
-	"DISABLE_GROUP_COMMANDS":       {"Bot", "禁用群命令", "关闭所有群聊命令响应", kindBoolean},
-	"MEDIA_DELIVERY":               {"Bot", "媒体发送方式", "local=本机下载后发给 QQ（推荐）；remote=直链交给 NapCat 下载", kindString},
-	"ALERT_EMAIL_ENABLED":          {"Bot", "邮件告警", "仅持续异常、需人工处理时发信；可自愈/已恢复不发", kindBoolean},
-	"ALERT_EMAIL_TO":               {"Bot", "收件邮箱", "接收告警与超话日报的邮箱", kindString},
-	"ALERT_EMAIL_FROM":             {"Bot", "发件邮箱", "发件人地址（SMTP 登录或本机 sendmail 的 From）", kindString},
-	"ALERT_EMAIL_SMTP_HOST":        {"Bot", "SMTP 服务器", "例如 smtp.qq.com；Windows 必填。留空则尝试本机 sendmail（Linux）", kindString},
-	"ALERT_EMAIL_SMTP_PORT":        {"Bot", "SMTP 端口", "常用 465（SSL）或 587（STARTTLS）", kindInteger},
-	"ALERT_EMAIL_SMTP_USER":        {"Bot", "SMTP 用户名", "多数邮箱填完整邮箱地址；留空则用发件邮箱", kindString},
-	"ALERT_EMAIL_SMTP_PASSWORD":    {"Bot", "SMTP 密码/授权码", "QQ 邮箱请填授权码而非登录密码；留空保持现有值", kindSecret},
-	"ALERT_EMAIL_COOLDOWN_MINUTES": {"Bot", "告警冷却（分钟）", "同一服务重复告警的最短间隔", kindInteger},
-	"ADMIN_PANEL_URL":              {"Bot", "管理面板链接", "可选，写入告警邮件按钮；例 https://panel.example.com 留空则邮件不带按钮", kindString},
-
+	"NAPCAT_WS_URL": {"NAPCAT_WS_URL", "Bot", "NapCat WebSocket 地址", "例如 ws://localhost:3001", kindString, false, false, nil},
+	"NAPCAT_ACCESS_TOKEN": {"NAPCAT_ACCESS_TOKEN", "Bot", "NapCat 访问令牌", "留空如果不需要", kindSecret, false, false, nil},
+	"BOUND_GROUP_ID": {"BOUND_GROUP_ID", "Bot", "默认通知群号", "Bot 内部通知和未特别指定群号的订阅转发到该群", kindInteger, false, false, nil},
+	"COMMAND_PREFIX": {"COMMAND_PREFIX", "Bot", "命令前缀", "触发的命令符号", kindString, false, false, nil},
+	"DISABLE_GROUP_COMMANDS": {"DISABLE_GROUP_COMMANDS", "Bot", "禁用群聊指令", "开启后不再响应群里的手动命令", kindBoolean, false, false, nil},
+	"MEDIA_DELIVERY": {"MEDIA_DELIVERY", "Bot", "媒体发送方式", "local（本机下载转发）或 remote（直传链接）", kindString, false, false, nil},
+	"ALERT_EMAIL_ENABLED": {"ALERT_EMAIL_ENABLED", "Bot", "启用邮件告警", "当发生需要人工处理的错误时发送", kindBoolean, false, false, nil},
+	"ALERT_EMAIL_TO": {"ALERT_EMAIL_TO", "Bot", "告警收件人", "多个用逗号分隔", kindString, false, false, nil},
+	"ALERT_EMAIL_FROM": {"ALERT_EMAIL_FROM", "Bot", "发件人地址", "SMTP 发件箱", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_HOST": {"ALERT_EMAIL_SMTP_HOST", "Bot", "SMTP 服务器", "例如 smtp.gmail.com", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_PORT": {"ALERT_EMAIL_SMTP_PORT", "Bot", "SMTP 端口", "常见 587（TLS）或 465（SSL）", kindInteger, false, false, nil},
+	"ALERT_EMAIL_SMTP_USER": {"ALERT_EMAIL_SMTP_USER", "Bot", "SMTP 用户名", "邮箱完整地址", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_PASSWORD": {"ALERT_EMAIL_SMTP_PASSWORD", "Bot", "SMTP 密码", "邮箱密码或应用专用密码", kindSecret, false, false, nil},
+	"ALERT_EMAIL_COOLDOWN_MINUTES": {"ALERT_EMAIL_COOLDOWN_MINUTES", "Bot", "告警冷却时间（分钟）", "同类型告警至少间隔这么久", kindInteger, false, false, nil},
+	"ADMIN_PANEL_URL": {"ADMIN_PANEL_URL", "Bot", "面板地址（可选）", "日报等链接会用到", kindString, false, false, nil},
 	// 口袋48
-	"POCKET_USERNAME":                {"口袋48", "账号", "手机号或口袋账号", kindString},
-	"POCKET_PASSWORD":                {"口袋48", "密码", "Token 失效时用于重新登录；留空保持现有值", kindSecret},
-	"POCKET_TOKEN":                   {"口袋48", "Token", "可粘贴已有 Token；留空保持现有值", kindSecret},
-	"LIVE_MONITORING":                {"口袋48", "直播监控", "成员开播/下播通知", kindBoolean},
-	"POLLING_INTERVAL":               {"口袋48", "REST 轮询间隔", "QChat 断线或不完整时的补洞间隔（秒）", kindInteger},
-	"NIM_ENABLED":                    {"口袋48", "启用实时通道", "云信/QChat 实时事件（建议开）", kindBoolean},
-	"NIM_ROOM_MESSAGE_ENABLED":       {"口袋48", "实时房间消息", "用 QChat 收房间消息", kindBoolean},
-	"NIM_ROOM_MESSAGE_POLL_FALLBACK": {"口袋48", "REST 补洞", "实时不完整或断线时用 REST 补偿（建议开）", kindBoolean},
-	"NIM_LIVE_DANMAKU_ENABLED":       {"口袋48", "直播弹幕转发", "转发其他小偶像的弹幕", kindBoolean},
-	"NIM_VIEWER_EVENT_ENABLED":       {"口袋48", "进出房事件", "转发其他小偶像进出直播间", kindBoolean},
-
-	// 微博（Cookie 等在下方订阅区也可维护；浏览器侧卡路径不暴露）
-	"WEIBO_BROWSER_AUTH_ENABLED":    {"微博", "浏览器登录", "用面板浏览器页扫码维护 Cookie（与抖音/小红书共用）", kindBoolean},
-	"WEIBO_BROWSER_REFRESH_MINUTES": {"微博", "Cookie 刷新周期", "自动刷新间隔（分钟，最低 5）", kindInteger},
-	"WEIBO_COOKIE":                  {"微博", "weibo.com Cookie", "可手动粘贴；留空保持现有值", kindSecret},
-	"WEIBO_MWEIBO_COOKIE":           {"微博", "m.weibo Cookie", "可选；留空保持现有值", kindSecret},
-	"WEIBO_SUPER_AUTO_ENABLED":      {"微博", "超话自动签到", "每日自动超话签到", kindBoolean},
-	"WEIBO_SUPER_COUNT_ENABLED":     {"微博", "超话日报", "每日超话签到人数统计与邮件", kindBoolean},
-
+	"POCKET_USERNAME": {"POCKET_USERNAME", "口袋48", "口袋48 手机号", "登录用手机号", kindString, false, false, nil},
+	"POCKET_PASSWORD": {"POCKET_PASSWORD", "口袋48", "口袋48 密码", "登录用密码", kindSecret, false, false, nil},
+	"POCKET_TOKEN": {"POCKET_TOKEN", "口袋48", "Token（自动）", "登录成功后自动获取，留空让系统自动登录", kindSecret, false, false, nil},
+	"LIVE_MONITORING": {"LIVE_MONITORING", "口袋48", "直播监控", "监控口袋48直播状态", kindBoolean, false, false, nil},
+	"POLLING_INTERVAL": {"POLLING_INTERVAL", "口袋48", "消息轮询间隔（秒）", "口袋48实时消息轮询间隔，建议 3-5 秒", kindInteger, false, false, nil},
+	"NIM_ENABLED": {"NIM_ENABLED", "口袋48", "NIM 实时消息（IM）", "通过 NIM SDK 获取实时消息，比轮询快", kindBoolean, false, false, nil},
+	"NIM_ROOM_MESSAGE_ENABLED": {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到 QQ", kindBoolean, false, false, nil},
+	"NIM_ROOM_MESSAGE_POLL_FALLBACK": {"NIM_ROOM_MESSAGE_POLL_FALLBACK", "口袋48", "NIM 轮询兜底", "NIM 连接异常时自动切换至轮询模式", kindBoolean, false, false, nil},
+	"NIM_LIVE_DANMAKU_ENABLED": {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发直播弹幕与进出事件", kindBoolean, false, false, nil},
+	"NIM_VIEWER_EVENT_ENABLED": {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "NIM 进出事件", "粉丝进入/离开直播间事件", kindBoolean, false, false, nil},
+	// 微博
+	"WEIBO_BROWSER_AUTH_ENABLED": {"WEIBO_BROWSER_AUTH_ENABLED", "微博", "启用浏览器侧卡登录", "开启后用面板「浏览器」页扫码，自动维护微博/抖音/小红书登录态（Cookie）。推荐；比手贴 Cookie 稳", kindBoolean, false, false, nil},
+	"WEIBO_BROWSER_REFRESH_MINUTES": {"WEIBO_BROWSER_REFRESH_MINUTES", "微博", "Cookie 刷新周期", "自动刷新间隔（分钟，最低 5）", kindInteger, false, false, nil},
+	"WEIBO_COOKIE": {"WEIBO_COOKIE", "微博", "weibo.com 登录态（Cookie）", "不是微博密码。浏览器登录后自动写入的一长串会话凭证；也可从已登录的 weibo.com 开发者工具复制。留空保持现有值", kindSecret, false, false, nil},
+	"WEIBO_MWEIBO_COOKIE": {"WEIBO_MWEIBO_COOKIE", "微博", "m.weibo.cn 登录态（Cookie）", "不是密码。手机站会话凭证，用于部分接口/日报；开启浏览器登录后通常会自动同步。留空保持现有值", kindSecret, false, false, nil},
+	"WEIBO_SUPER_AUTO_ENABLED": {"WEIBO_SUPER_AUTO_ENABLED", "微博", "超话自动签到", "开关：每日对「签到列表」里的超话自动签到（数据与日报列表独立）", kindBoolean, false, false, nil},
+	"WEIBO_SUPER_COUNT_ENABLED": {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "开关：每日统计「日报列表」签到人数并邮件/QQ 推送（数据与签到列表独立）", kindBoolean, false, false, nil},
+	"WEIBO_SUPER_COUNT_DELIVERY":    {"WEIBO_SUPER_COUNT_DELIVERY", "微博", "日报发送渠道", "email=仅邮件（默认），qq=仅QQ，both=邮件+QQ", kindString, false, false, nil},
+	"WEIBO_SUPER_COUNT_QQ":          {"WEIBO_SUPER_COUNT_QQ", "微博", "日报额外 QQ 号", "仅渠道含 QQ 时生效。留空则只发给管理员；多个用逗号/空格/换行分隔", kindString, false, false, nil},
 	// 抖音
-	"DOUYIN_ENABLED":            {"抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean},
-	"DOUYIN_POLL_SECONDS":       {"抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger},
-	"DOUYIN_IM_ENABLED":         {"抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean},
-	"DOUYIN_IM_PRIVATE_ENABLED": {"抖音", "私信提醒", "私信通知到默认通知群", kindBoolean},
-	"DOUYIN_IM_GROUP_NAME":      {"抖音", "目标群名（辅助）", "仅当群号为空时用名称匹配一个抖音群；多群请优先填群号", kindString},
-	"DOUYIN_IM_GROUP_NUMBER":    {"抖音", "目标群号", "精确匹配要转发的抖音群号（推荐）", kindString},
-
+	"DOUYIN_ENABLED": {"DOUYIN_ENABLED", "抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean, false, false, nil},
+	"DOUYIN_POLL_SECONDS": {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger, false, false, nil},
+	"DOUYIN_IM_ENABLED": {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean, false, false, nil},
+	"DOUYIN_IM_PRIVATE_ENABLED": {"DOUYIN_IM_PRIVATE_ENABLED", "抖音", "私信提醒", "私信通知到默认通知群", kindBoolean, false, false, nil},
+	"DOUYIN_IM_GROUP_NAME": {"DOUYIN_IM_GROUP_NAME", "抖音", "目标群名（辅助）", "可选展示名；多群时优先用抖音回传的群名", kindString, false, false, nil},
+	"DOUYIN_IM_GROUP_NUMBER": {"DOUYIN_IM_GROUP_NUMBER", "抖音", "目标群号（可多个）", "要转发的抖音群号，多个用逗号/空格/换行分隔。与「创作者订阅」独立：那边监控作品/开播，这里监控群主发言", kindString, false, false, nil},
 	// 小红书
-	"XIAOHONGSHU_ENABLED":      {"小红书", "启用小红书", "帖子监控与可用时的开播提醒", kindBoolean},
-	"XIAOHONGSHU_POLL_SECONDS": {"小红书", "帖子轮询间隔", "秒，最低 30", kindInteger},
+	"XIAOHONGSHU_ENABLED": {"XIAOHONGSHU_ENABLED", "小红书", "启用小红书", "帖子监控与可用时的开播提醒", kindBoolean, false, false, nil},
+	"XIAOHONGSHU_POLL_SECONDS": {"XIAOHONGSHU_POLL_SECONDS", "小红书", "帖子轮询间隔", "秒，最低 30", kindInteger, false, false, nil},
 }
 
 var configGroupOrder = []string{"Bot", "口袋48", "微博", "抖音", "小红书"}
@@ -102,91 +92,93 @@ var configFieldOrder = []string{
 	"POCKET_USERNAME", "POCKET_PASSWORD", "POCKET_TOKEN", "LIVE_MONITORING", "POLLING_INTERVAL",
 	"NIM_ENABLED", "NIM_ROOM_MESSAGE_ENABLED", "NIM_ROOM_MESSAGE_POLL_FALLBACK", "NIM_LIVE_DANMAKU_ENABLED", "NIM_VIEWER_EVENT_ENABLED",
 	"WEIBO_BROWSER_AUTH_ENABLED", "WEIBO_BROWSER_REFRESH_MINUTES", "WEIBO_COOKIE", "WEIBO_MWEIBO_COOKIE",
-	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED",
+	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED", "WEIBO_SUPER_COUNT_DELIVERY", "WEIBO_SUPER_COUNT_QQ",
 	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
 	"DOUYIN_IM_GROUP_NUMBER", "DOUYIN_IM_GROUP_NAME",
 	"XIAOHONGSHU_ENABLED", "XIAOHONGSHU_POLL_SECONDS",
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.getConfig(w)
-	case http.MethodPut:
-		s.putConfig(w, r)
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func (s *Server) getConfig(w http.ResponseWriter) {
 	var raw map[string]any
 	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
-	groups := make(map[string][]configField)
-	orderIndex := map[string]int{}
-	for i, key := range configFieldOrder {
-		orderIndex[key] = i
-	}
-	for key, definition := range editableConfig {
-		value := raw[key]
-		field := configField{Key: key, Group: definition.Group, Label: definition.Label, Description: definition.Description, Kind: definition.Kind}
-		if definition.Kind == kindSecret {
-			field.Value = ""
-			field.Configured = strings.TrimSpace(fmt.Sprint(value)) != ""
-		} else {
-			field.Value = value
-		}
-		groups[definition.Group] = append(groups[definition.Group], field)
-	}
-	for _, fields := range groups {
-		sort.Slice(fields, func(i, j int) bool {
-			ai, aok := orderIndex[fields[i].Key]
-			bi, bok := orderIndex[fields[j].Key]
-			if aok && bok {
-				return ai < bi
-			}
-			return fields[i].Label < fields[j].Label
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "groupOrder": configGroupOrder})
-}
 
-func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
+	groups := make(map[string][]configField)
+	for _, name := range configGroupOrder {
+		groups[name] = []configField{}
+	}
+
+	for _, key := range configFieldOrder {
+		field := configFields[key]
+		field.Value = raw[key]
+		if field.Kind == kindSecret && raw[key] != "" && raw[key] != nil {
+			field.Configured = true
+			field.Value = ""
+		}
+		if field.Kind == kindBoolean && raw[key] == nil {
+			field.Value = false
+		}
+		field.RestartRequired = configFieldNeedsRestart(key)
+		groups[field.Group] = append(groups[field.Group], field)
+	}
+
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"groups":      groups,
+			"groupOrder":  configGroupOrder,
+		})
+		return
+	}
+
+	if r.Method != http.MethodPut {
+		methodNotAllowed(w)
+		return
+	}
+
 	var body struct {
-		Values map[string]json.RawMessage `json:"values"`
+		Values map[string]any `json:"values"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "配置请求格式无效"})
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 		return
 	}
-	if len(body.Values) == 0 {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "没有需要保存的配置"})
-		return
-	}
-	validated := make(map[string]any, len(body.Values))
-	for key, encoded := range body.Values {
-		definition, ok := editableConfig[key]
+
+	validated := make(map[string]any)
+	for key, rawValue := range body.Values {
+		field, ok := configFields[key]
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "不允许修改配置项 " + key})
-			return
-		}
-		value, err := validateConfigValue(definition.Kind, encoded)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: definition.Label + "：" + err.Error()})
-			return
-		}
-		if definition.Kind == kindSecret && value == "" {
 			continue
 		}
-		if key == "XIAOHONGSHU_POLL_SECONDS" && value.(int64) < 30 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "帖子轮询间隔：不能小于 30 秒"})
+		value, err := validateConfigValue(field.Kind, rawValue)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: fmt.Sprintf("字段 %s: %s", field.Key, err.Error())})
 			return
 		}
+		if key == "WEIBO_SUPER_COUNT_DELIVERY" {
+			mode, ok := value.(string)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: "日报发送渠道：必须是文本"})
+				return
+			}
+			mode = strings.ToLower(strings.TrimSpace(mode))
+			if mode == "" {
+				mode = "email"
+			}
+			if mode != "email" && mode != "qq" && mode != "both" {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: "日报发送渠道：只能是 email / qq / both"})
+				return
+			}
+			value = mode
+		}
 		if key == "MEDIA_DELIVERY" {
-			mode := strings.ToLower(strings.TrimSpace(value.(string)))
+			mode, ok := value.(string)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: "媒体发送方式：必须是文本"})
+				return
+			}
+			mode = strings.ToLower(strings.TrimSpace(mode))
 			if mode == "url" || mode == "direct" {
 				mode = "remote"
 			}
@@ -202,54 +194,128 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		validated[key] = value
 	}
-	if err := s.applyConfig(validated); err != nil {
+
+	// Prefer SIGHUP hot-reload; only force full restart for fields that need process restart.
+	needsRestart := false
+	for key := range validated {
+		if configFieldNeedsRestart(key) {
+			needsRestart = true
+			break
+		}
+	}
+	if needsRestart {
+		if err := s.applyConfig(validated); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "配置已保存，Bot 已重新启动（部分字段需重启）", "restarted": true, "hotReload": false})
+		return
+	}
+	if err := s.writeConfigAndReloadBot(validated); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "配置已保存，Bot 已重新启动"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "配置已保存并热重载（无需重启）", "restarted": false, "hotReload": true})
 }
 
-func validateConfigValue(kind configKind, encoded json.RawMessage) (any, error) {
+// configFieldNeedsRestart returns true when a key cannot be applied via SIGHUP alone.
+// Pocket NIM/live feature flags and poll intervals are read from b.cfg at runtime (same as bot commands),
+// so they hot-reload. Only process wiring / credential re-auth / long-lived sidecar spawn need restart.
+func configFieldNeedsRestart(key string) bool {
+	switch key {
+	// Network / process wiring
+	case "NAPCAT_WS_URL", "NAPCAT_ACCESS_TOKEN":
+		return true
+	// Pocket login credentials (token refresh path needs restart for clean re-auth)
+	case "POCKET_USERNAME", "POCKET_PASSWORD", "POCKET_TOKEN":
+		return true
+	// Browser sidecar enable (starts Playwright process)
+	case "WEIBO_BROWSER_AUTH_ENABLED":
+		return true
+	// Platform master switches that start long-lived monitors/sidecars at boot
+	case "DOUYIN_ENABLED", "XIAOHONGSHU_ENABLED":
+		return true
+	// NIM_* / LIVE_MONITORING / POLLING_INTERVAL: hot via cfg (commands already mutate LiveMonitoring)
+	default:
+		return false
+	}
+}
+
+func validateConfigValue(kind configKind, rawValue any) (any, error) {
 	switch kind {
 	case kindString, kindSecret:
-		var value string
-		if err := json.Unmarshal(encoded, &value); err != nil {
+		s, ok := rawValue.(string)
+		if !ok {
 			return nil, errors.New("必须是文本")
 		}
-		return strings.TrimSpace(value), nil
+		return strings.TrimSpace(s), nil
 	case kindBoolean:
-		var value bool
-		if err := json.Unmarshal(encoded, &value); err != nil {
+		_, ok := rawValue.(bool)
+		if !ok {
 			return nil, errors.New("必须是开关值")
 		}
-		return value, nil
+		return rawValue, nil
 	case kindInteger:
-		var value int64
-		if err := json.Unmarshal(encoded, &value); err != nil {
+		f, ok := rawValue.(float64)
+		if !ok {
 			return nil, errors.New("必须是整数")
 		}
-		if value < 0 {
+		n := int64(f)
+		if n < 0 {
 			return nil, errors.New("不能小于 0")
 		}
-		return value, nil
+		return n, nil
 	case kindStringList:
-		var value []string
-		if err := json.Unmarshal(encoded, &value); err != nil {
+		list, ok := rawValue.([]any)
+		if !ok {
 			return nil, errors.New("必须是文本列表")
 		}
-		result := make([]string, 0, len(value))
+		result := make([]string, 0, len(list))
 		seen := make(map[string]bool)
-		for _, item := range value {
-			item = strings.TrimSpace(item)
-			if item != "" && !seen[item] {
-				seen[item] = true
-				result = append(result, item)
+		for _, item := range list {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" && !seen[s] {
+				seen[s] = true
+				result = append(result, s)
 			}
 		}
 		return result, nil
 	default:
 		return nil, errors.New("未知配置类型")
 	}
+}
+
+// writeConfigNoRestart merges keys into config.json without stopping the bot.
+func (s *Server) writeConfigNoRestart(values map[string]any) error {
+	var config map[string]any
+	if err := readJSONFile(s.opts.ConfigPath, &config); err != nil {
+		return fmt.Errorf("读取配置失败: %w", err)
+	}
+	for key, value := range values {
+		config[key] = value
+	}
+	if err := writeJSONAtomic(s.opts.ConfigPath, config); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	return nil
+}
+
+// writeConfigAndReloadBot writes config.json without restart, then signals the bot to hot-reload subscriptions.
+func (s *Server) writeConfigAndReloadBot(values map[string]any) error {
+	if err := s.writeConfigNoRestart(values); err != nil {
+		return err
+	}
+	// Send SIGHUP to bot process via systemd
+	_, err := runCommand(5*time.Second, "systemctl", "kill", "-s", "HUP", botService)
+	if err != nil {
+		// Non-fatal: bot will pick up changes on next restart
+		log.Printf("signal bot for reload: %v (non-fatal)", err)
+	}
+	return nil
 }
 
 func (s *Server) applyConfig(values map[string]any) error {

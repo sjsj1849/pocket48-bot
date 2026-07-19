@@ -40,6 +40,10 @@ type Config struct {
 	WeiboSuperCountEnabled            bool                                               `json:"WEIBO_SUPER_COUNT_ENABLED"`            // Enable weibo super count feature
 	WeiboSuperCountTopics             map[string]*WeiboSuperCountTopic                   `json:"WEIBO_SUPER_COUNT_TOPICS"`             // OID -> Topic for count feature
 	WeiboSuperCountGroups             map[string]*WeiboSuperCountGroupInfo               `json:"WEIBO_SUPER_COUNT_GROUPS"`             // group_id -> group info
+	// WeiboSuperCountDelivery: email | qq | both (default both when empty)
+	WeiboSuperCountDelivery           string                                             `json:"WEIBO_SUPER_COUNT_DELIVERY,omitempty"`
+	// WeiboSuperCountQQ: extra QQ numbers (private) for daily report when delivery includes qq
+	WeiboSuperCountQQ                 string                                             `json:"WEIBO_SUPER_COUNT_QQ,omitempty"`
 	WeiboSuperCountLastPushDate       string                                             `json:"WEIBO_SUPER_COUNT_LAST_PUSH_DATE"`     // YYYY-MM-DD (Asia/Shanghai)
 	WeiboSuperCountDailySnapshots     map[string]map[string]int                          `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS"`    // YYYY-MM-DD -> OID -> SignCount
 	WeiboSuperCountDailySnapshotsV2   map[string]map[string]*WeiboSuperCountSnapshotItem `json:"WEIBO_SUPER_COUNT_DAILY_SNAPSHOTS_V2"` // YYYY-MM-DD -> OID -> SnapshotItem
@@ -87,6 +91,7 @@ type Config struct {
 
 type WeiboConfig struct {
 	UID    string `json:"uid"`
+	Name   string `json:"name,omitempty"` // screen_name / 昵称，面板展示用
 	AtAll  bool   `json:"at_all"`
 	LastID string `json:"last_id,omitempty"`
 }
@@ -327,6 +332,8 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // Save saves the current configuration back to the file
+func (c *Config) ConfigPath() string { return c.filePath }
+
 func (c *Config) Save() error {
 	data, err := json.MarshalIndent(c, "", "    ")
 	if err != nil {

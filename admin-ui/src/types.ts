@@ -1,4 +1,4 @@
-export type Page = 'overview' | 'config' | 'browser' | 'logs'
+export type Page = 'overview' | 'config' | 'docs' | 'browser' | 'logs'
 
 export interface ServiceState {
   id: string
@@ -28,4 +28,5 @@ export interface ConfigField {
   kind: 'string' | 'secret' | 'boolean' | 'integer' | 'stringList'
   value: unknown
   configured?: boolean
+  restartRequired?: boolean
 }

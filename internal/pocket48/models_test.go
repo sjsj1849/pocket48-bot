@@ -38,6 +38,24 @@ func TestIsAuthorizationExpired(t *testing.T) {
 	}
 }
 
+func TestIsInconclusiveTokenCheck(t *testing.T) {
+	if !IsInconclusiveTokenCheck(&APIError{Status: 500, Message: "频道不存在"}) {
+		t.Fatal("expected 频道不存在 to be inconclusive")
+	}
+	if IsInconclusiveTokenCheck(&APIError{Status: 401003, Message: "expired"}) {
+		t.Fatal("did not expect true auth expiry to be inconclusive")
+	}
+}
+
+func TestIsPasswordLoginSMSRequired(t *testing.T) {
+	if !IsPasswordLoginSMSRequired(&APIError{Status: 500, Message: "请使用手机号验证码登录#003"}) {
+		t.Fatal("expected SMS-required password error")
+	}
+	if IsPasswordLoginSMSRequired(&APIError{Status: 500, Message: "password wrong"}) {
+		t.Fatal("did not expect generic password error")
+	}
+}
+
 func TestAuthHeadersCanExcludeExpiredToken(t *testing.T) {
 	client := NewClient(&config.Config{PocketToken: "expired-token"})
 	if got := client.getHeaders(true)["token"]; got != "expired-token" {

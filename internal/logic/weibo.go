@@ -1778,30 +1778,42 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
 
 		// Email: ONE combined daily report with PNG attachment.
+		// QQ: keep per-group text for readability in chat.
+		// Delivery: WEIBO_SUPER_COUNT_DELIVERY = email | qq | both (default email).
+		delivery := strings.ToLower(strings.TrimSpace(b.cfg.WeiboSuperCountDelivery))
+		if delivery == "" {
+			delivery = "email"
+		}
+		wantEmail := delivery == "email" || delivery == "both"
+		wantQQ := delivery == "qq" || delivery == "both"
+
 		titleEmail := "[超话签到人数日报]"
 		reportEmail := formatWeiboSuperCountDualRanking(results, failed, titleEmail, now, signBaseline, likeBaseline, postBaseline)
-		b.sendWeiboSuperCountDailyEmail(reportEmail, titleEmail, results, failed, now, signBaseline, likeBaseline, postBaseline)
-
-		// QQ: keep per-group text for readability in chat.
-		groups := b.getWeiboSuperCountGroups()
-		if len(groups) == 0 {
-			b.notifyAdminsQQ(reportEmail)
-		} else {
-			sortedGroupIDs := make([]string, 0, len(groups))
-			for gid := range groups {
-				sortedGroupIDs = append(sortedGroupIDs, gid)
-			}
-			sort.Strings(sortedGroupIDs)
-			for _, gid := range sortedGroupIDs {
-				ginfo := groups[gid]
-				groupResults := b.filterResultsByGroup(results, gid)
-				if len(groupResults) == 0 {
-					continue
+		if wantEmail {
+			b.sendWeiboSuperCountDailyEmail(reportEmail, titleEmail, results, failed, now, signBaseline, likeBaseline, postBaseline)
+		}
+		if wantQQ {
+			qqRecipients := b.collectWeiboSuperCountQQRecipients()
+			groups := b.getWeiboSuperCountGroups()
+			if len(groups) == 0 {
+				b.notifyQQUsers(reportEmail, qqRecipients...)
+			} else {
+				sortedGroupIDs := make([]string, 0, len(groups))
+				for gid := range groups {
+					sortedGroupIDs = append(sortedGroupIDs, gid)
 				}
-				title := fmt.Sprintf("[超话签到人数日报 - %s]", ginfo.Name)
-				groupFailed := failed // show failures once per group text (cheap)
-				report := formatWeiboSuperCountDualRanking(groupResults, groupFailed, title, now, signBaseline, likeBaseline, postBaseline)
-				b.notifyAdminsQQ(report)
+				sort.Strings(sortedGroupIDs)
+				for _, gid := range sortedGroupIDs {
+					ginfo := groups[gid]
+					groupResults := b.filterResultsByGroup(results, gid)
+					if len(groupResults) == 0 {
+						continue
+					}
+					title := fmt.Sprintf("[超话签到人数日报 - %s]", ginfo.Name)
+					groupFailed := failed // show failures once per group text (cheap)
+					report := formatWeiboSuperCountDualRanking(groupResults, groupFailed, title, now, signBaseline, likeBaseline, postBaseline)
+					b.notifyQQUsers(report, qqRecipients...)
+				}
 			}
 		}
 

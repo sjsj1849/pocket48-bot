@@ -200,6 +200,12 @@ func buildServiceStates(lines []string) []serviceState {
 			setLatest("napcat", "healthy", "运行中", "OneBot/llbot 会话已恢复")
 		case strings.Contains(line, "[Weibo-auth] status=healthy"):
 			setLatest("weibo", "healthy", "已认证", "认证状态已刷新")
+		// 抖音健康以作品监控 API 为准：能 HTTP 扫作品且 cookie=yes 即健康。
+		// status=healthy/ready 仍识别，但会被高频 works scan 日志挤出 5000 行窗口。
+		case strings.Contains(line, "douyin works scan via HTTP") && strings.Contains(line, "cookie=yes"):
+			setLatest("douyin", "healthy", "运行中", "作品监控 API 正常（HTTP + Cookie）")
+		case strings.Contains(line, "douyin works scan via HTTP") && strings.Contains(line, "cookie=no"):
+			setLatest("douyin", "attention", "待登录", "作品扫描无 Cookie，需浏览器登录")
 		case strings.Contains(line, "[Douyin] status=healthy"):
 			setLatest("douyin", "healthy", "已登录", "浏览器账号登录态有效")
 		case strings.Contains(line, "[Douyin] status=ready"):

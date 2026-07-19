@@ -1,6 +1,9 @@
 package admin
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCPUUsageFromDelta(t *testing.T) {
 	// 100 total jiffies, 25 idle → 75% used
@@ -103,6 +106,60 @@ func TestDouyinLoginErrorIsDown(t *testing.T) {
 		}
 	}
 }
+
+func TestDouyinWorksScanCookieYesIsHealthy(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/19 15:20:43 [Weibo-auth] douyin works scan via HTTP accounts=4 cookie=yes",
+	})
+	for _, state := range states {
+		if state.ID != "douyin" {
+			continue
+		}
+		if state.Status != "healthy" || state.StatusText != "运行中" || state.LastTime != "15:20:43" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+		if !strings.Contains(state.LastEvent, "作品监控") {
+			t.Fatalf("event = %q", state.LastEvent)
+		}
+		return
+	}
+	t.Fatal("Douyin state not found")
+}
+
+func TestDouyinWorksScanCookieNoNeedsLogin(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/19 15:20:43 [Weibo-auth:stdout] [weibo-auth] douyin works scan via HTTP accounts=1 cookie=no",
+	})
+	for _, state := range states {
+		if state.ID != "douyin" {
+			continue
+		}
+		if state.Status != "attention" || state.StatusText != "待登录" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("Douyin state not found")
+}
+
+func TestDouyinLoginRequiredBeatsOlderWorksScan(t *testing.T) {
+	// bottom-up: newer login_required must win over older cookie=yes
+	states := buildServiceStates([]string{
+		"2026/07/19 15:00:00 [Weibo-auth] douyin works scan via HTTP accounts=4 cookie=yes",
+		"2026/07/19 15:10:00 [Douyin] status=login_required message=抖音浏览器需要登录",
+	})
+	for _, state := range states {
+		if state.ID != "douyin" {
+			continue
+		}
+		if state.Status != "attention" || state.StatusText != "待登录" {
+			t.Fatalf("Douyin state = %#v", state)
+		}
+		return
+	}
+	t.Fatal("Douyin state not found")
+}
+
 
 func TestNapCatFailedToConnectIsDown(t *testing.T) {
 	states := buildServiceStates([]string{
