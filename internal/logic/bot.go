@@ -1056,6 +1056,8 @@ func (b *Bot) Start() error {
 
 	// Start Polling Loop
 	go b.pollLoop()
+	// On-mic REST voice-list: independent of QChat (pollRoom is skipped when realtime is healthy).
+	go b.onMicLoop()
 
 	// Start media cache cleanup
 	go b.runMediaCleanupLoop()
