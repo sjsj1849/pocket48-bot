@@ -1445,6 +1445,35 @@ async function publishDouyinIMMessage(message) {
   const isTargetGroup = message.conversationType === 2
     && message.conversationId === douyinIMIdentity.conversationId;
   if (!isPrivate && !isTargetGroup) return;
+
+  // Sparse video share (type 8/77/105): field 8 JSON often empty on private shares
+  // (contentLen=0). Douyin then sends the real caption as a separate type=7 with
+  // quotedText="[视频]". Forwarding bare "[视频]" produces a useless second QQ bubble.
+  const bareVideo = String(message.text || '').trim() === '[视频]';
+  const sparseVideoShare = [8, 77, 105].includes(Number(message.messageType))
+    && bareVideo
+    && !(Array.isArray(message.images) && message.images.length)
+    && !String(message.link || '').trim();
+  if (sparseVideoShare) {
+    log(
+      `Douyin IM suppress sparse video type=${message.messageType}`
+      + ` convType=${message.conversationType}`
+      + ` sender=${message.senderUid}`
+      + ` contentLen=${message.contentLen ?? 0}`
+      + ` keys=${message.contentKeys?.join(',') || '-'}`,
+    );
+    return;
+  }
+
+  // Strip empty media quotes so caption-only replies don't show 「[视频]」stack.
+  if (
+    String(message.quotedText || '').trim() === '[视频]'
+    && !String(message.quotedName || '').trim()
+    && !String(message.quotedSenderUid || '').trim()
+  ) {
+    message = { ...message, quotedText: '', quotedName: '', quotedSenderUid: '' };
+  }
+
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
   // Douyin often double-pushes the same private text (sync + realtime) with different
   // server/client ids within ~3s. Soft-dedupe by conversation+sender+text(+quote) bucket.
@@ -1472,6 +1501,11 @@ async function publishDouyinIMMessage(message) {
     || ([5, 50002, 70002].includes(message.messageType)
       && (message.text === '[表情]' || !message.text)
       && !(message.images && message.images.length))
+    // type 8/77/105 video card with no title/cover/link — need payload dump to improve parser
+    || ([8, 77, 105].includes(message.messageType)
+      && String(message.text || '').trim() === '[视频]'
+      && !(message.images && message.images.length)
+      && !String(message.link || '').trim())
   );
   if (
     message.text === '[暂不支持的消息]'
@@ -2499,35 +2533,78 @@ async function scanXiaohongshuAccountViaAPI(account) {
   const userId = String(account.userId || '').trim();
   if (!userId) return { ok: false, reason: 'empty userId' };
 
-  // Login dead: do not navigate; only attempt pure API on current page if usable.
+  // Login dead: do not navigate; optionally try pure API only when cookies still present.
+  // IMPORTANT: do NOT keep hammering every poll with opaque 461/"成功" — that re-marks
+  // login-dead with misleading reasons and can disrupt an in-progress QR login.
   if (xiaohongshuLoginDead) {
+    const cookies = await readXiaohongshuCookieMap();
+    const hasCookie = Boolean(cookies.get('a1') && cookies.get('web_session'));
     const p = await getXiaohongshuPage();
     const url = pageUrlSafe(p);
-    if (!/xiaohongshu\.com/i.test(url) || /\/login|website-login|about:blank/i.test(url)) {
+    const onXhs = /xiaohongshu\.com/i.test(url) && !/\/login|website-login|about:blank/i.test(url);
+
+    // Soft recovery path: cookies + normal page → probe user/me once.
+    if (hasCookie && onXhs) {
+      try {
+        const me = await p.evaluate(async () => {
+          try {
+            const res = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+              credentials: 'include',
+              headers: {
+                accept: 'application/json, text/plain, */*',
+                origin: 'https://www.xiaohongshu.com',
+                referer: location.href || 'https://www.xiaohongshu.com/',
+              },
+            });
+            const body = await res.json().catch(() => ({}));
+            return {
+              httpStatus: res.status,
+              code: body?.code,
+              msg: body?.msg,
+              guest: body?.data?.guest,
+              userId: body?.data?.user_id,
+              nickname: body?.data?.nickname,
+            };
+          } catch (e) {
+            return { err: String(e?.message || e) };
+          }
+        });
+        log(`xiaohongshu login-dead me-probe: ${JSON.stringify(me)}`);
+        const meCode = Number(me?.code);
+        const stillGuest = me?.guest === true
+          || meCode === -100
+          || meCode === -101
+          || /登录已过期|无登录信息/i.test(String(me?.msg || ''));
+        if (!stillGuest && me?.guest === false && me?.userId) {
+          clearXiaohongshuLoginDead('me ok while login-dead');
+          // fall through to normal API path below (do not return early)
+        } else {
+          return {
+            ok: false,
+            reason: `小红书需重新登录（login-dead，me 未恢复）：${xiaohongshuLoginDeadReason || me?.msg || 'login_required'}`,
+            blocked: true,
+            loginDead: true,
+            me,
+          };
+        }
+      } catch (e) {
+        log(`xiaohongshu login-dead me-probe failed: ${e.message}`);
+        return {
+          ok: false,
+          reason: `小红书需重新登录（login-dead）：${xiaohongshuLoginDeadReason || 'login_required'}`,
+          blocked: true,
+          loginDead: true,
+        };
+      }
+    } else {
+      // No usable cookies / page — do not call user_posted at all.
       return {
         ok: false,
-        reason: `小红书需重新登录（login-dead，禁止刷页）：${xiaohongshuLoginDeadReason || 'login_required'}`,
+        reason: `小红书需重新登录（login-dead，禁止刷页/打帖）：${xiaohongshuLoginDeadReason || 'login_required'} cookie=${hasCookie} url=${String(url).slice(0, 80)}`,
         blocked: true,
         loginDead: true,
       };
     }
-    // Still try once without refresh if we're already on a normal xhs page.
-    const result = await fetchXiaohongshuUserPosted(p, userId, { num: 30 });
-    if (result.ok && Array.isArray(result.notes) && result.notes.length > 0) {
-      const nickname = result.nickname || account.name || '';
-      const notes = normalizeXiaohongshuNotes(result.notes, userId, nickname);
-      if (notes.length > 0) {
-        clearXiaohongshuLoginDead('api recovered while login-dead');
-        return { ok: true, nickname, notes, result };
-      }
-    }
-    return {
-      ok: false,
-      reason: result.msg || `login-dead API miss status=${result.status} code=${result.code}`,
-      blocked: true,
-      loginDead: true,
-      result,
-    };
   }
 
   let page = await ensureXiaohongshuSignPage();
@@ -2637,17 +2714,28 @@ async function scanXiaohongshuAccountViaAPI(account) {
     }
   }
   if (!result.ok) {
-    const softLogin = /登录|login|登录已过期|无登录信息|账号异常|Account abnormal|300011|300012|-100|-101|IP存在风险|安全限制/i.test(
-      `${result.msg} ${result.code}`,
-    );
-    const loginDead = /登录|login|登录已过期|无登录信息|-100|-101/i.test(`${result.msg} ${result.code}`)
-      && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制/i.test(`${result.msg} ${result.code}`);
+    const status = Number(result.status || 0);
+    const code = Number(result.code);
+    const msg = `${result.msg || ''} ${result.code || ''}`;
+    // Opaque HTTP 461 with empty "成功"/code0 is NOT "need re-login" — treat as risk/network.
+    const opaque461 = status === 461 || (status >= 400 && status < 500 && (code === 0 || Number.isNaN(code)) && /成功|success/i.test(String(result.msg || '')));
+    const softLogin = !opaque461 && /登录|login|登录已过期|无登录信息|账号异常|Account abnormal|300011|300012|-100|-101|IP存在风险|安全限制/i.test(msg);
+    // True session death: -100/-101 or explicit login text. Exclude 300011/461/IP risk.
+    const loginDead = !opaque461
+      && (
+        code === -100
+        || code === -101
+        || (
+          /登录已过期|无登录信息|未登录|重新登录/i.test(String(result.msg || ''))
+          && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制/i.test(msg)
+        )
+      );
     if (loginDead) markXiaohongshuLoginDead(`${result.code} ${result.msg}`);
     return {
       ok: false,
       reason: result.msg || `user_posted status=${result.status} code=${result.code}`,
-      blocked: softLogin,
-      risk: /300012|IP存在风险|安全限制/i.test(`${result.msg} ${result.code}`),
+      blocked: softLogin || opaque461,
+      risk: opaque461 || /300012|IP存在风险|安全限制/i.test(msg),
       loginDead,
       result,
     };
@@ -2767,11 +2855,20 @@ async function scanXiaohongshuAccount(account) {
     const signMeta = api.result?.signMeta || {};
     const commonLen = Number(signMeta.commonLen || xiaohongshuSignCache.xsCommon?.length || 0);
     const code = String(api.result?.code ?? '');
+    const status = Number(api.result?.status || 0);
     const msg = `${reason} ${api.result?.msg || ''} ${code}`;
-    const needLogin = Boolean(api.loginDead)
-      || (Boolean(api.blocked) && /登录|login|重新登录|未登录|登录已过期|无登录信息|-100|-101|session/i.test(msg)
-        && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制/i.test(msg));
-    const risk = Boolean(api.risk) || /300012|安全限制|IP存在风险|访问频次|风控|持续 461/i.test(msg);
+    const opaque461 = status === 461
+      || (status >= 400 && status < 500 && (code === '0' || code === '') && /成功|success/i.test(String(api.result?.msg || reason)));
+    // Prefer explicit loginDead from API path; never treat opaque 461/"成功" as re-login.
+    const needLogin = !opaque461 && (
+      Boolean(api.loginDead)
+      || (
+        Boolean(api.blocked)
+        && /登录已过期|无登录信息|未登录|重新登录|-100|-101/i.test(msg)
+        && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制|461/i.test(msg)
+      )
+    );
+    const risk = Boolean(api.risk) || opaque461 || /300012|安全限制|IP存在风险|访问频次|风控|持续 461/i.test(msg);
     // 300011 with empty common is sign-cache cold, not "must re-login now".
     const signCold = !risk && !needLogin && (commonLen === 0 || /mnsv2-only|no-sign|commonLen.:0/i.test(JSON.stringify(signMeta)));
 
@@ -2779,9 +2876,10 @@ async function scanXiaohongshuAccount(account) {
     if (needLogin) {
       xiaohongshuLastScanAnyLogin = true;
       markXiaohongshuLoginDead(reason);
+    } else if (risk) {
+      // Do not flip login-dead for IP/461 — user login cookies may still be fine.
+      xiaohongshuLastScanAnyLogin = true;
     }
-    // IP risk is not fixable by sidecar restart — do not feed api_stuck streak.
-    if (risk) xiaohongshuLastScanAnyLogin = true;
 
     // CRITICAL: never persist failed/login-dead state over a previously good session.
     // (Old code forced persist on every scan and could wipe good cookies.)
@@ -2790,7 +2888,9 @@ async function scanXiaohongshuAccount(account) {
     if (needLogin) {
       message = '小红书需重新登录，笔记列表暂不可用（已停止刷新小红书页面）';
     } else if (risk) {
-      message = '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试（非签名问题，重启无效）';
+      message = opaque461
+        ? '小红书 API 返回 461/环境异常（不一定是掉登录；请勿反复扫码，先检查代理/IP）'
+        : '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试（非签名问题，重启无效）';
     } else if (signCold) {
       message = `小红书签名环境未就绪（API 失败，commonLen=${commonLen}），保留 explore 页下次重试，不 goto 主页兜底`;
     } else {

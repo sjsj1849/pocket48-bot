@@ -302,6 +302,12 @@ function firstCoverURL(content = {}) {
   // Nested objects sometimes hold url_list.
   collectURLCandidates(content.video, candidates);
   collectURLCandidates(content.cover_image, candidates);
+  collectURLCandidates(content.image, candidates);
+  collectURLCandidates(content.image_url, candidates);
+  collectURLCandidates(content.poster, candidates);
+  collectURLCandidates(content?.related_share_video, candidates);
+  collectURLCandidates(content?.aweme, candidates);
+  collectURLCandidates(content?.aweme_info, candidates);
   // Prefer image-looking CDN URLs; one is enough for a card cover.
   const cleaned = [];
   for (const url of candidates) {
@@ -325,15 +331,80 @@ function firstCoverURL(content = {}) {
   return cleaned[0];
 }
 
-function formatDouyinVideoShare(content = {}) {
-  const itemId = String(
-    content.itemId
-    || content.item_id
-    || content.aweme_id
-    || content.awemeId
-    || content?.related_share_video?.itemId
-    || '',
-  ).trim();
+// Dig itemId / aweme_id from nested bags (type 8 private shares often nest fields).
+function extractDouyinItemId(content = {}, ext = {}) {
+  const keys = [
+    'itemId', 'item_id', 'aweme_id', 'awemeId', 'awemeid',
+    'group_id', 'groupId', 'video_id', 'videoId', 'media_id', 'mediaId',
+  ];
+  const bags = [
+    content,
+    content?.related_share_video,
+    content?.aweme,
+    content?.aweme_info,
+    content?.video,
+    content?.share_info,
+    content?.shareInfo,
+    content?.card,
+    content?.card_content,
+    content?.raw_data,
+    content?.rawData,
+    parseMaybeJSON(content?.content),
+    parseMaybeJSON(content?.extra),
+    parseMaybeJSON(content?.data),
+  ];
+  for (const [k, v] of Object.entries(ext || {})) {
+    if (!/aweme|item|video|share|card|media|content/i.test(k)) continue;
+    bags.push(parseMaybeJSON(v) || (typeof v === 'object' ? v : null));
+  }
+  const visit = (node, depth = 0) => {
+    if (!node || depth > 5) return '';
+    if (typeof node === 'string') {
+      const s = node.trim();
+      // bare numeric id
+      if (/^\d{8,}$/.test(s)) return s;
+      // URL …/video/123456
+      const m = s.match(/\/video\/(\d{8,})/i) || s.match(/[?&](?:modal_id|aweme_id|item_id)=(\d{8,})/i);
+      if (m) return m[1];
+      return '';
+    }
+    if (typeof node !== 'object') return '';
+    for (const key of keys) {
+      if (node[key] != null && String(node[key]).trim()) {
+        const id = String(node[key]).trim();
+        if (/^\d{6,}$/.test(id) || id.length >= 8) return id;
+      }
+    }
+    for (const child of Object.values(node)) {
+      const id = visit(child, depth + 1);
+      if (id) return id;
+    }
+    return '';
+  };
+  for (const bag of bags) {
+    const id = visit(bag, 0);
+    if (id) return id;
+  }
+  // Last resort: scan stringified content for video URLs / long digit ids near aweme keywords.
+  try {
+    const blob = JSON.stringify(content || {}).slice(0, 8000);
+    const m = blob.match(/\/video\/(\d{8,})/i)
+      || blob.match(/"(?:itemId|item_id|aweme_id|awemeId)"\s*:\s*"?(\d{8,})/i);
+    if (m) return m[1];
+  } catch {}
+  return '';
+}
+
+function formatDouyinVideoShare(content = {}, ext = {}) {
+  const itemId = extractDouyinItemId(content, ext)
+    || String(
+      content.itemId
+      || content.item_id
+      || content.aweme_id
+      || content.awemeId
+      || content?.related_share_video?.itemId
+      || '',
+    ).trim();
 
   // Prefer real video title fields; never use author nickname (content_name) as body.
   let title = String(
@@ -342,6 +413,11 @@ function formatDouyinVideoShare(content = {}) {
     || content.title
     || content.desc
     || content.msgHint
+    || content.content_desc
+    || content.share_title
+    || content.shareTitle
+    || content?.related_share_video?.title
+    || content?.related_share_video?.desc
     || '',
   ).trim();
   // Strip trailing hashtag spam a bit for QQ readability.
@@ -354,6 +430,8 @@ function formatDouyinVideoShare(content = {}) {
     || content.aweme_author_name
     || content.author_name
     || content.authorName
+    || content.nickname
+    || content?.related_share_video?.author_name
     || '',
   ).trim();
 
@@ -370,6 +448,25 @@ function formatDouyinVideoShare(content = {}) {
     || '',
   ).trim();
 
+  // Prefer explicit share URL if present.
+  let link = String(
+    content.share_url
+    || content.shareUrl
+    || content.video_url
+    || content.videoUrl
+    || content.schema
+    || content.schema_url
+    || content.link
+    || content.url
+    || '',
+  ).trim();
+  if (link && !/^https?:\/\//i.test(link)) {
+    // aweme schema etc — drop, rebuild from itemId when possible
+    if (!/douyin\.com/i.test(link)) link = '';
+  }
+  if (!link && itemId) link = `https://www.douyin.com/video/${itemId}`;
+  // If link carries id but itemId empty, keep link.
+
   const lines = [];
   if (title) lines.push(`[视频] ${title}`);
   else lines.push('[视频]');
@@ -377,13 +474,17 @@ function formatDouyinVideoShare(content = {}) {
   if (comment) {
     lines.push(commentUser ? `评论 ${commentUser}：${comment}` : `评论：${comment}`);
   }
+  // When we have no title/cover/item, still surface link if we found one elsewhere.
+  if (lines.length === 1 && lines[0] === '[视频]' && !link) {
+    // leave as placeholder; caller may attach images/link from other recovery
+  }
 
-  const link = itemId ? `https://www.douyin.com/video/${itemId}` : '';
-  const cover = firstCoverURL(content);
+  const cover = firstCoverURL(content) || firstCoverURL(content?.related_share_video || {});
   return {
     text: lines.join('\n'),
     link,
     cover,
+    itemId,
   };
 }
 
@@ -927,6 +1028,76 @@ function extractTextFromOtherFields(message, skipFields = new Set([1, 2, 3, 4, 5
   };
 }
 
+// Recover sparse video-share JSON from non-field-8 protobuf blobs (esp. field 17).
+function recoverVideoShareFromOtherFields(message) {
+  const content = {};
+  const fieldHits = [];
+  for (const [number, values] of message.entries()) {
+    if (number === 8 || number === 9) continue; // main content / ext map already handled
+    for (const value of values || []) {
+      if (!(value instanceof Uint8Array) || value.length < 8 || value.length > 200_000) continue;
+      // Try UTF-8 JSON first
+      let asText = '';
+      try { asText = textDecoder.decode(value); } catch { asText = ''; }
+      const trimmed = asText.trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            Object.assign(content, parsed);
+            fieldHits.push(`${number}:json`);
+            continue;
+          }
+        } catch {}
+      }
+      // Nested protobuf → look for JSON leaf strings / long digit ids / https URLs
+      try {
+        const nested = decodeFields(value);
+        for (const [n2, vals2] of nested.entries()) {
+          for (const v2 of vals2 || []) {
+            if (!(v2 instanceof Uint8Array)) continue;
+            let t2 = '';
+            try { t2 = textDecoder.decode(v2).trim(); } catch { continue; }
+            if (!t2) continue;
+            if ((t2.startsWith('{') || t2.startsWith('[')) && t2.length > 20) {
+              try {
+                const p2 = JSON.parse(t2);
+                if (p2 && typeof p2 === 'object' && !Array.isArray(p2)) {
+                  Object.assign(content, p2);
+                  fieldHits.push(`${number}.${n2}:json`);
+                }
+              } catch {}
+            }
+            const idMatch = t2.match(/\/video\/(\d{8,})/i) || t2.match(/"(?:itemId|item_id|aweme_id|awemeId)"\s*:\s*"?(\d{8,})/i);
+            if (idMatch && !content.itemId && !content.item_id && !content.aweme_id) {
+              content.itemId = idMatch[1];
+              fieldHits.push(`${number}.${n2}:itemId`);
+            }
+            if (/^https?:\/\//i.test(t2) && /cover|thumb|\.(jpg|jpeg|png|webp)/i.test(t2) && !content.cover_url) {
+              content.cover_url = t2;
+              fieldHits.push(`${number}.${n2}:cover`);
+            }
+          }
+        }
+      } catch {}
+      // Brute printable runs for video id URLs inside binary
+      const runs = extractPrintableRuns(value, 8, 12);
+      for (const run of runs) {
+        const m = run.match(/\/video\/(\d{8,})/i);
+        if (m && !content.itemId) {
+          content.itemId = m[1];
+          fieldHits.push(`${number}:run-itemId`);
+        }
+        if (/^https?:\/\//i.test(run) && /cover|thumb|\.(jpg|jpeg|png|webp)/i.test(run) && !content.cover_url) {
+          content.cover_url = run;
+          fieldHits.push(`${number}:run-cover`);
+        }
+      }
+    }
+  }
+  return { content, fieldHits: fieldHits.slice(0, 12) };
+}
+
 function decodeMessage(raw, fallbackConversationId = '', fallbackConversationType = 0) {
   const message = decodeFields(raw);
   const contentField = first(message, 8);
@@ -949,6 +1120,24 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   }
   const ext = mapEntries(message, 9);
   const messageType = Number(first(message, 6, 0n));
+  let fieldHits = [];
+  const fieldNumbers = [...message.keys()].sort((a, b) => a - b);
+
+  // Private type-8 video shares often have EMPTY field 8 JSON (contentLen=0).
+  // Scan other length-delimited protobuf fields for nested JSON / video ids / covers.
+  if (
+    (messageType === 8 || messageType === 77 || messageType === 105)
+    && (!contentBytes || contentBytes.length === 0 || Object.keys(content).length === 0)
+  ) {
+    const recovered = recoverVideoShareFromOtherFields(message);
+    if (recovered.content && Object.keys(recovered.content).length) {
+      content = { ...content, ...recovered.content };
+      contentParseOk = true;
+    }
+    if (recovered.fieldHits?.length) fieldHits = recovered.fieldHits;
+  }
+
+  const contentKeyList = content && typeof content === 'object' ? Object.keys(content) : [];
   let text = typeof content?.text === 'string' ? content.text.trim() : '';
   const replyFromContent = replyDetails(content, ext);
   let quotedName = replyFromContent.quotedName;
@@ -957,21 +1146,42 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   let quotedServerMessageId = replyFromContent.quotedServerMessageId || '';
   let quotedClientMessageId = replyFromContent.quotedClientMessageId || '';
   let link = '';
-  const fieldNumbers = [...message.keys()].sort((a, b) => a - b);
-  let fieldHits = [];
 
   // Control / conv-biz commands never carry chat body.
   if (isDouyinControlCommand(messageType, content, ext)) {
     text = '[控制消息]';
   } else if (isDouyinVideoShare(messageType, content)) {
     // Video shares must be classified before firstText walks content_name (author).
-    const video = formatDouyinVideoShare(content);
+    let video = formatDouyinVideoShare(content, ext);
+    // Sparse type-8 private shares: dig more bags / other pb fields when card is bare.
+    if (
+      (video.text === '[视频]' || !video.link)
+      && (messageType === 8 || messageType === 77 || messageType === 105)
+    ) {
+      const other = extractTextFromOtherFields(message);
+      if (other.fieldHits?.length) fieldHits = [...fieldHits, ...other.fieldHits];
+      if (!video.itemId && other.text) {
+        const m = String(other.text).match(/\/video\/(\d{8,})/i) || String(other.text).match(/\b(\d{15,})\b/);
+        if (m) {
+          video = {
+            ...video,
+            itemId: m[1],
+            link: video.link || `https://www.douyin.com/video/${m[1]}`,
+          };
+        }
+      }
+      if (video.text === '[视频]' && other.text && !looksLikeDouyinShareCardText(other.text) && /[\u4e00-\u9fff]/.test(other.text)) {
+        const t = String(other.text).trim().slice(0, 80);
+        if (t && t.length >= 2) video = { ...video, text: `[视频] ${t}` };
+      }
+    }
     text = video.text;
     link = video.link;
-    // Prefer a single cover image for the card (avoid dumping 6 CDN variants).
     if (video.cover) {
-      // Stash on content so the later image extract path can pick it up if needed.
       content.__douyin_video_cover = video.cover;
+    }
+    if (text === '[视频]' && !link && !video.cover) {
+      content.__douyin_video_sparse = true;
     }
   } else if (isLightInteractionMessage(messageType, content, ext)) {
     text = extractLightInteractionLabel(content, ext) || '[表情]';
@@ -1103,7 +1313,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   ) {
     text = '';
   }
-  const contentKeyList = Object.keys(content || {});
+  // contentKeyList is captured after sparse recovery above.
   const rawRuns = (!contentParseOk && contentBytes)
     ? extractPrintableRuns(contentBytes, 2, 8)
     : [];
