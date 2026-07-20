@@ -120,7 +120,8 @@ test('decodes type 77 aweme share cards as video instead of author nickname', ()
   const notify = [...field(2, 'private-conv'), ...intField(3, 1), ...field(5, message)];
   const frame = [...field(7, 'pb'), ...field(8, field(6, field(500, notify)))];
   const decoded = decodeDouyinIMPush(frame);
-  assert.equal(decoded.text, '[视频] 一条测试视频标题');
+  assert.match(decoded.text, /\[视频\] 一条测试视频标题/);
+  assert.match(decoded.text, /作者：/);
   assert.equal(decoded.link, 'https://www.douyin.com/video/7123456789012345678');
   assert.notEqual(decoded.text, '仁爱路');
 
@@ -133,7 +134,7 @@ test('decodes type 77 aweme share cards as video instead of author nickname', ()
   const bareMessage = [...field(1, 'private-conv'), ...intField(2, 1), ...intField(3, 21), ...intField(6, 77), ...intField(7, 456), ...field(8, bare)];
   const bareNotify = [...field(2, 'private-conv'), ...intField(3, 1), ...field(5, bareMessage)];
   const bareFrame = [...field(7, 'pb'), ...field(8, field(6, field(500, bareNotify)))];
-  assert.equal(decodeDouyinIMPush(bareFrame).text, '[视频]');
+  assert.match(decodeDouyinIMPush(bareFrame).text, /^\[视频\]/);
   assert.equal(decodeDouyinIMPush(bareFrame).link, 'https://www.douyin.com/video/7987654321098765432');
 });
 
@@ -449,8 +450,8 @@ test('light interaction sticker with image url_list forwards images', () => {
   ];
   const decoded = decodeDouyinIMPush(frame);
   assert.equal(decoded.messageType, 50002);
-  assert.equal(decoded.text, '[比心]');
-  assert.ok(decoded.images.includes('https://p3-emoticon.byteimg.com/sticker/heart.png'));
+  assert.equal(decoded.text, ''); // caption dropped when image present
+  assert.deepEqual(decoded.images, ['https://p3-emoticon.byteimg.com/sticker/heart.png']);
 });
 
 test('type 110 empty body maps to pet-feed reminder', () => {
@@ -482,4 +483,86 @@ test('decode type 110 empty content to pet-feed label', () => {
   const decoded = decodeDouyinIMPush(frame);
   assert.equal(decoded.messageType, 110);
   assert.equal(decoded.text, '[你还没有喂精灵～]');
+});
+
+test('sticker with static+animate only keeps one image and no caption', () => {
+  const content = JSON.stringify({});
+  const light = JSON.stringify({
+    name: '早点睡',
+    text: '早点睡',
+    static_url: 'https://p3-emoticon.byteimg.com/sticker/sleep_static.png',
+    animate_url: 'https://p3-emoticon.byteimg.com/sticker/sleep_static.png?animate=1',
+    url_list: [
+      'https://p3-emoticon.byteimg.com/sticker/sleep_static.png',
+      'https://p3-emoticon.byteimg.com/sticker/sleep_static.png?animate=1',
+    ],
+  });
+  const message = [
+    ...field(1, 'conv-1'),
+    ...intField(2, 1n),
+    ...field(3, 'msg-sticker-2url'),
+    ...field(4, '1'),
+    ...field(5, 'short-2'),
+    ...intField(6, 50002n),
+    ...field(7, '1'),
+    ...field(8, content),
+    ...field(9, mapEntry('a:light_interaction', light)),
+    ...intField(10, 1784302422000n),
+  ];
+  const notify = [...field(2, 'conv-1'), ...intField(3, 1n), ...field(5, message)];
+  const body = field(500, notify);
+  const payload = field(6, body);
+  const frame = [
+    ...field(6, 'gzip'),
+    ...field(7, 'pb'),
+    ...field(8, gzipSync(Buffer.from(payload))),
+  ];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 50002);
+  assert.equal(decoded.text, '');
+  assert.equal(decoded.images.length, 1);
+});
+
+test('type 105 video comment card uses title + cover + link', () => {
+  const content = JSON.stringify({
+    aweType: 10500,
+    itemId: '7664070807320226698',
+    aweme_title: '罗子君 真的就是天生好命 #我的前半生',
+    content_name: '某作者',
+    comment: '这个是泰国的什么学校？',
+    comment_user_name: '路人甲',
+    cover_url: {
+      url_list: [
+        'https://p3-sign.douyinpic.com/cover/foo~tplv-obj.jpeg',
+        'https://p9-sign.douyinpic.com/cover/foo~tplv-obj.jpeg',
+      ],
+    },
+    content_thumb: 'https://p3-sign.douyinpic.com/cover/foo~tplv-obj.jpeg',
+  });
+  const message = [
+    ...field(1, 'conv-v'),
+    ...intField(2, 1n),
+    ...field(3, 'msg-105'),
+    ...field(4, '1'),
+    ...field(5, 'short-105'),
+    ...intField(6, 105n),
+    ...field(7, '4309688567216519'),
+    ...field(8, content),
+    ...intField(10, 1784475889000n),
+  ];
+  const notify = [...field(2, 'conv-v'), ...intField(3, 1n), ...field(5, message)];
+  const body = field(500, notify);
+  const payload = field(6, body);
+  const frame = [
+    ...field(6, 'gzip'),
+    ...field(7, 'pb'),
+    ...field(8, gzipSync(Buffer.from(payload))),
+  ];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 105);
+  assert.match(decoded.text, /^\[视频\]/);
+  assert.match(decoded.text, /罗子君/);
+  assert.match(decoded.text, /评论/);
+  assert.equal(decoded.link, 'https://www.douyin.com/video/7664070807320226698');
+  assert.equal(decoded.images.length, 1);
 });

@@ -107,7 +107,7 @@ type DouyinMonitor struct {
 	captchaHits      []time.Time
 	captchaLastAlert time.Time
 
-	// IM disconnect watchdog: soft alert → sidecar restart → bot process restart → re-alert.
+	// IM disconnect watchdog: silent sidecar/bot restart → email only if still down after auto-heal.
 	imDisconnectedAt     time.Time
 	imLastDisconnectAlert time.Time
 	imSidecarRestartAt   time.Time
@@ -462,37 +462,27 @@ func (m *DouyinMonitor) handleIMStatus(event douyinBrowserEvent) {
 	msg := strings.TrimSpace(event.Message)
 	now := time.Now()
 	m.mu.Lock()
-	wasConnected := m.imConnected
 	connected := status == "connected"
 	m.imConnected = connected
 	if connected {
-		// Recovered: clear disconnect clock (do not spam recovery alerts).
+		// Recovered: clear disconnect clock. No recovery email — user only wants
+		// alerts when auto-heal failed and manual work is needed.
 		if !m.imDisconnectedAt.IsZero() {
 			downFor := now.Sub(m.imDisconnectedAt)
 			m.imDisconnectedAt = time.Time{}
 			m.mu.Unlock()
+			clearDouyinIMRecoveryMarker()
 			log.Printf("[Douyin-IM] status=connected message=%s (recovered after %s)", msg, downFor.Round(time.Second))
 			return
 		}
 		m.mu.Unlock()
+		clearDouyinIMRecoveryMarker()
 		log.Printf("[Douyin-IM] status=connected message=%s", msg)
 		return
 	}
-	// disconnected / error / other non-connected
+	// disconnected / error / other non-connected — log only, no admin notify.
 	if m.imDisconnectedAt.IsZero() {
 		m.imDisconnectedAt = now
-	}
-	// Soft alert once when first leaving connected state.
-	softAlert := wasConnected || m.imLastDisconnectAlert.IsZero()
-	if softAlert && (m.imLastDisconnectAlert.IsZero() || now.Sub(m.imLastDisconnectAlert) >= 10*time.Minute) {
-		m.imLastDisconnectAlert = now
-		notify := m.notifyAdmins
-		m.mu.Unlock()
-		log.Printf("[Douyin-IM] status=%s message=%s", status, msg)
-		if notify != nil {
-			notify(fmt.Sprintf("⚠️ 抖音 IM 连接异常：%s\n将自动重连；若 %s 仍未恢复会尝试重启侧车/Bot。", firstNonEmptyText(msg, status), "2 分钟"))
-		}
-		return
 	}
 	m.mu.Unlock()
 	log.Printf("[Douyin-IM] status=%s message=%s", status, msg)
@@ -507,10 +497,52 @@ func firstNonEmptyText(values ...string) string {
 	return ""
 }
 
-// StartIMWatchdog monitors prolonged IM disconnect and escalates:
-// 1) after 2m: restart weibo-auth sidecar (IM lives there)
-// 2) after 5m still down: exit process so systemd restarts bot
-// 3) if still down after bot restart window: re-alert admins every 15m
+const douyinIMRecoveryMarkerPath = "storage/douyin-im-recovery.json"
+
+type douyinIMRecoveryMarker struct {
+	Reason      string `json:"reason"`
+	RestartedAt int64  `json:"restarted_at_ms"`
+	AlertedAt   int64  `json:"alerted_at_ms,omitempty"`
+}
+
+func writeDouyinIMRecoveryMarker(reason string) {
+	_ = os.MkdirAll("storage", 0o755)
+	raw, _ := json.MarshalIndent(douyinIMRecoveryMarker{
+		Reason:      reason,
+		RestartedAt: time.Now().UnixMilli(),
+	}, "", "  ")
+	_ = os.WriteFile(douyinIMRecoveryMarkerPath, raw, 0o600)
+}
+
+func readDouyinIMRecoveryMarker() *douyinIMRecoveryMarker {
+	raw, err := os.ReadFile(douyinIMRecoveryMarkerPath)
+	if err != nil {
+		return nil
+	}
+	var m douyinIMRecoveryMarker
+	if json.Unmarshal(raw, &m) != nil || m.RestartedAt <= 0 {
+		return nil
+	}
+	return &m
+}
+
+func clearDouyinIMRecoveryMarker() {
+	_ = os.Remove(douyinIMRecoveryMarkerPath)
+}
+
+func touchDouyinIMRecoveryAlerted(marker *douyinIMRecoveryMarker) {
+	if marker == nil {
+		return
+	}
+	marker.AlertedAt = time.Now().UnixMilli()
+	raw, _ := json.MarshalIndent(marker, "", "  ")
+	_ = os.WriteFile(douyinIMRecoveryMarkerPath, raw, 0o600)
+}
+
+// StartIMWatchdog monitors prolonged IM disconnect and escalates silently:
+// 1) after 45s: restart weibo-auth sidecar (IM lives there)
+// 2) after 2m still down: exit process so systemd restarts bot (writes recovery marker)
+// 3) email ONLY if still down ~90s after auto restarts (manual intervention needed)
 func (m *DouyinMonitor) StartIMWatchdog() {
 	m.imWatchdogOnce.Do(func() {
 		if m.imWatchdogStop == nil {
@@ -543,16 +575,52 @@ func (m *DouyinMonitor) tickIMWatchdog() {
 	since := m.imDisconnectedAt
 	browser := m.browser
 	restartFn := m.requestBotRestart
-	if connected || since.IsZero() {
+	if connected {
+		m.mu.Unlock()
+		clearDouyinIMRecoveryMarker()
+		return
+	}
+
+	// After bot restart for IM: marker survives process death. Only then may we email.
+	if marker := readDouyinIMRecoveryMarker(); marker != nil {
+		// Wait for IM to come back after boot before paging a human (was 3m; user: too slow).
+		sinceRestart := now.Sub(time.UnixMilli(marker.RestartedAt))
+		if sinceRestart >= 90*time.Second {
+			lastAlert := time.Time{}
+			if marker.AlertedAt > 0 {
+				lastAlert = time.UnixMilli(marker.AlertedAt)
+			}
+			if lastAlert.IsZero() || now.Sub(lastAlert) >= 30*time.Minute {
+				notify := m.notifyAdmins
+				m.mu.Unlock()
+				touchDouyinIMRecoveryAlerted(marker)
+				if notify != nil {
+					notify(fmt.Sprintf(
+						"🚨 抖音 IM 自动恢复失败，需要人工处理\n断线后已尝试：侧车重启 + Bot 重启\nBot 重启后仍未连上（约 %s）\n原因：%s\n请检查浏览器登录态 / 侧卡日志 / 抖音风控。",
+						sinceRestart.Round(time.Second), firstNonEmptyText(marker.Reason, "unknown"),
+					))
+				}
+				return
+			}
+		}
+		// Marker present but still in grace period — don't escalate further this tick.
+		m.mu.Unlock()
+		return
+	}
+
+	if since.IsZero() {
+		// Never saw a connected→disconnected transition this process; if IM stays
+		// down from startup, start the clock so auto-heal can still run.
+		m.imDisconnectedAt = now
 		m.mu.Unlock()
 		return
 	}
 	downFor := now.Sub(since)
-	// Stage 1: sidecar restart after 2 minutes.
-	if downFor >= 2*time.Minute && (m.imSidecarRestartAt.IsZero() || now.Sub(m.imSidecarRestartAt) >= 10*time.Minute) {
+	// Stage 1: sidecar restart after 45s (was 2m; user: auto-heal too conservative).
+	if downFor >= 45*time.Second && (m.imSidecarRestartAt.IsZero() || now.Sub(m.imSidecarRestartAt) >= 5*time.Minute) {
 		m.imSidecarRestartAt = now
 		m.mu.Unlock()
-		log.Printf("[Douyin-IM] still down for %s → restart weibo-auth sidecar", downFor.Round(time.Second))
+		log.Printf("[Douyin-IM] still down for %s → restart weibo-auth sidecar (silent)", downFor.Round(time.Second))
 		if browser != nil {
 			if err := browser.Restart(); err != nil {
 				log.Printf("[Douyin-IM] sidecar restart failed: %v", err)
@@ -562,30 +630,21 @@ func (m *DouyinMonitor) tickIMWatchdog() {
 		}
 		return
 	}
-	// Stage 2: bot process restart after 5 minutes.
-	if downFor >= 5*time.Minute && (m.imBotRestartAt.IsZero() || now.Sub(m.imBotRestartAt) >= 20*time.Minute) {
+	// Stage 2: bot process restart after 2 minutes (was 5m).
+	if downFor >= 2*time.Minute && (m.imBotRestartAt.IsZero() || now.Sub(m.imBotRestartAt) >= 10*time.Minute) {
 		m.imBotRestartAt = now
 		m.mu.Unlock()
-		log.Printf("[Douyin-IM] still down for %s → restart bot process", downFor.Round(time.Second))
+		reason := fmt.Sprintf("douyin IM disconnected for %s", downFor.Round(time.Second))
+		log.Printf("[Douyin-IM] still down for %s → restart bot process (silent, marker written)", downFor.Round(time.Second))
+		writeDouyinIMRecoveryMarker(reason)
 		if restartFn != nil {
-			restartFn(fmt.Sprintf("douyin IM disconnected for %s", downFor.Round(time.Second)))
+			restartFn(reason)
 		} else {
-			// Fallback: exit so systemd Restart=always picks us up.
 			log.Printf("[Douyin-IM] no restart callback; exiting for systemd restart")
 			go func() {
 				time.Sleep(500 * time.Millisecond)
 				os.Exit(1)
 			}()
-		}
-		return
-	}
-	// Stage 3: still down after bot restart attempt → re-alert.
-	if downFor >= 8*time.Minute && (m.imLastDisconnectAlert.IsZero() || now.Sub(m.imLastDisconnectAlert) >= 15*time.Minute) {
-		m.imLastDisconnectAlert = now
-		notify := m.notifyAdmins
-		m.mu.Unlock()
-		if notify != nil {
-			notify(fmt.Sprintf("🚨 抖音 IM 仍未恢复\n已断开约 %s\n已尝试侧车重启/Bot 重启，请检查浏览器登录态与侧卡日志。", downFor.Round(time.Second)))
 		}
 		return
 	}
@@ -648,11 +707,20 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	if text == "" && len(images) == 0 {
 		return
 	}
+	// With real image URLs, drop redundant sticker captions like [表情]/[早点睡].
+	if len(images) > 0 && isDouyinStickerCaption(text) {
+		text = ""
+	}
 	if text == "" && len(images) > 0 {
-		text = "[图片]"
+		// Keep body empty so QQ shows "名：" + image only (no placeholder).
+		text = ""
 	}
 	if event.Link != "" {
-		text += "\n" + event.Link
+		if text != "" {
+			text += "\n" + event.Link
+		} else {
+			text = event.Link
+		}
 	}
 	timeText := formatDouyinIMTime(event.CreateTime, event.ReceivedAt)
 	m.mu.Lock()
@@ -704,13 +772,16 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 		body := formatDouyinSenderLine(lineName, text)
 		log.Printf("[Douyin-IM] forward group_owner box=%s line=%s type=%d text=%q images=%d", boxName, lineName, event.MessageType, truncateDouyinLogText(text, 80), len(images))
-		// Expand [尬笑]/[微笑] etc into OneBot face segments (same path as Pocket48).
-		segments := appendTextWithQQFaces(nil, formatDouyinIMGroupNotification(title, body, timeText))
+		// Header + body first; images above timestamp when present (sticker/表情图 etc).
+		segments := appendTextWithQQFaces(nil, title+"\n"+body)
 		for _, image := range images {
-			if len(segments) >= 10 { // text + up to 9 images
+			if len(segments) >= 9 { // leave room for trailing time text
 				break
 			}
 			segments = append(segments, napcat.ImageSegment(image))
+		}
+		if timeText != "" {
+			segments = appendTextWithQQFaces(segments, "\n"+timeText)
 		}
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, segments)
 	case "private_incoming":
@@ -721,13 +792,17 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		quotedName := inferDouyinQuotedName(event, lineName, selfUID)
 		text = formatDouyinReplyText(lineName, text, quotedName, event.QuotedText)
 		// Business forward (not an ops alert) — still QQ private to admins.
-		msg := formatDouyinPrivateNotification(boxName, lineName, text, timeText)
-		segments := appendTextWithQQFaces(nil, msg)
+		// Same layout: title+body → images → timestamp.
+		header := formatDouyinPrivateNotificationHeader(boxName, lineName, text)
+		segments := appendTextWithQQFaces(nil, header)
 		for _, image := range images {
-			if len(segments) >= 10 {
+			if len(segments) >= 9 {
 				break
 			}
 			segments = append(segments, napcat.ImageSegment(image))
+		}
+		if timeText != "" {
+			segments = appendTextWithQQFaces(segments, "\n"+timeText)
 		}
 		for _, uid := range uniqueAdminIDs(m.cfg) {
 			m.napcat.SendPrivateMessage(uid, segments)
@@ -783,6 +858,7 @@ func inferDouyinQuotedName(event douyinBrowserEvent, senderName, selfUID string)
 func formatDouyinReplyText(senderName, text, quotedName, quotedText string) string {
 	quotedName = strings.TrimSpace(quotedName)
 	quotedText = strings.TrimSpace(quotedText)
+	text = strings.TrimSpace(text)
 	if quotedText == "" {
 		return text
 	}
@@ -790,6 +866,14 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 	quotedLine := quotedText
 	if quotedName != "" {
 		quotedLine = quotedName + "：" + quotedText
+	}
+	// Placeholder-only reply body: just show quote + sender line without bare 「[回复]」.
+	if text == "" || text == "[回复]" {
+		senderName = strings.TrimSpace(senderName)
+		if senderName == "" {
+			return quotedLine
+		}
+		return quotedLine + "\n" + senderName + "：（回复）"
 	}
 	senderName = strings.TrimSpace(senderName)
 	if senderName == "" {
@@ -970,10 +1054,48 @@ func formatDouyinSenderLine(lineName, text string) string {
 	if lineName == "" {
 		return text
 	}
+	if text == "" {
+		// Image-only sticker: still show "名：" so the line isn't just the header.
+		return lineName + "："
+	}
 	return lineName + "：" + text
 }
 
+// isDouyinStickerCaption reports placeholder labels that are redundant when a real image is attached.
+func isDouyinStickerCaption(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if t == "[表情]" || t == "[贴纸]" {
+		return true
+	}
+	// Keep [图片]/[视频]/[语音] — those are media-type labels, not sticker names.
+	if t == "[图片]" || t == "[视频]" || t == "[语音]" {
+		return false
+	}
+	// [早点睡] / [比心] / [续火花] — short bracket light-interaction labels.
+	if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") && !strings.Contains(t, "\n") {
+		inner := t[1 : len(t)-1]
+		if inner != "" && utf8.RuneCountInString(inner) <= 12 {
+			return true
+		}
+	}
+	return false
+}
+
 func formatDouyinPrivateNotification(boxName, lineName, text, timeText string) string {
+	header := formatDouyinPrivateNotificationHeader(boxName, lineName, text)
+	timeText = strings.TrimSpace(timeText)
+	if timeText == "" {
+		return header
+	}
+	return header + "\n" + timeText
+}
+
+// formatDouyinPrivateNotificationHeader is title+body without trailing timestamp,
+// so callers can insert images above the time line.
+func formatDouyinPrivateNotificationHeader(boxName, lineName, text string) string {
 	boxName = strings.TrimSpace(boxName)
 	if boxName == "" {
 		boxName = "抖音用户"
@@ -987,7 +1109,7 @@ func formatDouyinPrivateNotification(boxName, lineName, text, timeText string) s
 		}
 	}
 	// Title: nickname first 【昵称|抖音】
-	return fmt.Sprintf("【%s|抖音】\n%s\n%s", boxName, body, timeText)
+	return fmt.Sprintf("【%s|抖音】\n%s", boxName, body)
 }
 
 func formatDouyinIMTime(createTime, receivedAt int64) string {

@@ -68,3 +68,16 @@ func TestBuildServiceEmailOfflineNeedsManualCopy(t *testing.T) {
 		t.Fatal("offline email should not claim recovered")
 	}
 }
+
+func TestShouldAlertServiceSkipsDouyinIM(t *testing.T) {
+	// Douyin IM offline is handled by bot-side watchdog; admin must not page on reconnect.
+	if shouldAlertService(serviceState{ID: "douyin_im", Status: "attention", StatusText: "重连中", LastTime: "02:00:00"}) {
+		t.Fatal("douyin_im reconnect must not use generic admin offline alert")
+	}
+	if !shouldAlertService(serviceState{ID: "qchat", Status: "attention", StatusText: "重连中", LastTime: "02:00:00"}) {
+		t.Fatal("other services still use generic offline path")
+	}
+	if !shouldAlertService(serviceState{ID: "bot", Status: "down", StatusText: "已停止"}) {
+		t.Fatal("bot down still alerts")
+	}
+}

@@ -57,6 +57,28 @@ func TestParseActivityFiltersNoiseAndOrdersNewestFirst(t *testing.T) {
 	}
 }
 
+func TestOverviewAttentionSkipsDouyinIMReconnect(t *testing.T) {
+	// Reconnecting is auto-heal; must not appear in "需要处理".
+	got := buildOverviewAttention([]serviceState{
+		{ID: "douyin_im", Status: "attention", StatusText: "重连中", LastEvent: "群聊连接已断开，正在自动重连"},
+		{ID: "douyin_im", Status: "attention", StatusText: "未连接", LastEvent: "等待网页 IM 初始化"},
+	})
+	for _, a := range got {
+		if a.ID == "douyin-im" {
+			t.Fatalf("reconnect/unconnected douyin_im must not be in attention: %#v", got)
+		}
+	}
+}
+
+func TestOverviewAttentionIncludesDouyinIMHardFailure(t *testing.T) {
+	got := buildOverviewAttention([]serviceState{
+		{ID: "douyin_im", Status: "down", StatusText: "连接异常", LastEvent: "群聊连接发生错误"},
+	})
+	if len(got) != 1 || got[0].ID != "douyin-im" {
+		t.Fatalf("hard failure should appear in attention: %#v", got)
+	}
+}
+
 func TestCleanLogMessageTruncatesLongContent(t *testing.T) {
 	message := cleanLogMessage("2026/07/16 12:00:00 [QChat] " + string(make([]byte, 200)))
 	if len([]rune(message)) > 121 {

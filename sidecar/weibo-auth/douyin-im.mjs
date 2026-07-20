@@ -271,11 +271,13 @@ function replyDetails(content, ext = {}) {
   return empty;
 }
 
-// Video / aweme share cards. Type 8 is the classic share; type 77 is the richer
-// card used when forwarding a feed video (has itemId + cover + content_name author).
+// Video / aweme share cards.
+// - type 8: classic share
+// - type 77: richer feed card (itemId + cover + content_name author)
+// - type 105: comment/share-with-video card (aweme_title + cover + often comment_*)
 function isDouyinVideoShare(messageType, content) {
   if (!content || typeof content !== 'object') return false;
-  if (messageType === 8 || messageType === 77) return true;
+  if (messageType === 8 || messageType === 77 || messageType === 105) return true;
   const itemId = content.itemId || content.item_id || content.aweme_id || content.awemeId;
   if (!itemId) return false;
   return Boolean(
@@ -284,17 +286,105 @@ function isDouyinVideoShare(messageType, content) {
     || content.awemeType != null
     || content.aweType != null
     || content.content_title
+    || content.aweme_title
     || content.play_addr
+    || content.media_type === 4
+    || content.media_type === '4'
   );
 }
 
-function formatDouyinVideoShare(content) {
-  const itemId = String(content?.itemId || content?.item_id || content?.aweme_id || content?.awemeId || '').trim();
-  // Prefer video title, never author nickname (content_name) as the body text.
-  const title = String(content?.content_title || content?.title || content?.desc || '').trim();
-  const text = title ? `[视频] ${title}` : '[视频]';
+function firstCoverURL(content = {}) {
+  const candidates = [];
+  collectURLCandidates(content.cover_url, candidates);
+  collectURLCandidates(content.content_thumb, candidates);
+  collectURLCandidates(content.cover, candidates);
+  collectURLCandidates(content.thumb, candidates);
+  // Nested objects sometimes hold url_list.
+  collectURLCandidates(content.video, candidates);
+  collectURLCandidates(content.cover_image, candidates);
+  // Prefer image-looking CDN URLs; one is enough for a card cover.
+  const cleaned = [];
+  for (const url of candidates) {
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (url.startsWith('data:')) continue;
+    if (!cleaned.includes(url)) cleaned.push(url);
+  }
+  if (cleaned.length === 0) return '';
+  // Prefer jpeg/webp/png static covers over weird tokens.
+  cleaned.sort((a, b) => {
+    const score = (u) => {
+      let s = 0;
+      const x = u.toLowerCase();
+      if (/\.(jpg|jpeg|png|webp)(\?|$)/i.test(x)) s += 3;
+      if (/cover|thumb|origin|large/i.test(x)) s += 2;
+      if (/avatar|profile/i.test(x)) s -= 2;
+      return s;
+    };
+    return score(b) - score(a);
+  });
+  return cleaned[0];
+}
+
+function formatDouyinVideoShare(content = {}) {
+  const itemId = String(
+    content.itemId
+    || content.item_id
+    || content.aweme_id
+    || content.awemeId
+    || content?.related_share_video?.itemId
+    || '',
+  ).trim();
+
+  // Prefer real video title fields; never use author nickname (content_name) as body.
+  let title = String(
+    content.content_title
+    || content.aweme_title
+    || content.title
+    || content.desc
+    || content.msgHint
+    || '',
+  ).trim();
+  // Strip trailing hashtag spam a bit for QQ readability.
+  if (title.length > 80) {
+    title = `${title.slice(0, 80)}…`;
+  }
+
+  const author = String(
+    content.content_name
+    || content.aweme_author_name
+    || content.author_name
+    || content.authorName
+    || '',
+  ).trim();
+
+  // type 105 often shares a video *with a comment* on it.
+  const comment = String(
+    content.comment
+    || content.comment_text
+    || content.commentText
+    || '',
+  ).trim();
+  const commentUser = String(
+    content.comment_user_name
+    || content.commentUserName
+    || '',
+  ).trim();
+
+  const lines = [];
+  if (title) lines.push(`[视频] ${title}`);
+  else lines.push('[视频]');
+  if (author) lines.push(`作者：${author}`);
+  if (comment) {
+    lines.push(commentUser ? `评论 ${commentUser}：${comment}` : `评论：${comment}`);
+  }
+
   const link = itemId ? `https://www.douyin.com/video/${itemId}` : '';
-  return { text, link };
+  const cover = firstCoverURL(content);
+  return {
+    text: lines.join('\n'),
+    link,
+    cover,
+  };
 }
 
 function parseMaybeJSON(value) {
@@ -357,7 +447,48 @@ function extractStickerImageURLs(content = {}, ext = {}) {
     if (url.startsWith('data:')) continue;
     if (!cleaned.includes(url)) cleaned.push(url);
   }
-  return cleaned.slice(0, 9);
+  // Stickers often expose static_url + animate_url (same asset). Prefer one:
+  // static/png first, then any remaining unique by path basename without query.
+  return pickBestStickerURLs(cleaned, 1);
+}
+
+// Collapse same-sticker multi-URL payloads (static + animate) to a single best URL.
+function pickBestStickerURLs(urls, max = 1) {
+  if (!Array.isArray(urls) || urls.length === 0) return [];
+  const score = (url) => {
+    const u = String(url).toLowerCase();
+    let s = 0;
+    if (/\.(png|webp|jpg|jpeg)(\?|$)/i.test(u)) s += 3;
+    if (/static|thumb|origin|large/i.test(u)) s += 2;
+    if (/animate|gif|awebp|heic/i.test(u)) s -= 1;
+    return s;
+  };
+  const byBase = new Map();
+  for (const url of urls) {
+    let base = url;
+    try {
+      const parsed = new URL(url);
+      base = parsed.pathname.replace(/\/+$/, '') || url;
+    } catch {
+      base = url.split('?')[0];
+    }
+    const prev = byBase.get(base);
+    if (!prev || score(url) > score(prev)) byBase.set(base, url);
+  }
+  return [...byBase.values()]
+    .sort((a, b) => score(b) - score(a))
+    .slice(0, Math.max(1, max));
+}
+
+// Placeholder captions that are redundant once a real sticker/image is attached.
+function isStickerCaptionText(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (t === '[表情]' || t === '[贴纸]') return true;
+  // Do NOT treat [图片]/[视频] as sticker captions — those are media type labels.
+  // [早点睡] / [比心] / [续火花] — short bracket light-interaction labels.
+  if (/^\[[^\]\n]{1,12}\]$/.test(t) && t !== '[图片]' && t !== '[视频]' && t !== '[语音]') return true;
+  return false;
 }
 
 function isLightInteractionMessage(messageType, content, ext = {}) {
@@ -421,12 +552,27 @@ function formatDouyinType110(content = {}, ext = {}) {
   return '';
 }
 
-// Compact share / card previews for quote lines: keep 「[分享图文]」 not the whole essay.
+// Compact share / card previews for quote lines.
+// Keep a short title when present: 「[分享图文] 缪尼火速二婚了」 not bare 「[分享图文]」.
 function compactDouyinShareQuote(text) {
   const raw = String(text || '').trim();
   if (!raw) return '';
-  if (raw.startsWith('[分享图文]')) return '[分享图文]';
-  if (raw.startsWith('[分享]')) return '[分享]';
+  if (raw.startsWith('[分享图文]')) {
+    const rest = raw.slice('[分享图文]'.length).trim().replace(/^[:：\-\s]+/, '');
+    if (rest) {
+      const short = rest.length > 40 ? `${rest.slice(0, 40)}…` : rest;
+      return `[分享图文] ${short}`;
+    }
+    return '[分享图文]';
+  }
+  if (raw.startsWith('[分享]')) {
+    const rest = raw.slice('[分享]'.length).trim().replace(/^[:：\-\s]+/, '');
+    if (rest) {
+      const short = rest.length > 40 ? `${rest.slice(0, 40)}…` : rest;
+      return `[分享] ${short}`;
+    }
+    return '[分享]';
+  }
   if (raw.startsWith('[视频]')) {
     const rest = raw.slice('[视频]'.length).trim();
     return rest ? `[视频] ${rest.slice(0, 40)}${rest.length > 40 ? '…' : ''}` : '[视频]';
@@ -441,7 +587,52 @@ function looksLikeDouyinShareCardText(text) {
     raw.startsWith('[分享图文]')
     || raw.startsWith('[分享]')
     || raw.startsWith('[视频]')
+    || /^\[分享图文\]/.test(raw)
   );
+}
+
+// Build a compact share-card label from nested JSON (article/link/note/video cards).
+// Used when a reply frame embeds the quoted card instead of plain text.
+function formatDouyinShareCardFromBag(bag = {}) {
+  if (!bag || typeof bag !== 'object') return '';
+  // Already formatted labels
+  const existing = firstText(bag, ['text', 'msgHint', 'hint', 'display_text', 'displayText']);
+  if (looksLikeDouyinShareCardText(existing)) return compactDouyinShareQuote(existing);
+
+  // Video / aweme nested in quote payload
+  if (isDouyinVideoShare(0, bag) || bag.itemId || bag.item_id || bag.aweme_id || bag.awemeId || bag?.related_share_video) {
+    const video = formatDouyinVideoShare(bag);
+    // One-line quote form: 「[视频] 标题」 (drop 作者/评论 multi-line noise for quote stack)
+    const firstLine = String(video.text || '').split('\n')[0].trim() || '[视频]';
+    return compactDouyinShareQuote(firstLine);
+  }
+
+  const title = firstText(bag, [
+    'title', 'content_title', 'contentTitle', 'aweme_title', 'desc', 'description',
+    'summary', 'card_title', 'cardTitle', 'link_title', 'linkTitle', 'name',
+  ]);
+  const author = firstText(bag, [
+    'content_name', 'author_name', 'authorName', 'nickname', 'user_name', 'userName',
+  ]);
+  const cover = firstCoverURL(bag);
+  const hasCardShape = Boolean(
+    title
+    || cover
+    || bag.card_type != null
+    || bag.cardType != null
+    || bag.link_url
+    || bag.linkUrl
+    || bag.share_url
+    || bag.shareUrl
+    || bag.article_url
+    || bag.schema
+  );
+  if (!hasCardShape && !title) return '';
+
+  const parts = ['[分享图文]'];
+  if (title) parts.push(title.slice(0, 40) + (title.length > 40 ? '…' : ''));
+  else if (author) parts.push(author);
+  return parts.join(' ').trim();
 }
 
 function formatDouyinSystemNotice(content = {}) {
@@ -611,8 +802,10 @@ function extractTextFromNestedProtobuf(bytes) {
     const preferredKeys = [
       'text', 'content', 'message', 'msg', 'title', 'description', 'content_title',
       'hint', 'body', 'richText', 'rich_text', 'display_text', 'displayText',
+      'reply_text', 'replyText', 'comment', 'comment_text', 'commentText',
     ];
     const bag = {};
+    const chineseRuns = [];
     for (const values of fields.values()) {
       for (const value of values || []) {
         if (!(value instanceof Uint8Array)) continue;
@@ -623,21 +816,43 @@ function extractTextFromNestedProtobuf(bytes) {
           if (parsed && typeof parsed === 'object') Object.assign(bag, parsed);
         } catch {
           if (/[\u4e00-\u9fff]/.test(asStr) && asStr.length <= 200) {
-            bag.text = bag.text || asStr;
+            chineseRuns.push(asStr.trim());
+            bag.text = bag.text || asStr.trim();
           }
         }
       }
     }
     const reply = replyDetails(bag, {});
-    const text = firstText(bag, preferredKeys) || '';
+    // Prefer explicit body fields; also accept bare Chinese runs that are NOT share cards.
+    let text = firstText(bag, preferredKeys) || '';
+    if (text && looksLikeDouyinShareCardText(text)) {
+      // body looks like quote card — keep as quote, clear body for now
+      if (!reply.quotedText) reply.quotedText = compactDouyinShareQuote(text);
+      text = '';
+    }
+    if (!text) {
+      const nonCardRun = chineseRuns
+        .filter((r) => r && !looksLikeDouyinShareCardText(r) && !/^[a-z][a-z0-9_]*$/i.test(r))
+        .sort((a, b) => b.length - a.length)[0];
+      if (nonCardRun) text = nonCardRun;
+    }
+    // Build share card quote from bag fields (title etc.) when nested only has card meta.
+    let quotedText = reply.quotedText || '';
+    if (!quotedText) {
+      const card = formatDouyinShareCardFromBag(bag);
+      if (card) quotedText = card;
+    } else {
+      quotedText = compactDouyinShareQuote(quotedText) || quotedText;
+    }
     return {
       text: text && !/^[a-z][a-z0-9_]*$/i.test(text) ? text : '',
       quotedName: reply.quotedName,
-      quotedText: reply.quotedText,
+      quotedText,
       quotedSenderUid: reply.quotedSenderUid,
       quotedServerMessageId: reply.quotedServerMessageId || '',
       quotedClientMessageId: reply.quotedClientMessageId || '',
       bagKeys: Object.keys(bag),
+      chineseRuns: chineseRuns.slice(0, 6),
     };
   } catch {
     return { text: '', quotedName: '', quotedText: '', quotedSenderUid: '', quotedServerMessageId: '', quotedClientMessageId: '' };
@@ -646,12 +861,15 @@ function extractTextFromNestedProtobuf(bytes) {
 
 // Scan remaining protobuf fields for JSON / Chinese chat text when field 8 is empty
 // or non-JSON. Image-reply frames may stash body outside classic content JSON.
+// Also recover share-card title + reply body separately when both appear in nested fields.
 function extractTextFromOtherFields(message, skipFields = new Set([1, 2, 3, 4, 5, 6, 7, 9, 10, 14])) {
   const preferredKeys = [
     'text', 'content', 'message', 'msg', 'title', 'description', 'content_title',
     'hint', 'body', 'richText', 'rich_text', 'display_text', 'displayText',
+    'reply_text', 'replyText', 'comment', 'comment_text', 'commentText',
   ];
-  const candidates = [];
+  const bodyCandidates = [];
+  const quoteCandidates = [];
   for (const [number, values] of message.entries()) {
     if (skipFields.has(number)) continue;
     for (const value of values || []) {
@@ -662,28 +880,50 @@ function extractTextFromOtherFields(message, skipFields = new Set([1, 2, 3, 4, 5
         const parsed = JSON.parse(asStr);
         if (parsed && typeof parsed === 'object') {
           const nested = firstText(parsed, preferredKeys);
-          if (nested && !/^[a-z][a-z0-9_]*$/i.test(nested)) {
-            candidates.push({ number, text: nested, source: 'json' });
+          const card = formatDouyinShareCardFromBag(parsed);
+          if (card) quoteCandidates.push({ number, text: card, source: 'json-card' });
+          if (nested && !/^[a-z][a-z0-9_]*$/i.test(nested) && !looksLikeDouyinShareCardText(nested)) {
+            bodyCandidates.push({ number, text: nested, source: 'json' });
+          } else if (nested && looksLikeDouyinShareCardText(nested)) {
+            quoteCandidates.push({ number, text: compactDouyinShareQuote(nested), source: 'json-share' });
           }
           continue;
         }
       } catch {}
       // Nested protobuf inside this field.
       const nestedPb = extractTextFromNestedProtobuf(value);
+      if (nestedPb.quotedText) {
+        quoteCandidates.push({ number, text: nestedPb.quotedText, source: 'nested-pb-quote' });
+      }
       if (nestedPb.text) {
-        candidates.push({ number, text: nestedPb.text, source: 'nested-pb' });
+        if (looksLikeDouyinShareCardText(nestedPb.text)) {
+          quoteCandidates.push({ number, text: compactDouyinShareQuote(nestedPb.text), source: 'nested-pb-share' });
+        } else {
+          bodyCandidates.push({ number, text: nestedPb.text, source: 'nested-pb' });
+        }
         continue;
       }
       const runs = extractPrintableRuns(value, 2, 8)
         .filter((run) => /[\u4e00-\u9fff]/.test(run) && run.length <= 200 && !/^[a-z][a-z0-9_]*$/i.test(run));
-      for (const run of runs) candidates.push({ number, text: run, source: 'raw' });
+      for (const run of runs) {
+        if (looksLikeDouyinShareCardText(run) || run.includes('分享图文') || run.includes('分享')) {
+          const card = run.startsWith('[') ? compactDouyinShareQuote(run) : `[分享图文] ${run.replace(/^分享图文[:：\s]*/, '').slice(0, 40)}`;
+          quoteCandidates.push({ number, text: card, source: 'raw-share' });
+        } else {
+          bodyCandidates.push({ number, text: run, source: 'raw' });
+        }
+      }
     }
   }
-  if (candidates.length === 0) return { text: '', fieldHits: [] };
-  candidates.sort((a, b) => b.text.length - a.text.length);
+  bodyCandidates.sort((a, b) => b.text.length - a.text.length);
+  quoteCandidates.sort((a, b) => b.text.length - a.text.length);
   return {
-    text: candidates[0].text,
-    fieldHits: candidates.slice(0, 6).map((c) => `${c.number}:${c.source}:${c.text.slice(0, 40)}`),
+    text: bodyCandidates[0]?.text || '',
+    quotedText: quoteCandidates[0]?.text || '',
+    fieldHits: [
+      ...bodyCandidates.slice(0, 4).map((c) => `b${c.number}:${c.source}:${c.text.slice(0, 40)}`),
+      ...quoteCandidates.slice(0, 4).map((c) => `q${c.number}:${c.source}:${c.text.slice(0, 40)}`),
+    ],
   };
 }
 
@@ -728,6 +968,11 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     const video = formatDouyinVideoShare(content);
     text = video.text;
     link = video.link;
+    // Prefer a single cover image for the card (avoid dumping 6 CDN variants).
+    if (video.cover) {
+      // Stash on content so the later image extract path can pick it up if needed.
+      content.__douyin_video_cover = video.cover;
+    }
   } else if (isLightInteractionMessage(messageType, content, ext)) {
     text = extractLightInteractionLabel(content, ext) || '[表情]';
   } else if (isDouyinSystemNotice(messageType, content)) {
@@ -762,25 +1007,43 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     // Empty / useless field 8: scan other protobuf fields (image-reply hypothesis).
     // Real 2026-07-19 sample: type=7 empty content, field 18 nested-pb carries the
     // quoted 「[分享图文]…」 that the peer is replying to — NOT the peer's body.
-    if (!text) {
-      const other = extractTextFromOtherFields(message);
-      if (other.text) {
-        fieldHits = other.fieldHits;
-        if (!quotedText && looksLikeDouyinShareCardText(other.text)) {
-          quotedText = compactDouyinShareQuote(other.text);
-          // Leave body empty so we don't attribute the share card to the peer.
-        } else if (!quotedText && (quotedServerMessageId || quotedClientMessageId || quotedName)) {
-          // Have explicit reply refs but no body: treat scavenged text as quote if long card-like.
-          quotedText = compactDouyinShareQuote(other.text);
-        } else {
-          text = other.text;
+    // Also recovers reply body + video quote separately when both appear.
+    {
+      const needBody = !text;
+      const needQuote = !quotedText;
+      if (needBody || needQuote) {
+        const other = extractTextFromOtherFields(message);
+        if (other.fieldHits?.length) fieldHits = other.fieldHits;
+        if (needQuote && other.quotedText) {
+          quotedText = compactDouyinShareQuote(other.quotedText) || other.quotedText;
+        }
+        if (needBody && other.text) {
+          if (!quotedText && looksLikeDouyinShareCardText(other.text)) {
+            quotedText = compactDouyinShareQuote(other.text);
+            // Leave body empty so we don't attribute the share card to the peer.
+          } else if (!quotedText && (quotedServerMessageId || quotedClientMessageId || quotedName)
+            && looksLikeDouyinShareCardText(other.text)) {
+            quotedText = compactDouyinShareQuote(other.text);
+          } else if (!looksLikeDouyinShareCardText(other.text)) {
+            text = other.text;
+          }
         }
       }
-    } else if (!quotedText && looksLikeDouyinShareCardText(text) && !contentParseOk && messageType === 7) {
+    }
+    if (!quotedText && looksLikeDouyinShareCardText(text) && !contentParseOk && messageType === 7) {
       // Body-only path also picked share card from nested pb with empty JSON content.
-      // Prefer quote stack: 「我/对方：[分享图文]」 + real reply (or [回复]).
+      // Prefer quote stack: 「我/对方：[分享图文]/[视频]」 + real reply (or [回复]).
       quotedText = compactDouyinShareQuote(text);
       text = '';
+    }
+    // Nested content itself may be a video card used as quote source while body is reply text.
+    if (!quotedText && contentParseOk && content && typeof content === 'object') {
+      const card = formatDouyinShareCardFromBag(content);
+      // Only promote to quote when this frame also looks like a reply (has ref or body separate).
+      if (card && (quotedServerMessageId || quotedClientMessageId || quotedName || (text && text !== card))) {
+        // If main text is empty and content is purely a card, keep as body (direct share), not quote.
+        if (text) quotedText = card;
+      }
     }
     text = formatDouyinStickerText(text, messageType);
   }
@@ -799,11 +1062,16 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     || text === '[控制消息]';
   // Extract image URLs for type 27 (and sticker/emoji frames when present).
   let images = extractImageURLs(content, ext, messageType);
-  if ([5, 50002, 70002].includes(messageType) || isLightInteractionMessage(messageType, content, ext)) {
+  if (isDouyinVideoShare(messageType, content)) {
+    // Video cards: only keep the best cover, not every CDN mirror in the payload.
+    const cover = content.__douyin_video_cover || firstCoverURL(content);
+    images = cover ? [cover] : pickBestStickerURLs(images, 1);
+  } else if ([5, 50002, 70002].includes(messageType) || isLightInteractionMessage(messageType, content, ext)) {
     for (const url of extractStickerImageURLs(content, ext)) {
       if (!images.includes(url)) images.push(url);
     }
-    images = images.slice(0, 9);
+    // Light-interaction / emoji: one image is enough (avoid static+animate double send).
+    images = pickBestStickerURLs(images, 1);
   }
   if (messageType === 27) {
     if (!text) text = '[图片]';
@@ -823,9 +1091,17 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   if (images.length === 0 && (messageType === 27 || /url_list|cover_url|image_url|static_url|animate_url/i.test(JSON.stringify(content || {}).slice(0, 500)))) {
     images = extractImageURLs(content, ext, messageType);
   }
-  // When sticker only has image, keep a short caption.
+  // When sticker only has image, keep a short caption ONLY if no image URL resolved.
   if (!text && images.length > 0 && [5, 27, 50002, 70002].includes(messageType)) {
     text = messageType === 27 ? '[图片]' : '[表情]';
+  }
+  // Sticker/emoji with real image: drop [表情]/[早点睡]/[比心] captions (not [视频]/chat text).
+  if (
+    images.length > 0
+    && ([5, 50002, 70002].includes(messageType) || isLightInteractionMessage(messageType, content, ext))
+    && isStickerCaptionText(text)
+  ) {
+    text = '';
   }
   const contentKeyList = Object.keys(content || {});
   const rawRuns = (!contentParseOk && contentBytes)
