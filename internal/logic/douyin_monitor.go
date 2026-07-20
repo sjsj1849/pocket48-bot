@@ -864,6 +864,14 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 	}
 	// Prefer Chinese colon to match sender lines; force "我：" when name is 我.
 	quotedLine := quotedText
+	// Bare "[视频]" quote with no card detail is noise (Douyin splits video share + caption
+	// into type=8 + type=7). Drop the empty quote so only the real caption remains.
+	if quotedText == "[视频]" || quotedText == "[图片]" || quotedText == "[语音]" {
+		if quotedName == "" {
+			quotedText = ""
+			return text
+		}
+	}
 	if quotedName != "" {
 		quotedLine = quotedName + "：" + quotedText
 	}

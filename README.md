@@ -53,7 +53,7 @@
 - 私信**回复**尽量拆成引用栈：`我/对方：【分享图文|视频 标题】` + `对方：正文`；短时双推（约 3s）软去重
 - IM 断连自愈：软告警 → 侧重启 → Bot 进程重启（systemd）→ 仍未恢复再告警
 
-### 📕 小红书监控
+### 📕 小红书监控（**不建议启用**）
 - 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
 - **主路径**：页内 `mnsv2 → XYS_` 签名 + 缓存 `X-S-Common` / `x-rap-param` → `user_posted` API（失败**不** goto 用户主页）
 - 登录态：Chromium Profile + `weibo-storage-state.json`（cookie + 小红书 localStorage）；登录成功才 force 写盘，失败扫描不覆盖好会话
@@ -62,7 +62,8 @@
 - 复用微博/抖音同一 Chromium Profile；登录二维码私聊管理员
 - 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
 - **视频帖**：QQ 侧目前稳定发封面图 + 小红书链接，列表接口**不保证**视频文件本体
-- **浏览器内存**：侧卡默认 `--renderer-process-limit=4`；每 5 分钟 prune 孤儿页并打 `browserDiag`；抖音作品已是 Cookie+HTTP，登录页用完即关，不常驻
+- **浏览器内存**：侧卡默认 `--renderer-process-limit=4`；每 5 分钟 prune 孤儿页并打 `browserDiag`
+- ⚠️ **风控与稳定性（2026-07）**：实战中拉帖极不稳定——`user/me` 常为 guest、`user_posted` 易 461、扫码后仍可能被判定游客或账号异常，甚至触发平台违规提醒。**默认请保持 `XIAOHONGSHU_ENABLED=false`，不建议生产依赖本链路。** 紧急停扫可 touch `storage/xhs-scan-paused`。
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -228,7 +229,14 @@ cd sidecar/weibo-auth
 npm run test:douyin-im
 ```
 
-### 📕 小红书帖子监控（可选）
+### 📕 小红书帖子监控（可选 · **不建议生产启用**）
+
+> ⚠️ **先看结论（2026-07 实战）**  
+> 小红书对自动化风控很严，本链路**不稳定**，不建议作为日常监控依赖。常见现象包括：  
+> - 浏览器 Cookie / `web_session` 已落盘，但 `user/me` 仍为 **guest**，`user_posted` 返回 **HTTP 461** 或 notes=0  
+> - 扫码“登上去”后很快失效，或页面刷新后再次要求登录  
+> - 持续轮询可能加重账号/环境异常，甚至触发平台违规提醒  
+> **默认请保持 `XIAOHONGSHU_ENABLED=false`。** 若必须调试：先 `touch storage/xhs-scan-paused` 停自动扫，只做登录与探针；确认安全后再删该文件并开启总开关。
 
 小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。**当前主路径**是登录页（explore）上的页内签名后调用 edith `user_posted`，而不是每轮 `goto` 用户主页扒 DOM：
 
@@ -237,12 +245,13 @@ npm run test:douyin-im
 3. `fetch` `user_posted?user_id=…` 拉笔记列表；**API 失败不再 goto 用户主页兜底**
 4. 登录失效（`login-dead` / guest / `-100`）时**禁止**自动刷小红书页；需面板扫码重登
 5. 失败扫描**不会**用空 cookie 覆盖已落盘的好会话；面板热重载 SIGHUP **只打 bot 主进程**（避免误杀 Chrome）
+6. 紧急停扫：存在文件 `storage/xhs-scan-paused` 时跳过自动扫描（可与总开关叠加）
 
 实现仍参考 [jackwener/xhs-cli](https://github.com/jackwener/xhs-cli) / [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) 的登录与页面实践；**没有**稳定的纯进程外 HTTP 复刻（签名依赖页内 VM）。
 
 ```json
 {
-  "XIAOHONGSHU_ENABLED": true,
+  "XIAOHONGSHU_ENABLED": false,
   "XIAOHONGSHU_POLL_SECONDS": 60,
   "BROWSER_PROXY_SERVER": "",
   "XIAOHONGSHU_SUBSCRIPTIONS": {}
@@ -250,7 +259,7 @@ npm run test:douyin-im
 ```
 
 > ⚠️ **坑（先看）**
-> - **浏览器 `healthy` / Cookie 在 ≠ 能拉帖**：应用 `notes_ok` / 管理面板 Attention / `user/me` 非 guest 判断。
+> - **浏览器 `healthy` / Cookie 在 ≠ 能拉帖**：应用 `notes_ok` / 管理面板 Attention / `user/me` **非 guest** 判断。
 > - **短链 `xhslink` 需解析为内部 `user_id`** 后再订阅；不要手填无效 ID。
 > - 用户说「登好了」后仍应执行 `bot xiaohongshu scan` 验证 notes>0；不要只看侧卡状态绿灯。
 > - 登录态与微博/抖音共用 `BROWSER_PROFILE_DIR`，**按账号凭据保护**，勿提交 Git。
@@ -259,6 +268,7 @@ npm run test:douyin-im
 > - 游标：首次成功只建基线；之后仅转发约 **12 小时内**且相对游标更新的帖，单次最多 3 条；落后过多只跳游标。
 > - **视频本体**：列表接口通常只有封面；QQ 转发封面 + 链接，点开小红书看正片。
 > - **内存诊断**：日志中的 `browserDiag(...)` 会打印当前标签角色/URL 摘要与 node heap；出现大量 `orphan` 页再考虑侧重启。
+> - **HTTP 461 + msg「成功」** 多为环境/风控 opaque 错误，**不等于**“必须立刻扫码重登”；先停扫、查代理/IP，再决定是否登录。
 
 - 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；订阅与轮询等多数字段热重载，总开关等标「需重启」的项仍需重启 Bot。
 - 命令：`bot xiaohongshu add <个人主页链接|内部 user_id> [at_all]` 等，见下方命令表。
@@ -276,7 +286,7 @@ npm run test:douyin-im
 ```bash
 git clone git@github.com:sjsj1849/pocket48-bot.git
 cd pocket48-bot
-git checkout v0.2.5   # 或最新 tag
+git checkout v0.2.6   # 或最新 tag
 go build -o pocket48-bot ./cmd/bot
 # 可选：管理面板二进制（内嵌 admin-ui）
 go build -o pocket48-admin ./cmd/admin
@@ -398,7 +408,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 | `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
 | `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
-| `XIAOHONGSHU_ENABLED` | 启用小红书帖子与开播提醒 |
+| `XIAOHONGSHU_ENABLED` | 启用小红书帖子与开播提醒（**不建议生产开启**） |
 
 `POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交（`loginType=MOBILE_PWD`）。部分账号会被官方要求「请使用手机号验证码登录」，此时密码自动登录会失败，请改用短信或手填 `POCKET_TOKEN`。也可用短信登录：
 
@@ -427,7 +437,7 @@ bot code <验证码>          # 输入验证码完成登录
 | `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
 | `BROWSER_PROXY_SERVER` | 可选：Chromium 代理（如 `http://127.0.0.1:17890`） | `""` |
-| `XIAOHONGSHU_ENABLED` | 启用小红书监控 | `false` |
+| `XIAOHONGSHU_ENABLED` | 启用小红书监控（**默认 false；不建议生产开启**） | `false` |
 | `XIAOHONGSHU_POLL_SECONDS` | 小红书轮询间隔（秒；配置低于 30 回落 60） | `60` |
 | `XIAOHONGSHU_SUBSCRIPTIONS` | QQ 群→小红书内部用户 ID 订阅 | `{}` |
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
