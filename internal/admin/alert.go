@@ -85,7 +85,7 @@ func (s *Server) checkServiceAlerts(now time.Time) {
 	state := s.loadAlertState()
 	changed := false
 	for _, service := range services {
-		if service.ID != "bot" && service.LastTime == "" {
+		if !shouldAlertService(service) {
 			continue
 		}
 		current := state.Services[service.ID]
@@ -130,6 +130,19 @@ func loadAlertConfig(path string) (alertConfig, error) {
 	var cfg alertConfig
 	err = json.Unmarshal(data, &cfg)
 	return cfg, err
+}
+
+// shouldAlertService gates the generic admin offline email path.
+// Douyin IM is excluded: bot-side watchdog does sidecar restart → bot restart →
+// email only after auto-heal fails. Admin must not mail on "重连中".
+func shouldAlertService(service serviceState) bool {
+	if service.ID == "douyin_im" {
+		return false
+	}
+	if service.ID != "bot" && service.LastTime == "" {
+		return false
+	}
+	return true
 }
 
 func (s *Server) loadAlertState() alertStateFile {

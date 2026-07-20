@@ -61,7 +61,11 @@ type Config struct {
 	BrowserSidecarCmd                 string                                             `json:"BROWSER_SIDECAR_CMD"`
 	BrowserProfileDir                 string                                             `json:"BROWSER_PROFILE_DIR"`
 	BrowserHeadless                   bool                                               `json:"BROWSER_HEADLESS"`
-	DouyinEnabled                     bool                                               `json:"DOUYIN_ENABLED"`
+	// BrowserProxyServer: optional Chromium proxy for the shared weibo-auth browser
+	// (Playwright proxy.server). Example: http://127.0.0.1:17890
+	// Used to bypass datacenter IP bans (e.g. Xiaohongshu 300012 / HTTP 461).
+	BrowserProxyServer string `json:"BROWSER_PROXY_SERVER,omitempty"`
+	DouyinEnabled      bool   `json:"DOUYIN_ENABLED"`
 	DouyinPollSeconds                 int                                                `json:"DOUYIN_POLL_SECONDS"`
 	DouyinLiveWSURL                   string                                             `json:"DOUYIN_LIVE_WS_URL"`
 	DouyinLiveSidecarCmd              string                                             `json:"DOUYIN_LIVE_SIDECAR_CMD"`
@@ -273,7 +277,7 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)
 	}
 	if cfg.XiaohongshuPollSeconds < 30 {
-		cfg.XiaohongshuPollSeconds = 90
+		cfg.XiaohongshuPollSeconds = 60
 	}
 	if cfg.XiaohongshuSubscriptions == nil {
 		cfg.XiaohongshuSubscriptions = make(map[int64]map[string]*XiaohongshuConfig)

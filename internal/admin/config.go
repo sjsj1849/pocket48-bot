@@ -309,11 +309,24 @@ func (s *Server) writeConfigAndReloadBot(values map[string]any) error {
 	if err := s.writeConfigNoRestart(values); err != nil {
 		return err
 	}
-	// Send SIGHUP to bot process via systemd
-	_, err := runCommand(5*time.Second, "systemctl", "kill", "-s", "HUP", botService)
+	// CRITICAL: only signal the MAIN pocket48-bot process.
+	// `systemctl kill -s HUP` defaults to the whole cgroup and also HUP's chrome/node,
+	// which closes the Playwright browserContext (2026-07-20 outage: browser closed → XHS fail alerts).
+	_, err := runCommand(5*time.Second, "systemctl", "kill", "-s", "HUP", "--kill-whom=main", botService)
 	if err != nil {
-		// Non-fatal: bot will pick up changes on next restart
-		log.Printf("signal bot for reload: %v (non-fatal)", err)
+		// Fallback: kill only MainPID if systemd version lacks --kill-whom
+		if out, err2 := runCommand(5*time.Second, "systemctl", "show", "-p", "MainPID", "--value", botService); err2 == nil {
+			pid := strings.TrimSpace(out)
+			if pid != "" && pid != "0" {
+				if _, err3 := runCommand(5*time.Second, "kill", "-s", "HUP", pid); err3 != nil {
+					log.Printf("signal bot for reload: %v / fallback %v (non-fatal)", err, err3)
+				}
+			} else {
+				log.Printf("signal bot for reload: %v (non-fatal, no MainPID)", err)
+			}
+		} else {
+			log.Printf("signal bot for reload: %v (non-fatal)", err)
+		}
 	}
 	return nil
 }

@@ -55,8 +55,11 @@ let settings = {
   douyinIMGroupName: '',
   douyinIMGroupNumber: '',
   xiaohongshuEnabled: false,
-  xiaohongshuPollSeconds: 90,
+  // Default 5 minutes — avoid thrashing explore/login.
+  xiaohongshuPollSeconds: 300,
   xiaohongshuAccounts: [],
+  // Optional Playwright proxy, e.g. http://127.0.0.1:17890 (mihomo-xhs)
+  proxyServer: '',
 };
 let douyinIMIdentity = { selfUid: '', conversationId: '', ownerUid: '', groupName: '', groupNumber: '' };
 const douyinIMSeen = new Set();
@@ -235,18 +238,278 @@ async function restoreStorageState() {
     if (Array.isArray(saved.cookies) && saved.cookies.length > 0) {
       await context.addCookies(saved.cookies);
       log(`restored ${saved.cookies.length} cookies from storage state`);
+      // Remember last good XHS session fingerprint for fail-safe persist.
+      const xhs = saved.cookies.filter((c) => /xiaohongshu/i.test(String(c.domain || '')));
+      const ws = xhs.find((c) => c.name === 'web_session')?.value || '';
+      const a1 = xhs.find((c) => c.name === 'a1')?.value || '';
+      if (ws && a1) {
+        xiaohongshuLastGoodSession = {
+          webSession: ws,
+          a1,
+          savedAt: Date.now(),
+          source: 'restore',
+        };
+      }
+    }
+    // Restore xiaohongshu localStorage if we previously saved it (origins entry).
+    xiaohongshuSavedLocalStorage = [];
+    if (Array.isArray(saved.origins)) {
+      for (const origin of saved.origins) {
+        if (!/xiaohongshu\.com/i.test(String(origin?.origin || ''))) continue;
+        if (Array.isArray(origin.localStorage) && origin.localStorage.length > 0) {
+          xiaohongshuSavedLocalStorage = origin.localStorage
+            .map((item) => ({ name: String(item.name || ''), value: String(item.value ?? '') }))
+            .filter((item) => item.name);
+          log(`restored xhs localStorage keys=${xiaohongshuSavedLocalStorage.length} from ${origin.origin}`);
+        }
+      }
     }
   } catch (error) {
     if (error?.code !== 'ENOENT') log(`storage state restore failed: ${error.message}`);
   }
 }
 
-async function persistStorageState() {
-  if (!context || !statePath) return;
-  const tempPath = `${statePath}.tmp`;
-  await context.storageState({ path: tempPath });
-  await fs.chmod(tempPath, 0o600).catch(() => {});
-  await fs.rename(tempPath, statePath);
+/** Last known-good XHS session — never let a failed scan overwrite this with empty cookies. */
+let xiaohongshuLastGoodSession = null;
+/** localStorage snapshot for www/xiaohongshu (Playwright storageState only captures visited origins). */
+let xiaohongshuSavedLocalStorage = [];
+/** When true: login dead / need re-login — forbid navigate/refresh on xhs pages. */
+let xiaohongshuLoginDead = false;
+let xiaohongshuLoginDeadReason = '';
+
+function markXiaohongshuLoginDead(reason = '') {
+  xiaohongshuLoginDead = true;
+  xiaohongshuLoginDeadReason = String(reason || 'login_required').slice(0, 200);
+  log(`xiaohongshu login-dead ON: ${xiaohongshuLoginDeadReason}`);
+}
+
+function clearXiaohongshuLoginDead(reason = '') {
+  if (xiaohongshuLoginDead) {
+    log(`xiaohongshu login-dead OFF: ${reason || 'cleared'}`);
+  }
+  xiaohongshuLoginDead = false;
+  xiaohongshuLoginDeadReason = '';
+}
+
+async function captureXiaohongshuLocalStorage(page) {
+  if (!page || page.isClosed()) return [];
+  try {
+    const items = await page.evaluate(() => {
+      const out = [];
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const name = localStorage.key(i);
+          if (!name) continue;
+          out.push({ name, value: localStorage.getItem(name) ?? '' });
+        }
+      } catch {}
+      return out;
+    });
+    if (Array.isArray(items) && items.length > 0) {
+      xiaohongshuSavedLocalStorage = items;
+    }
+    return items || [];
+  } catch {
+    return [];
+  }
+}
+
+async function applyXiaohongshuLocalStorage(page) {
+  if (!page || page.isClosed() || !xiaohongshuSavedLocalStorage.length) return;
+  try {
+    await page.evaluate((items) => {
+      try {
+        for (const item of items) {
+          if (!item?.name) continue;
+          localStorage.setItem(item.name, item.value ?? '');
+        }
+      } catch {}
+    }, xiaohongshuSavedLocalStorage);
+    log(`applied xhs localStorage keys=${xiaohongshuSavedLocalStorage.length}`);
+  } catch (error) {
+    log(`apply xhs localStorage failed: ${error.message}`);
+  }
+}
+
+async function readXiaohongshuCookieMap() {
+  await startBrowser();
+  const cookies = await context.cookies(['https://www.xiaohongshu.com', 'https://edith.xiaohongshu.com']);
+  return new Map(cookies.map((c) => [c.name, c.value]));
+}
+
+/**
+ * Persist browser state, but protect good XHS sessions from being wiped by
+ * half-dead / guest / login-page scans.
+ *
+ * CRITICAL (2026-07-20): force=true still MUST NOT erase a known-good web_session
+ * when the live context no longer has one. Only write a no-session snapshot when
+ * there was never a good session (or reason is explicit wipe).
+ * @param {{ force?: boolean, reason?: string }} opts
+ */
+async function persistStorageState(opts = {}) {
+  if (!context || !statePath) return false;
+  const force = Boolean(opts.force);
+  const reason = String(opts.reason || 'unspecified');
+  try {
+    // Merge with on-disk snapshot so we can protect previous good XHS cookies.
+    let diskState = null;
+    try {
+      diskState = JSON.parse(await fs.readFile(statePath, 'utf8'));
+    } catch {}
+    const diskCookies = Array.isArray(diskState?.cookies) ? diskState.cookies : [];
+    const diskXhs = diskCookies.filter((c) => /xiaohongshu/i.test(String(c.domain || '')));
+    const diskWs = diskXhs.find((c) => c.name === 'web_session')?.value || '';
+    const diskA1 = diskXhs.find((c) => c.name === 'a1')?.value || '';
+
+    const cookies = await context.cookies();
+    const xhs = cookies.filter((c) => /xiaohongshu/i.test(String(c.domain || '')));
+    let ws = xhs.find((c) => c.name === 'web_session')?.value || '';
+    let a1 = xhs.find((c) => c.name === 'a1')?.value || '';
+    let hasSession = Boolean(ws && a1);
+
+    // If memory remembers a good session and live lost web_session, protect disk.
+    const rememberedWs = xiaohongshuLastGoodSession?.webSession || diskWs || '';
+    const rememberedA1 = xiaohongshuLastGoodSession?.a1 || diskA1 || '';
+    if (!hasSession && rememberedWs) {
+      // Never overwrite a good disk session with a no-web_session snapshot.
+      log(`persistStorageState SKIP (refuse to wipe web_session) reason=${reason} force=${force} liveSession=false diskWs=${Boolean(diskWs)} remembered=true`);
+      return false;
+    }
+
+    if (!force && xiaohongshuLoginDead && !hasSession) {
+      log(`persistStorageState SKIP (login-dead, no session) reason=${reason}`);
+      return false;
+    }
+
+    // Best-effort capture localStorage from live xhs page (if open on xhs host).
+    try {
+      const p = xiaohongshuPage && !xiaohongshuPage.isClosed() ? xiaohongshuPage : null;
+      const url = p ? pageUrlSafe(p) : '';
+      if (p && /xiaohongshu\.com/i.test(url) && !/website-login\/error|\/login/i.test(url)) {
+        await captureXiaohongshuLocalStorage(p);
+      }
+    } catch {}
+
+    // If live missing some xhs cookies but disk has them (and live still has session), merge disk→live first.
+    if (hasSession && diskXhs.length > 0) {
+      const liveNames = new Set(xhs.map((c) => `${c.domain}|${c.name}`));
+      const toAdd = [];
+      for (const c of diskXhs) {
+        const key = `${c.domain}|${c.name}`;
+        if (!liveNames.has(key) && c.name && c.value) {
+          toAdd.push(c);
+        }
+      }
+      if (toAdd.length > 0) {
+        try {
+          await context.addCookies(toAdd);
+          log(`persistStorageState merged ${toAdd.length} missing xhs cookies from disk`);
+        } catch {}
+      }
+    }
+
+    const tempPath = `${statePath}.tmp`;
+    await context.storageState({ path: tempPath });
+    // Merge saved xhs localStorage into origins so restart restores more than cookies.
+    try {
+      const raw = await fs.readFile(tempPath, 'utf8');
+      const state = JSON.parse(raw);
+      if (!Array.isArray(state.origins)) state.origins = [];
+      // Preserve disk xhs localStorage if live capture empty.
+      if (xiaohongshuSavedLocalStorage.length === 0 && Array.isArray(diskState?.origins)) {
+        for (const origin of diskState.origins) {
+          if (/xiaohongshu\.com/i.test(String(origin?.origin || '')) && Array.isArray(origin.localStorage) && origin.localStorage.length) {
+            xiaohongshuSavedLocalStorage = origin.localStorage
+              .map((item) => ({ name: String(item.name || ''), value: String(item.value ?? '') }))
+              .filter((item) => item.name);
+          }
+        }
+      }
+      if (xiaohongshuSavedLocalStorage.length > 0) {
+        const originUrl = 'https://www.xiaohongshu.com';
+        const others = state.origins.filter((o) => !/xiaohongshu\.com/i.test(String(o?.origin || '')));
+        others.push({
+          origin: originUrl,
+          localStorage: xiaohongshuSavedLocalStorage.map((i) => ({ name: i.name, value: i.value })),
+        });
+        state.origins = others;
+      }
+      // Final guard: if serialized cookies lost web_session but we had one, abort write.
+      const serXhs = (state.cookies || []).filter((c) => /xiaohongshu/i.test(String(c.domain || '')));
+      const serWs = serXhs.find((c) => c.name === 'web_session')?.value || '';
+      if (!serWs && rememberedWs) {
+        log(`persistStorageState ABORT write (serialized snapshot missing web_session) reason=${reason}`);
+        await fs.unlink(tempPath).catch(() => {});
+        return false;
+      }
+      await fs.writeFile(tempPath, JSON.stringify(state), 'utf8');
+    } catch (error) {
+      log(`persistStorageState merge localStorage failed: ${error.message}`);
+    }
+    await fs.chmod(tempPath, 0o600).catch(() => {});
+    await fs.rename(tempPath, statePath);
+
+    // Re-read written session fingerprint.
+    ws = (await context.cookies()).filter((c) => /xiaohongshu/i.test(String(c.domain || '')) && c.name === 'web_session')[0]?.value || ws;
+    a1 = (await context.cookies()).filter((c) => /xiaohongshu/i.test(String(c.domain || '')) && c.name === 'a1')[0]?.value || a1;
+    hasSession = Boolean(ws && a1);
+    if (hasSession) {
+      xiaohongshuLastGoodSession = {
+        webSession: ws,
+        a1,
+        savedAt: Date.now(),
+        source: reason,
+      };
+    }
+    log(`persistStorageState ok reason=${reason} xhsCookies=${xhs.length} hasSession=${hasSession} lsKeys=${xiaohongshuSavedLocalStorage.length}`);
+    return true;
+  } catch (error) {
+    log(`persistStorageState failed reason=${reason}: ${error.message}`);
+    return false;
+  }
+}
+
+/** Strong login check: cookies + user/me not guest (when page can call it). No forced navigation. */
+async function xiaohongshuSessionHealthy() {
+  const cookies = await readXiaohongshuCookieMap();
+  if (!(cookies.get('a1') && cookies.get('web_session'))) return { ok: false, reason: 'missing a1/web_session' };
+  try {
+    const p = xiaohongshuPage && !xiaohongshuPage.isClosed() ? xiaohongshuPage : null;
+    if (!p) return { ok: true, reason: 'cookies-only', soft: true };
+    const url = pageUrlSafe(p);
+    if (/website-login\/error|error_code=300012|\/login/i.test(url)) {
+      return { ok: false, reason: `login/risk page: ${url.slice(0, 100)}` };
+    }
+    if (!/xiaohongshu\.com/i.test(url) || url === 'about:blank') {
+      return { ok: true, reason: 'cookies-present-page-not-xhs', soft: true };
+    }
+    const me = await p.evaluate(async () => {
+      try {
+        const res = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+          credentials: 'include',
+          headers: { accept: 'application/json, text/plain, */*', referer: location.href },
+        });
+        const body = await res.json().catch(() => ({}));
+        return {
+          status: res.status,
+          code: body?.code,
+          guest: body?.data?.guest,
+          userId: body?.data?.user_id,
+          msg: body?.msg,
+        };
+      } catch (e) {
+        return { err: String(e?.message || e) };
+      }
+    });
+    if (me?.err) return { ok: true, reason: `cookies-me-err:${me.err}`, soft: true, me };
+    if (me?.guest === true) return { ok: false, reason: 'user/me guest=true', me };
+    if (me?.code === -100 || me?.code === '-100' || /登录|login/i.test(String(me?.msg || ''))) {
+      return { ok: false, reason: `user/me ${me.code} ${me.msg}`, me };
+    }
+    return { ok: true, reason: 'cookies+me', me };
+  } catch (error) {
+    return { ok: true, reason: `cookies-soft:${error.message}`, soft: true };
+  }
 }
 
 async function seedConfiguredCookies() {
@@ -300,11 +563,18 @@ async function startBrowser() {
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
       chromiumArgs.push('--no-sandbox');
     }
-    context = await launchPersistentBrowser(profileDir, {
+    const launchOptions = {
       headless: settings.headless,
       viewport: { width: 1280, height: 720 },
       args: chromiumArgs,
-    });
+    };
+    // Optional proxy for XHS IP-risk bypass (BROWSER_PROXY_SERVER / proxyServer).
+    const proxyServer = String(settings.proxyServer || '').trim();
+    if (proxyServer) {
+      launchOptions.proxy = { server: proxyServer };
+      log(`browser proxy enabled: ${proxyServer}`);
+    }
+    context = await launchPersistentBrowser(profileDir, launchOptions);
     // Close accidental popups (deep-link fallout).
     context.on('page', (p) => {
       p.on('dialog', async (dialog) => {
@@ -386,6 +656,10 @@ async function getXiaohongshuPage() {
     xiaohongshuPage = await context.newPage();
     xiaohongshuPage.setDefaultTimeout(15_000);
     attachXiaohongshuSignCapture(xiaohongshuPage);
+    // Restore previously saved localStorage once the first xhs navigation happens.
+    xiaohongshuPage.once('domcontentloaded', () => {
+      void applyXiaohongshuLocalStorage(xiaohongshuPage).catch(() => {});
+    });
   }
   return xiaohongshuPage;
 }
@@ -402,6 +676,7 @@ function pageUrlSafe(p) {
 
 // Aggressive prune: keep only known utility tabs + IM/login by URL if ref was lost.
 // Close blank / old profile / orphan tabs to cut renderer RSS.
+// NEVER close xiaohongshu.com tabs during scan — user may be mid login/captcha.
 async function pruneBrowserTabs({ reason = 'manual' } = {}) {
   if (!context) return;
   const keep = new Set(browserKeepPages());
@@ -410,7 +685,16 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     if (keep.has(p) || p.isClosed()) continue;
     const url = pageUrlSafe(p);
     // Protect IM / passport / QR even if our ref was lost after restart churn.
-    if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan/i.test(url)) continue;
+    if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan|website-login|captcha|verify/i.test(url)) continue;
+    // Protect ALL xhs pages when pruning from scan loop (login/captcha safety).
+    if (reason === 'scan' && /xiaohongshu\.com/i.test(url)) {
+      if (/xiaohongshu\.com\/explore/i.test(url) && !xiaohongshuPage) {
+        xiaohongshuPage = p;
+        attachXiaohongshuSignCapture(p);
+      }
+      keep.add(p);
+      continue;
+    }
     // Protect live xhs explore if our xiaohongshuPage ref was lost.
     if (/xiaohongshu\.com\/explore/i.test(url) && !xiaohongshuPage) {
       xiaohongshuPage = p;
@@ -795,10 +1079,18 @@ function scheduleDouyinIMReconnect() {
   }, 5_000);
 }
 
-function rememberDouyinIMMessage(key) {
-  if (!key || douyinIMSeen.has(key)) return false;
-  douyinIMSeen.add(key);
-  if (douyinIMSeen.size > 5_000) douyinIMSeen.delete(douyinIMSeen.values().next().value);
+function rememberDouyinIMMessage(key, softKey = '') {
+  if (key && douyinIMSeen.has(key)) return false;
+  if (softKey && douyinIMSeen.has(softKey)) return false;
+  if (key) {
+    douyinIMSeen.add(key);
+    if (douyinIMSeen.size > 5_000) douyinIMSeen.delete(douyinIMSeen.values().next().value);
+  }
+  if (softKey) {
+    douyinIMSeen.add(softKey);
+    // Soft keys expire: drop after a while by also storing timestamped cleanup
+    if (douyinIMSeen.size > 5_000) douyinIMSeen.delete(douyinIMSeen.values().next().value);
+  }
   return true;
 }
 
@@ -885,7 +1177,18 @@ function enrichDouyinIMQuote(message) {
   if (!quotedText && !quotedName && (message.quotedServerMessageId || message.quotedClientMessageId)) {
     // leave empty; Go side will only show reply stack when text exists
   }
+  // Normalize video/share quote labels (keep title when present).
   if (quotedText) quotedText = compactDouyinShareQuote(quotedText) || quotedText;
+  // If quote is bare [视频] and cache has a richer video line, upgrade.
+  if (quotedText === '[视频]' || quotedText === '[分享图文]') {
+    const cached2 = lookupDouyinIMQuotedText(message);
+    if (cached2?.text) {
+      const richer = compactDouyinShareQuote(cached2.text) || cached2.text;
+      if (richer && richer !== quotedText && richer.length > quotedText.length) {
+        quotedText = richer;
+      }
+    }
+  }
   return {
     ...message,
     quotedText,
@@ -1064,7 +1367,16 @@ async function publishDouyinIMMessage(message) {
     && message.conversationId === douyinIMIdentity.conversationId;
   if (!isPrivate && !isTargetGroup) return;
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
-  if (!rememberDouyinIMMessage(key)) return;
+  // Douyin often double-pushes the same private text (sync + realtime) with different
+  // server/client ids within ~3s. Soft-dedupe by conversation+sender+text(+quote) bucket.
+  const textKey = String(message.text || '').trim().slice(0, 80);
+  const quoteKey = String(message.quotedText || '').trim().slice(0, 40);
+  const softBucket = Math.floor(Date.now() / 3000);
+  const softPayload = `${textKey}|${quoteKey}`;
+  const softKey = (isPrivate && softPayload && softPayload !== '|' && softPayload !== '[暂不支持的消息]|')
+    ? `soft:${message.conversationId}:${message.senderUid}:${softPayload}:${softBucket}`
+    : '';
+  if (!rememberDouyinIMMessage(key, softKey)) return;
   message = enrichDouyinIMQuote(message);
   const displayFallback = cachedDouyinDisplayName(message.senderSecUid, message.senderUid)
     || message.senderNameHint
@@ -1616,23 +1928,13 @@ async function requestDouyinLoginQRCode() {
 }
 
 async function xiaohongshuLoggedIn() {
-  await startBrowser();
-  const cookies = new Map((await context.cookies(['https://www.xiaohongshu.com'])).map((cookie) => [cookie.name, cookie.value]));
-  // a1 + web_session is necessary but not sufficient (can still show login QR for notes).
-  if (!(cookies.get('a1') && cookies.get('web_session'))) return false;
-  // Soft page check: explore should not redirect into website-login error / bare login shell.
-  try {
-    const p = await getXiaohongshuPage();
-    const url = (() => { try { return p.url(); } catch { return ''; } })();
-    if (/website-login\/error|error_code=300012|\/login/i.test(url)) return false;
-  } catch {}
-  return true;
+  const health = await xiaohongshuSessionHealthy();
+  return Boolean(health.ok);
 }
 
 /** Cookie present only — NOT a guarantee notes work. Panel must not treat this as green. */
 async function xiaohongshuCookiePresent() {
-  await startBrowser();
-  const cookies = new Map((await context.cookies(['https://www.xiaohongshu.com'])).map((cookie) => [cookie.name, cookie.value]));
+  const cookies = await readXiaohongshuCookieMap();
   return Boolean(cookies.get('a1') && cookies.get('web_session'));
 }
 
@@ -1659,15 +1961,34 @@ function rememberXiaohongshuSignHeaders(headers, source = 'native') {
   const common = headers['x-s-common'] || headers['X-S-Common'] || headers['X-s-common'] || '';
   const rap = headers['x-rap-param'] || headers['x-rap-param'.toUpperCase()] || headers['X-Rap-Param'] || '';
   const xs = headers['x-s'] || headers['X-s'] || '';
-  if (common && String(common).length > 20) {
-    xiaohongshuSignCache = {
-      xsCommon: String(common),
-      rap: String(rap || xiaohongshuSignCache.rap || ''),
-      capturedAt: Date.now(),
-      source: `${source}:xs=${String(xs).slice(0, 8)}`,
-    };
-    log(`xiaohongshu sign-cache updated source=${source} commonLen=${common.length} rapLen=${String(rap).length}`);
+  const commonStr = String(common || '');
+  // Real X-S-Common is ~2.5KB. Short fragments (hundreds of chars) from intermediate
+  // edith calls must NOT overwrite a good cache — prod 2026-07-20 saw 328/424 clobber 2528 → 461.
+  if (commonStr.length < 800) {
+    if (commonStr.length > 20) {
+      // keep rap if useful, but don't demote common
+      if (rap && String(rap).length > 20 && !xiaohongshuSignCache.rap) {
+        xiaohongshuSignCache.rap = String(rap);
+        xiaohongshuSignCache.capturedAt = Date.now();
+      }
+    }
+    return;
   }
+  // Prefer longer (more complete) common; never replace a longer cache with a shorter one.
+  if (xiaohongshuSignCache.xsCommon && commonStr.length < xiaohongshuSignCache.xsCommon.length) {
+    if (rap && String(rap).length > (xiaohongshuSignCache.rap?.length || 0)) {
+      xiaohongshuSignCache.rap = String(rap);
+      xiaohongshuSignCache.capturedAt = Date.now();
+    }
+    return;
+  }
+  xiaohongshuSignCache = {
+    xsCommon: commonStr,
+    rap: String(rap || xiaohongshuSignCache.rap || ''),
+    capturedAt: Date.now(),
+    source: `${source}:xs=${String(xs).slice(0, 8)}`,
+  };
+  log(`xiaohongshu sign-cache updated source=${source} commonLen=${commonStr.length} rapLen=${String(rap).length}`);
 }
 
 function attachXiaohongshuSignCapture(targetPage) {
@@ -1689,10 +2010,24 @@ async function ensureXiaohongshuSignPage() {
   attachXiaohongshuSignCapture(p);
   let url = '';
   try { url = p.url(); } catch { url = ''; }
+
+  // Login dead: NEVER navigate/refresh xhs pages — only reuse current tab for API if possible.
+  if (xiaohongshuLoginDead) {
+    log(`xiaohongshu ensureSignPage: login-dead, no navigate (${xiaohongshuLoginDeadReason || 'login_required'}) url=${String(url).slice(0, 100)}`);
+    return p;
+  }
+
+  // Already on login/captcha page: do not steal the page for explore warm-up.
+  if (/\/login|website-login|captcha|verify|qrcode/i.test(url)) {
+    log(`xiaohongshu ensureSignPage: login/captcha page open, no navigate url=${url.slice(0, 120)}`);
+    return p;
+  }
+
   const okHost = /xiaohongshu\.com/i.test(url) && !/website-login\/error|error_code=300012|\/login/i.test(url);
   // Keep ONE explore (or already-open xhs) tab for mnsv2 + cookie. Never profile-hop for notes.
   if (!okHost || url === 'about:blank' || !url) {
     await p.goto('https://www.xiaohongshu.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await applyXiaohongshuLocalStorage(p);
     await p.waitForTimeout(1_500);
   }
   // Wait for mnsv2 (real XYS_ path). _webmsxyw alone only yields XYW_ which is not enough.
@@ -1702,7 +2037,14 @@ async function ensureXiaohongshuSignPage() {
         || /xiaohongshu\.com/i.test(location.hostname));
     } catch { return false; }
   }, { timeoutMs: 8_000, intervalMs: 250 }).catch(() => {});
-  // Cold start: if sign cache empty, wait briefly for explore's own edith traffic to fill X-S-Common.
+  // Stale sign cache is a common cause of HTTP 461 + empty notes while code/msg still look "成功".
+  // Drop headers older than 45s so the next edith traffic refreshes X-S-Common / rap.
+  if (xiaohongshuSignCache.xsCommon && xiaohongshuSignCache.capturedAt
+      && Date.now() - xiaohongshuSignCache.capturedAt > 45_000) {
+    log(`xiaohongshu sign-cache stale ageMs=${Date.now() - xiaohongshuSignCache.capturedAt} → clear`);
+    xiaohongshuSignCache = { xsCommon: '', rap: '', capturedAt: 0, source: '' };
+  }
+  // Cold start / after clear: wait briefly for explore's own edith traffic to fill X-S-Common.
   // This is NOT a per-account profile goto fallback — only seeds headers on the kept explore tab.
   if (!xiaohongshuSignCache.xsCommon) {
     await waitUntil(async () => Boolean(xiaohongshuSignCache.xsCommon), {
@@ -1722,6 +2064,129 @@ async function ensureXiaohongshuSignPage() {
     }
   }
   return p;
+}
+
+/** Force re-warm explore + clear cached signs. Rate-limited — thrashing explore was
+ *  wiping login/captcha and worsening risk (user 2026-07-20). No profile goto. */
+let xiaohongshuLastSignEnvRefreshAt = 0;
+async function refreshXiaohongshuSignEnv(reason = '') {
+  // Hard stop when login is dead: never refresh/navigate xhs pages.
+  if (xiaohongshuLoginDead) {
+    log(`xiaohongshu sign-env refresh blocked (login-dead): ${reason || 'unspecified'}`);
+    return false;
+  }
+  const now = Date.now();
+  // At most once per 10 minutes.
+  if (now - xiaohongshuLastSignEnvRefreshAt < 10 * 60_000) {
+    log(`xiaohongshu sign-env refresh skipped (cooldown): ${reason || 'unspecified'}`);
+    return false;
+  }
+  xiaohongshuLastSignEnvRefreshAt = now;
+  log(`xiaohongshu sign-env refresh: ${reason || 'unspecified'}`);
+  xiaohongshuSignCache = { xsCommon: '', rap: '', capturedAt: 0, source: '' };
+  try {
+    const p = await getXiaohongshuPage();
+    // If user is mid login/captcha, do NOT navigate away.
+    const cur = (() => { try { return p.url(); } catch { return ''; } })();
+    if (/\/login|website-login|captcha|verify|qrcode/i.test(cur)) {
+      log(`xiaohongshu sign-env refresh aborted (login page open): ${cur.slice(0, 120)}`);
+      return false;
+    }
+    attachXiaohongshuSignCapture(p);
+    await p.goto('https://www.xiaohongshu.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await applyXiaohongshuLocalStorage(p);
+    await p.waitForTimeout(1_200);
+    try {
+      await p.evaluate(() => {
+        window.scrollBy(0, 500);
+        window.scrollBy(0, -200);
+      });
+    } catch {}
+    await waitUntil(async () => {
+      try {
+        return await p.evaluate(() => typeof window.mnsv2 === 'function');
+      } catch { return false; }
+    }, { timeoutMs: 6_000, intervalMs: 200 }).catch(() => {});
+    await waitUntil(async () => Boolean(xiaohongshuSignCache.xsCommon), {
+      timeoutMs: 5_000,
+      intervalMs: 200,
+    }).catch(() => {});
+    log(`xiaohongshu sign-env refresh done commonLen=${xiaohongshuSignCache.xsCommon?.length || 0} rapLen=${xiaohongshuSignCache.rap?.length || 0}`);
+    return true;
+  } catch (error) {
+    log(`xiaohongshu sign-env refresh failed: ${error.message}`);
+    return false;
+  }
+}
+
+function isXiaohongshuSignishMiss(result) {
+  if (!result || result.ok) return false;
+  const status = Number(result.status || 0);
+  const code = result.code;
+  const msg = String(result.msg || '');
+  const notesLen = Array.isArray(result.notes) ? result.notes.length : 0;
+  // Account abnormal / login / IP risk: NOT fixed by re-warming explore.
+  if (
+    code === 300011 || code === '300011' || code === 300012 || code === '300012'
+    || code === -100 || code === '-100'
+    || /Account abnormal|登录|login|IP存在风险|安全限制|300011|300012/i.test(`${msg} ${code}`)
+  ) {
+    return false;
+  }
+  // HTTP 461 alone is NOT always "stale sign" — can be risk wall.
+  if (status === 461) return true;
+  if (status >= 400 && status !== 401 && status !== 403 && notesLen === 0) return true;
+  if ((code === 0 || code === '0') && notesLen === 0 && status !== 200) return true;
+  if (msg === '成功' && notesLen === 0 && status !== 200) return true;
+  return false;
+}
+
+/** Detect 300012 IP-risk / security wall. Prefer explicit signals over guessing from 461. */
+async function detectXiaohongshuIpRisk(page) {
+  try {
+    const url = page?.url?.() || '';
+    if (/error_code=300012|IP存在风险|website-login\/error/i.test(url)) {
+      return { risk: true, reason: `小红书风控/安全限制：IP存在风险（url）` };
+    }
+  } catch {}
+  try {
+    const probe = await page.evaluate(async () => {
+      // user/me is light and signed by the page itself on explore; guest=true under risk.
+      try {
+        const me = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+          credentials: 'include',
+          headers: { accept: 'application/json, text/plain, */*', referer: location.href },
+        });
+        let body = null;
+        try { body = await me.json(); } catch {}
+        return {
+          href: location.href,
+          meStatus: me.status,
+          meCode: body?.code,
+          meMsg: body?.msg,
+          guest: body?.data?.guest,
+          userId: body?.data?.user_id,
+          title: document.title,
+          bodyText: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 120),
+        };
+      } catch (e) {
+        return { href: location.href, err: String(e?.message || e), title: document.title };
+      }
+    });
+    if (probe && (
+      /300012|IP存在风险|安全限制/i.test(`${probe.href} ${probe.title} ${probe.bodyText} ${probe.meMsg || ''}`)
+      || Number(probe.meCode) === 300012
+    )) {
+      return { risk: true, reason: '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试', probe };
+    }
+    // guest-only under security wall often pairs with 461 on user_posted
+    if (probe?.guest === true && /website-login\/error|安全限制/i.test(`${probe.href} ${probe.title}`)) {
+      return { risk: true, reason: '小红书风控/安全限制：IP存在风险（guest + 安全页）', probe };
+    }
+    return { risk: false, probe };
+  } catch (e) {
+    return { risk: false, err: String(e?.message || e) };
+  }
 }
 
 async function fetchXiaohongshuUserPosted(page, userId, { cursor = '', num = 30 } = {}) {
@@ -1755,24 +2220,58 @@ async function fetchXiaohongshuUserPosted(page, userId, { cursor = '', num = 30 
       }
       return out;
     }
+    function detectSignVersion() {
+      // Prefer live page build markers — hardcoding 4.3.7 produced shorter X-s (352 vs native ~360).
+      try {
+        const m = document.cookie.match(/(?:^|;\s*)webBuild=([^;]+)/);
+        if (m && m[1]) return decodeURIComponent(m[1]).trim();
+      } catch {}
+      try {
+        if (window.__XHS_VERSION__) return String(window.__XHS_VERSION__);
+      } catch {}
+      try {
+        const meta = document.querySelector('meta[name="xhs-version"], meta[name="version"]');
+        if (meta?.content) return String(meta.content).trim();
+      } catch {}
+      return '4.3.7';
+    }
     function packXYS(x3) {
-      const platform = String(window.xsecplatform || 'Windows');
+      // If mnsv2 already returns a full signed header value, use it.
+      const raw = x3 == null ? '' : String(x3);
+      if (/^XY[SW]_/i.test(raw)) return raw;
+      const platform = String(window.xsecplatform || 'Linux');
+      const x0 = detectSignVersion();
+      // Match native field set/order observed on pc-web.
       const payload = JSON.stringify({
-        x0: '4.3.7',
+        x0,
         x1: 'xhs-pc-web',
         x2: platform,
-        x3: String(x3),
+        x3: raw,
         x4: '',
       });
       return 'XYS_' + customB64Encode(payload);
+    }
+    function randomHex(len) {
+      const bytes = new Uint8Array(Math.ceil(len / 2));
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('').slice(0, len);
+    }
+    function browserishBaseHeaders() {
+      // Align with native edith requests (origin/trace). UA/sec-ch-ua usually added by Chromium.
+      return {
+        accept: 'application/json, text/plain, */*',
+        origin: 'https://www.xiaohongshu.com',
+        referer: location.href || 'https://www.xiaohongshu.com/',
+        'x-b3-traceid': randomHex(16),
+        'x-xray-traceid': randomHex(32),
+      };
     }
     async function doFetch(headers, signMeta) {
       const res = await fetch(url, {
         method: 'GET',
         credentials: 'include',
         headers: {
-          accept: 'application/json, text/plain, */*',
-          referer: location.href || 'https://www.xiaohongshu.com/',
+          ...browserishBaseHeaders(),
           ...headers,
         },
       });
@@ -1825,6 +2324,9 @@ async function fetchXiaohongshuUserPosted(page, userId, { cursor = '', num = 30 
           const signMeta = {
             mode: cache.xsCommon ? 'mnsv2+cacheCommon' : 'mnsv2-only',
             xsPrefix: String(xs).slice(0, 4),
+            xsLen: String(xs).length,
+            x0: detectSignVersion(),
+            platform: String(window.xsecplatform || ''),
             xt: String(xt),
             commonLen: cache.xsCommon ? cache.xsCommon.length : 0,
             rapLen: cache.rap ? cache.rap.length : 0,
@@ -1853,6 +2355,7 @@ async function fetchXiaohongshuUserPosted(page, userId, { cursor = '', num = 30 
             const signMeta = {
               mode: 'webmsxyw+cache',
               xsPrefix: String(headers['X-s']).slice(0, 4),
+              xsLen: String(headers['X-s']).length,
               xt: headers['X-t'],
               commonLen: cache.xsCommon ? cache.xsCommon.length : 0,
             };
@@ -1913,23 +2416,157 @@ async function fetchXiaohongshuUserPosted(page, userId, { cursor = '', num = 30 
 async function scanXiaohongshuAccountViaAPI(account) {
   const userId = String(account.userId || '').trim();
   if (!userId) return { ok: false, reason: 'empty userId' };
-  const page = await ensureXiaohongshuSignPage();
-  const afterUrl = (() => { try { return page.url(); } catch { return ''; } })();
+
+  // Login dead: do not navigate; only attempt pure API on current page if usable.
+  if (xiaohongshuLoginDead) {
+    const p = await getXiaohongshuPage();
+    const url = pageUrlSafe(p);
+    if (!/xiaohongshu\.com/i.test(url) || /\/login|website-login|about:blank/i.test(url)) {
+      return {
+        ok: false,
+        reason: `小红书需重新登录（login-dead，禁止刷页）：${xiaohongshuLoginDeadReason || 'login_required'}`,
+        blocked: true,
+        loginDead: true,
+      };
+    }
+    // Still try once without refresh if we're already on a normal xhs page.
+    const result = await fetchXiaohongshuUserPosted(p, userId, { num: 30 });
+    if (result.ok && Array.isArray(result.notes) && result.notes.length > 0) {
+      const nickname = result.nickname || account.name || '';
+      const notes = normalizeXiaohongshuNotes(result.notes, userId, nickname);
+      if (notes.length > 0) {
+        clearXiaohongshuLoginDead('api recovered while login-dead');
+        return { ok: true, nickname, notes, result };
+      }
+    }
+    return {
+      ok: false,
+      reason: result.msg || `login-dead API miss status=${result.status} code=${result.code}`,
+      blocked: true,
+      loginDead: true,
+      result,
+    };
+  }
+
+  let page = await ensureXiaohongshuSignPage();
+  let afterUrl = (() => { try { return page.url(); } catch { return ''; } })();
   if (/website-login\/error|error_code=300012/i.test(afterUrl)) {
-    return { ok: false, reason: `小红书风控/安全限制（${afterUrl}）`, blocked: true };
+    return {
+      ok: false,
+      reason: '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试',
+      blocked: true,
+      risk: true,
+    };
   }
   if (/\/login/i.test(afterUrl) && !/user\/profile\//i.test(afterUrl)) {
-    return { ok: false, reason: '小红书需重新登录，笔记列表暂不可用', blocked: true };
+    markXiaohongshuLoginDead('on login page during scan');
+    return { ok: false, reason: '小红书需重新登录，笔记列表暂不可用', blocked: true, loginDead: true };
   }
-  const result = await fetchXiaohongshuUserPosted(page, userId, { num: 30 });
+
+  // Preflight: 300012 IP risk makes user_posted return opaque HTTP 461 + empty success.
+  // Detect clearly and stop thrashing sign-refresh / sidecar restart.
+  const riskCheck = await detectXiaohongshuIpRisk(page);
+  if (riskCheck.risk) {
+    log(`xiaohongshu IP risk preflight: ${riskCheck.reason} probe=${JSON.stringify(riskCheck.probe || {})}`);
+    return { ok: false, reason: riskCheck.reason, blocked: true, risk: true };
+  }
+
+  // Guest gate: if user/me is guest, do NOT thrash user_posted (signature won't fix session).
+  try {
+    const meGate = await page.evaluate(async () => {
+      try {
+        const res = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+          credentials: 'include',
+          headers: {
+            accept: 'application/json, text/plain, */*',
+            origin: 'https://www.xiaohongshu.com',
+            referer: location.href || 'https://www.xiaohongshu.com/',
+          },
+        });
+        const body = await res.json().catch(() => ({}));
+        return {
+          httpStatus: res.status,
+          code: body?.code,
+          msg: body?.msg,
+          guest: body?.data?.guest,
+          userId: body?.data?.user_id,
+          nickname: body?.data?.nickname,
+        };
+      } catch (e) {
+        return { err: String(e?.message || e) };
+      }
+    });
+    const meCode = Number(meGate?.code);
+    const isGuest = meGate?.guest === true
+      || meCode === -100
+      || meCode === -101
+      || /登录已过期|无登录信息/i.test(String(meGate?.msg || ''));
+    if (isGuest) {
+      const reason = meGate?.msg
+        ? `小红书会话为 guest/未登录（user/me code=${meGate.code} msg=${meGate.msg}），跳过 user_posted`
+        : '小红书会话为 guest/未登录，跳过 user_posted';
+      log(`xiaohongshu guest-gate: ${JSON.stringify(meGate)}`);
+      markXiaohongshuLoginDead(reason);
+      return { ok: false, reason, blocked: true, loginDead: true, me: meGate };
+    }
+    if (meGate?.guest === false && meGate?.userId) {
+      clearXiaohongshuLoginDead('guest-gate me ok');
+    }
+  } catch (e) {
+    log(`xiaohongshu guest-gate failed: ${e.message}`);
+  }
+
+  let result = await fetchXiaohongshuUserPosted(page, userId, { num: 30 });
+  // Fast auto-heal only for true sign-env staleness — never for login-dead / account abnormal.
+  if (!result.ok && isXiaohongshuSignishMiss(result) && !xiaohongshuLoginDead) {
+    // Re-check risk after first 461: user_posted often hides 300012 as empty success.
+    const riskAfter = await detectXiaohongshuIpRisk(page);
+    if (riskAfter.risk) {
+      log(`xiaohongshu 461 mapped to IP risk: ${riskAfter.reason}`);
+      return { ok: false, reason: riskAfter.reason, blocked: true, risk: true, result };
+    }
+    log(`xiaohongshu signish miss user=${account.name || userId} status=${result.status} code=${result.code} notes=${result.notes?.length || 0} → refresh+retry`);
+    await refreshXiaohongshuSignEnv(`api-miss status=${result.status} code=${result.code}`);
+    page = await ensureXiaohongshuSignPage();
+    afterUrl = (() => { try { return page.url(); } catch { return ''; } })();
+    if (/website-login\/error|error_code=300012/i.test(afterUrl)) {
+      return {
+        ok: false,
+        reason: '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试',
+        blocked: true,
+        risk: true,
+      };
+    }
+    if (/\/login/i.test(afterUrl) && !/user\/profile\//i.test(afterUrl)) {
+      markXiaohongshuLoginDead('redirected to login after sign refresh');
+      return { ok: false, reason: '小红书需重新登录，笔记列表暂不可用', blocked: true, loginDead: true };
+    }
+    result = await fetchXiaohongshuUserPosted(page, userId, { num: 30 });
+    if (result.ok) {
+      log(`xiaohongshu API recovered after sign-env refresh user=${account.name || userId} notes=${result.notes?.length || 0}`);
+    } else if (Number(result.status) === 461) {
+      // Second 461 after refresh: treat as risk/network, not infinite sign loop.
+      const risk2 = await detectXiaohongshuIpRisk(page);
+      const reason = risk2.risk
+        ? risk2.reason
+        : '小红书 API 持续 461（疑似 IP 风控/网络环境），刷新签名无效';
+      log(`xiaohongshu sustained 461 after refresh → stop thrash: ${reason}`);
+      return { ok: false, reason, blocked: true, risk: true, result };
+    }
+  }
   if (!result.ok) {
-    const softLogin = /登录|login|账号异常|Account abnormal|300011|300012|-101/i.test(
+    const softLogin = /登录|login|登录已过期|无登录信息|账号异常|Account abnormal|300011|300012|-100|-101|IP存在风险|安全限制/i.test(
       `${result.msg} ${result.code}`,
     );
+    const loginDead = /登录|login|登录已过期|无登录信息|-100|-101/i.test(`${result.msg} ${result.code}`)
+      && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制/i.test(`${result.msg} ${result.code}`);
+    if (loginDead) markXiaohongshuLoginDead(`${result.code} ${result.msg}`);
     return {
       ok: false,
       reason: result.msg || `user_posted status=${result.status} code=${result.code}`,
       blocked: softLogin,
+      risk: /300012|IP存在风险|安全限制/i.test(`${result.msg} ${result.code}`),
+      loginDead,
       result,
     };
   }
@@ -1941,6 +2578,7 @@ async function scanXiaohongshuAccountViaAPI(account) {
   if (notes.length === 0) {
     return { ok: false, reason: 'normalize notes empty', result };
   }
+  clearXiaohongshuLoginDead('notes ok');
   return { ok: true, nickname, notes, result };
 }
 
@@ -2014,13 +2652,16 @@ async function scanXiaohongshuAccount(account) {
   // Notes path is API-only (page-context signed user_posted on kept explore tab).
   // User rule 2026-07-19: do NOT use per-account profile goto as notes fallback.
   // - login dead  → emit re-login / account_error
-  // - sign cache / transient API fail → surface error; keep tab, next poll retries API
+  // - sign cache / transient API fail → refresh+retry once inside ViaAPI; else surface error
   try {
     const api = await scanXiaohongshuAccountViaAPI(account);
     if (api.ok) {
+      xiaohongshuLastScanAnyOk = true;
+      clearXiaohongshuLoginDead('notes ok');
       log(`xiaohongshu notes via API user=${api.nickname || userId} count=${api.notes.length}`);
       try {
-        await persistStorageState();
+        // Only successful notes may refresh the "good session" disk snapshot.
+        await persistStorageState({ force: false, reason: `notes_ok:${userId}` });
         log(`xiaohongshu notes ok → persistStorageState user=${api.nickname || userId} count=${api.notes.length}`);
       } catch (error) {
         log(`xiaohongshu notes persist failed: ${error.message}`);
@@ -2045,25 +2686,45 @@ async function scanXiaohongshuAccount(account) {
     const commonLen = Number(signMeta.commonLen || xiaohongshuSignCache.xsCommon?.length || 0);
     const code = String(api.result?.code ?? '');
     const msg = `${reason} ${api.result?.msg || ''} ${code}`;
-    const needLogin = Boolean(api.blocked) && /登录|login|重新登录|未登录|-100|session/i.test(msg)
-      && !/Account abnormal|账号异常|300011/i.test(msg);
-    const risk = /300012|安全限制|IP存在风险|访问频次|风控/i.test(msg);
+    const needLogin = Boolean(api.loginDead)
+      || (Boolean(api.blocked) && /登录|login|重新登录|未登录|登录已过期|无登录信息|-100|-101|session/i.test(msg)
+        && !/Account abnormal|账号异常|300011|300012|IP存在风险|安全限制/i.test(msg));
+    const risk = Boolean(api.risk) || /300012|安全限制|IP存在风险|访问频次|风控|持续 461/i.test(msg);
     // 300011 with empty common is sign-cache cold, not "must re-login now".
-    const signCold = commonLen === 0 || /mnsv2-only|no-sign|commonLen.:0/i.test(JSON.stringify(signMeta));
+    const signCold = !risk && !needLogin && (commonLen === 0 || /mnsv2-only|no-sign|commonLen.:0/i.test(JSON.stringify(signMeta)));
+
+    xiaohongshuLastScanAnyFail = true;
+    if (needLogin) {
+      xiaohongshuLastScanAnyLogin = true;
+      markXiaohongshuLoginDead(reason);
+    }
+    // IP risk is not fixable by sidecar restart — do not feed api_stuck streak.
+    if (risk) xiaohongshuLastScanAnyLogin = true;
+
+    // CRITICAL: never persist failed/login-dead state over a previously good session.
+    // (Old code forced persist on every scan and could wipe good cookies.)
 
     let message;
     if (needLogin) {
-      message = '小红书需重新登录，笔记列表暂不可用';
+      message = '小红书需重新登录，笔记列表暂不可用（已停止刷新小红书页面）';
     } else if (risk) {
-      message = `小红书风控/安全限制，笔记列表暂不可用（${reason}）`;
+      message = '小红书风控/安全限制：IP存在风险，请切换可靠网络环境后重试（非签名问题，重启无效）';
     } else if (signCold) {
       message = `小红书签名环境未就绪（API 失败，commonLen=${commonLen}），保留 explore 页下次重试，不 goto 主页兜底`;
     } else {
       message = `小红书 API 拉帖失败：${reason}`;
     }
 
-    log(`xiaohongshu API miss for ${account.name || userId}: ${reason} blocked=${Boolean(api.blocked)} needLogin=${needLogin} signCold=${signCold} sign=${JSON.stringify(signMeta)}; no-goto-fallback`);
+    log(`xiaohongshu API miss for ${account.name || userId}: ${reason} blocked=${Boolean(api.blocked)} needLogin=${needLogin} risk=${risk} signCold=${signCold} loginDead=${xiaohongshuLoginDead} sign=${JSON.stringify(signMeta)}; no-goto-fallback`);
     emit('xiaohongshu_account_error', { userId, message });
+    if (needLogin) {
+      emit('xiaohongshu_status', { status: 'login_required', message });
+    } else if (risk) {
+      emit('xiaohongshu_status', {
+        status: 'ip_risk',
+        message,
+      });
+    }
     emit('xiaohongshu_account', {
       userId,
       profileUrl,
@@ -2073,6 +2734,7 @@ async function scanXiaohongshuAccount(account) {
     });
     return;
   } catch (error) {
+    xiaohongshuLastScanAnyFail = true;
     log(`xiaohongshu API error for ${account.name || userId}: ${error.message}; no-goto-fallback`);
     emit('xiaohongshu_account_error', {
       userId,
@@ -2089,10 +2751,20 @@ async function scanXiaohongshuAccount(account) {
   }
 }
 
+/** Consecutive full-scan rounds where every account failed API (not login). Used to ask Go for sidecar restart. */
+let xiaohongshuFullFailRounds = 0;
+let xiaohongshuLastStuckEmitAt = 0;
+let xiaohongshuLastScanAnyOk = false;
+let xiaohongshuLastScanAnyFail = false;
+let xiaohongshuLastScanAnyLogin = false;
+
 async function scanAllXiaohongshuInner() {
   if (shuttingDown || !settings.xiaohongshuEnabled || settings.xiaohongshuAccounts.length === 0) return;
   if (xiaohongshuScanning) return;
   xiaohongshuScanning = true;
+  xiaohongshuLastScanAnyOk = false;
+  xiaohongshuLastScanAnyFail = false;
+  xiaohongshuLastScanAnyLogin = false;
   try {
     await startBrowser();
     await pruneOrphanProfilePages();
@@ -2100,32 +2772,69 @@ async function scanAllXiaohongshuInner() {
       if (shuttingDown) break;
       await scanXiaohongshuAccount(account);
     }
+    if (xiaohongshuLastScanAnyOk) {
+      xiaohongshuFullFailRounds = 0;
+    } else if (xiaohongshuLastScanAnyFail && !xiaohongshuLastScanAnyLogin) {
+      xiaohongshuFullFailRounds += 1;
+      log(`xiaohongshu full-scan fail streak=${xiaohongshuFullFailRounds}`);
+      // Do NOT emit api_stuck / request Chromium restart — that wiped login and
+      // made risk worse (user 2026-07-20). Stay on slow poll + pure API.
+      if (xiaohongshuFullFailRounds >= 3 && Date.now() - xiaohongshuLastStuckEmitAt > 15 * 60_000) {
+        xiaohongshuLastStuckEmitAt = Date.now();
+        emit('xiaohongshu_status', {
+          status: 'degraded',
+          message: `小红书 API 连续 ${xiaohongshuFullFailRounds} 轮拉帖失败（保持浏览器，不侧重启）`,
+        });
+      }
+    }
   } finally {
     xiaohongshuScanning = false;
   }
 }
 
 async function scanAllXiaohongshu() {
+  // Plan A re-login pause: touch this file to stop auto scans without fighting config.json Save().
+  try {
+    await fs.access('/root/pocket48-bot/storage/xhs-scan-paused');
+    log('xiaohongshu scan paused (storage/xhs-scan-paused present)');
+    return;
+  } catch {}
   return runProfileScans('xiaohongshu');
 }
 
 function scheduleXiaohongshu() {
   clearInterval(xiaohongshuTimer);
   if (!settings.xiaohongshuEnabled) return;
-  const seconds = Math.max(30, Number(settings.xiaohongshuPollSeconds) || 90);
-  xiaohongshuTimer = setInterval(() => void scanAllXiaohongshu(), seconds * 1000);
+  // Default/floor 60s — user prefers ~1 minute API polls (was 300s during risk lockdown).
+  const seconds = Math.max(60, Number(settings.xiaohongshuPollSeconds) || 60);
+  xiaohongshuTimer = setInterval(() => { void scanAllXiaohongshu(); }, seconds * 1000);
+  log(`xiaohongshu poll scheduled every ${seconds}s (API path, no aggressive restart)`);
 }
 
 async function requestXiaohongshuLoginQRCode() {
+  // User is actively logging in — allow navigation for QR only.
+  clearXiaohongshuLoginDead('user requested login QR');
   const loginPage = await getXiaohongshuPage();
   await loginPage.goto('https://www.xiaohongshu.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
-  if (await xiaohongshuLoggedIn()) {
-    // Cookie already present — still force write so panel scan/login never leaves disk stale.
-    await persistStorageState();
-    log('xiaohongshu already logged in → forced persistStorageState');
+  await applyXiaohongshuLocalStorage(loginPage);
+  const health = await xiaohongshuSessionHealthy();
+  if (health.ok && !health.soft) {
+    await persistStorageState({ force: true, reason: 'already_logged_in_verified' });
+    log('xiaohongshu already logged in (verified) → forced persistStorageState');
     emit('xiaohongshu_status', { status: 'healthy', message: '小红书浏览器已登录' });
     void scanAllXiaohongshu();
     return;
+  }
+  if (health.ok && health.soft) {
+    // Cookies present but me not verified — still allow QR if page looks logged out.
+    const url = pageUrlSafe(loginPage);
+    if (!/\/login|website-login/i.test(url)) {
+      await persistStorageState({ force: true, reason: 'already_logged_in_soft' });
+      log('xiaohongshu already logged in (soft cookies) → forced persistStorageState');
+      emit('xiaohongshu_status', { status: 'ready', message: '小红书 Cookie 已有，等待 notes 验证' });
+      void scanAllXiaohongshu();
+      return;
+    }
   }
   for (const selector of ['text=登录', 'button:has-text("登录")']) {
     try { await loginPage.locator(selector).first().click({ timeout: 3_000 }); break; } catch {}
@@ -2149,9 +2858,34 @@ async function requestXiaohongshuLoginQRCode() {
   const deadline = Date.now() + 5 * 60_000;
   while (!shuttingDown && Date.now() < deadline) {
     await loginPage.waitForTimeout(2_000);
-    if (await xiaohongshuLoggedIn()) {
-      await persistStorageState();
-      log('xiaohongshu login success → persistStorageState written');
+    // Do not navigate during wait — user may be entering captcha.
+    const cookies = await readXiaohongshuCookieMap();
+    if (!(cookies.get('a1') && cookies.get('web_session'))) continue;
+    // Prefer verified me when page is already on xhs (no forced goto).
+    const url = pageUrlSafe(loginPage);
+    let verified = false;
+    if (/xiaohongshu\.com/i.test(url) && !/\/login|website-login/i.test(url)) {
+      const h = await xiaohongshuSessionHealthy();
+      verified = Boolean(h.ok);
+    } else {
+      // Cookie appeared after scan — treat as provisional success and persist.
+      verified = true;
+    }
+    if (verified) {
+      await captureXiaohongshuLocalStorage(loginPage);
+      // Require web_session before claiming login success / writing disk.
+      const cookies2 = await readXiaohongshuCookieMap();
+      if (!(cookies2.get('a1') && cookies2.get('web_session'))) {
+        log('xiaohongshu login candidate without web_session yet — keep waiting');
+        continue;
+      }
+      const wrote = await persistStorageState({ force: true, reason: 'login_success' });
+      if (!wrote) {
+        log('xiaohongshu login success persist refused — keep waiting/retry');
+        continue;
+      }
+      clearXiaohongshuLoginDead('login success');
+      log('xiaohongshu login success → persistStorageState written (cookie+localStorage)');
       emit('xiaohongshu_status', { status: 'healthy', message: '小红书浏览器登录成功' });
       void scanAllXiaohongshu();
       return;
@@ -2418,6 +3152,7 @@ wss.on('connection', (socket) => {
             xiaohongshuEnabled: command.xiaohongshuEnabled === true,
             xiaohongshuPollSeconds: command.xiaohongshuPollSeconds || settings.xiaohongshuPollSeconds,
             xiaohongshuAccounts: Array.isArray(command.xiaohongshuAccounts) ? command.xiaohongshuAccounts : [],
+            proxyServer: String(command.proxyServer || settings.proxyServer || '').trim(),
           };
           await loadDouyinContacts();
           if (settings.weiboEnabled) {
@@ -2489,17 +3224,387 @@ wss.on('connection', (socket) => {
           }
           break;
         case 'xiaohongshu_sync':
-          settings.xiaohongshuEnabled = true;
+          // Respect explicit enable flag from Go (was hard-coded true).
+          if (Object.prototype.hasOwnProperty.call(command, 'xiaohongshuEnabled')) {
+            settings.xiaohongshuEnabled = command.xiaohongshuEnabled !== false;
+          } else {
+            settings.xiaohongshuEnabled = true;
+          }
           settings.xiaohongshuPollSeconds = command.xiaohongshuPollSeconds || settings.xiaohongshuPollSeconds;
           settings.xiaohongshuAccounts = Array.isArray(command.xiaohongshuAccounts) ? command.xiaohongshuAccounts : [];
           scheduleXiaohongshu();
-          void scanAllXiaohongshu();
+          if (settings.xiaohongshuEnabled) {
+            void scanAllXiaohongshu();
+          } else {
+            log('xiaohongshu_sync: disabled, skip scan/poll');
+          }
+          break;
+        case 'xiaohongshu_diff':
+          // Native edith request capture vs our signed user_posted.
+          try {
+            await startBrowser();
+            const userId = String(command.userId || command.user_id || '597804a15e87e70f59fd8c57').trim();
+            const p = await getXiaohongshuPage();
+            let url = pageUrlSafe(p);
+            if ((!url || url === 'about:blank' || !/xiaohongshu\.com/i.test(url))) {
+              if (!/\/login|website-login|captcha|verify/i.test(url || '')) {
+                await p.goto('https://www.xiaohongshu.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+                await applyXiaohongshuLocalStorage(p);
+                await p.waitForTimeout(1000);
+                url = pageUrlSafe(p);
+              }
+            }
+            attachXiaohongshuSignCapture(p);
+
+            // Capture next native edith request headers (sign-related only).
+            const nativeHits = [];
+            const onReq = (req) => {
+              try {
+                const u = req.url();
+                if (!/edith\.xiaohongshu\.com\/api\//i.test(u)) return;
+                const h = req.headers() || {};
+                const pick = {};
+                for (const k of Object.keys(h)) {
+                  const lk = k.toLowerCase();
+                  if (/^x-|^cookie$|^referer$|^origin$|^user-agent$|^accept$|^content-type$|sec-ch-ua|sec-fetch/i.test(lk)) {
+                    let v = String(h[k] || '');
+                    if (lk === 'cookie') {
+                      // only names + web_session prefix, never full secrets
+                      const names = v.split(';').map((s) => s.trim().split('=')[0]).filter(Boolean);
+                      const ws = (v.match(/(?:^|;\s*)web_session=([^;]+)/) || [])[1] || '';
+                      pick.cookieNames = names;
+                      pick.webSessionPrefix = ws.slice(0, 8);
+                      pick.cookieCount = names.length;
+                      continue;
+                    }
+                    if (lk === 'x-s' || lk === 'x-s-common' || lk === 'x-rap-param') {
+                      pick[lk] = {
+                        len: v.length,
+                        prefix: v.slice(0, 12),
+                        suffix: v.slice(-8),
+                      };
+                      continue;
+                    }
+                    if (v.length > 180) v = `${v.slice(0, 80)}…(len=${v.length})`;
+                    pick[lk] = v;
+                  }
+                }
+                nativeHits.push({
+                  method: req.method(),
+                  url: u.replace(/^https:\/\/edith\.xiaohongshu\.com/, ''),
+                  headers: pick,
+                  ts: Date.now(),
+                });
+              } catch {}
+            };
+            p.on('request', onReq);
+
+            // Nudge SPA to fire native signed APIs (homefeed etc), not login page.
+            try {
+              await p.evaluate(() => {
+                window.scrollBy(0, 600);
+                window.scrollBy(0, -200);
+              });
+              await p.waitForTimeout(1500);
+              // Try click explore/tab if present — best effort
+              try {
+                await p.locator('text=发现').first().click({ timeout: 1500 });
+                await p.waitForTimeout(800);
+              } catch {}
+            } catch {}
+
+            // Wait up to ~6s for native hits
+            const waitEnd = Date.now() + 6000;
+            while (Date.now() < waitEnd && nativeHits.length < 3) {
+              await p.waitForTimeout(300);
+            }
+
+            // Our user_posted with full attempt header snapshot
+            const pathWithQuery = `/api/sns/web/v1/user_posted?num=10&cursor=&user_id=${encodeURIComponent(userId)}&image_formats=jpg,webp,avif&xsec_token=&xsec_source=`;
+            const crypto = await import('node:crypto');
+            const md5Path = crypto.createHash('md5').update(pathWithQuery).digest('hex');
+            const cache = {
+              xsCommon: xiaohongshuSignCache.xsCommon || '',
+              rap: xiaohongshuSignCache.rap || '',
+              cacheAgeMs: xiaohongshuSignCache.capturedAt ? Date.now() - xiaohongshuSignCache.capturedAt : -1,
+              source: xiaohongshuSignCache.source || '',
+            };
+            const our = await p.evaluate(async ({ apiPath, md5Path, md5Both, customAlphabet, cache }) => {
+              const url = `https://edith.xiaohongshu.com${apiPath}`;
+              function customB64Encode(str) {
+                const bytes = new TextEncoder().encode(str);
+                let out = '';
+                for (let i = 0; i < bytes.length; i += 3) {
+                  const a = bytes[i];
+                  const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+                  const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+                  const n = (a << 16) | (b << 8) | c;
+                  out += customAlphabet[(n >> 18) & 63];
+                  out += customAlphabet[(n >> 12) & 63];
+                  out += i + 1 < bytes.length ? customAlphabet[(n >> 6) & 63] : '=';
+                  out += i + 2 < bytes.length ? customAlphabet[n & 63] : '=';
+                }
+                return out;
+              }
+              function detectSignVersion() {
+                try {
+                  const m = document.cookie.match(/(?:^|;\s*)webBuild=([^;]+)/);
+                  if (m && m[1]) return decodeURIComponent(m[1]).trim();
+                } catch {}
+                return '4.3.7';
+              }
+              function packXYS(x3) {
+                const raw = x3 == null ? '' : String(x3);
+                if (/^XY[SW]_/i.test(raw)) return raw;
+                const platform = String(window.xsecplatform || 'Linux');
+                const payload = JSON.stringify({
+                  x0: detectSignVersion(),
+                  x1: 'xhs-pc-web',
+                  x2: platform,
+                  x3: raw,
+                  x4: '',
+                });
+                return 'XYS_' + customB64Encode(payload);
+              }
+              function summarizeHeaders(headers) {
+                const out = {};
+                for (const [k, v] of Object.entries(headers || {})) {
+                  const lk = k.toLowerCase();
+                  const s = String(v || '');
+                  if (lk === 'x-s' || lk === 'x-s-common' || lk === 'x-rap-param') {
+                    out[lk] = { len: s.length, prefix: s.slice(0, 12), suffix: s.slice(-8) };
+                  } else {
+                    out[lk] = s.length > 120 ? `${s.slice(0, 60)}…(len=${s.length})` : s;
+                  }
+                }
+                return out;
+              }
+              const pathOnly = apiPath;
+              const attempts = [];
+              // mnsv2
+              if (typeof window.mnsv2 === 'function') {
+                try {
+                  const x3 = window.mnsv2(pathOnly, md5Both, md5Path);
+                  const xt = Date.now();
+                  const xs = packXYS(x3);
+                  const headers = {
+                    accept: 'application/json, text/plain, */*',
+                    referer: location.href || 'https://www.xiaohongshu.com/',
+                    'X-s': xs,
+                    'X-t': String(xt),
+                  };
+                  if (cache.xsCommon) headers['X-S-Common'] = cache.xsCommon;
+                  if (cache.rap) headers['x-rap-param'] = cache.rap;
+                  const res = await fetch(url, { method: 'GET', credentials: 'include', headers });
+                  const body = await res.json().catch(() => ({}));
+                  attempts.push({
+                    mode: 'mnsv2+cacheCommon',
+                    status: res.status,
+                    code: body?.code,
+                    msg: body?.msg,
+                    notes: Array.isArray(body?.data?.notes) ? body.data.notes.length : 0,
+                    headers: summarizeHeaders(headers),
+                    hasMnsv2: true,
+                    xsecplatform: String(window.xsecplatform || ''),
+                    x0: '4.3.7',
+                  });
+                } catch (e) {
+                  attempts.push({ mode: 'mnsv2-err', err: String(e?.message || e) });
+                }
+              } else {
+                attempts.push({ mode: 'mnsv2-missing' });
+              }
+              // Also try native-style: intercept by calling a same-origin path that site uses if any helper exists
+              // Probe available sign helpers
+              const helpers = {
+                mnsv2: typeof window.mnsv2,
+                _webmsxyw: typeof window._webmsxyw,
+                axios: !!(window.axios && window.axios.get),
+                xsecplatform: String(window.xsecplatform || ''),
+              };
+              // cookie presence on document
+              const docCookies = document.cookie.split(';').map((s) => s.trim().split('=')[0]).filter(Boolean);
+              return {
+                attempts,
+                helpers,
+                docCookieNames: docCookies,
+                href: location.href,
+                cache: {
+                  commonLen: cache.xsCommon ? cache.xsCommon.length : 0,
+                  rapLen: cache.rap ? cache.rap.length : 0,
+                  cacheAgeMs: cache.cacheAgeMs,
+                  source: cache.source,
+                },
+              };
+            }, {
+              apiPath: pathWithQuery,
+              md5Path,
+              md5Both: md5Path,
+              customAlphabet: XHS_CUSTOM_B64,
+              cache,
+            });
+
+            p.off('request', onReq);
+
+            // me check
+            let me = null;
+            try {
+              me = await p.evaluate(async () => {
+                const res = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+                  credentials: 'include',
+                  headers: { accept: 'application/json, text/plain, */*', referer: location.href },
+                });
+                const body = await res.json().catch(() => ({}));
+                return {
+                  httpStatus: res.status,
+                  code: body?.code,
+                  msg: body?.msg,
+                  guest: body?.data?.guest,
+                  userId: body?.data?.user_id,
+                  nickname: body?.data?.nickname,
+                };
+              });
+            } catch (e) {
+              me = { err: String(e?.message || e) };
+            }
+
+            // Diff summary: header keys present in native vs our
+            const nativeSample = nativeHits.slice(0, 5);
+            const nativeKeys = new Set();
+            for (const hit of nativeSample) {
+              Object.keys(hit.headers || {}).forEach((k) => nativeKeys.add(k));
+            }
+            const ourHeaders = our?.attempts?.[0]?.headers || {};
+            const ourKeys = new Set(Object.keys(ourHeaders));
+            const onlyNative = [...nativeKeys].filter((k) => !ourKeys.has(k) && k !== 'cookieNames' && k !== 'webSessionPrefix' && k !== 'cookieCount');
+            const onlyOurs = [...ourKeys].filter((k) => !nativeKeys.has(k));
+
+            const summary = {
+              pageUrl: String(url).slice(0, 160),
+              me,
+              nativeCount: nativeHits.length,
+              nativeSample,
+              our,
+              onlyNativeHeaderKeys: onlyNative,
+              onlyOurHeaderKeys: onlyOurs,
+              signCache: {
+                commonLen: xiaohongshuSignCache.xsCommon?.length || 0,
+                rapLen: xiaohongshuSignCache.rap?.length || 0,
+                ageMs: xiaohongshuSignCache.capturedAt ? Date.now() - xiaohongshuSignCache.capturedAt : -1,
+                source: xiaohongshuSignCache.source || '',
+              },
+              userId,
+            };
+            log(`XHS_DIFF ${JSON.stringify(summary).slice(0, 7000)}`);
+            emit('xiaohongshu_diff', summary);
+          } catch (error) {
+            log(`XHS_DIFF failed: ${error.message}`);
+            emit('xiaohongshu_diff', { error: error.message });
+          }
+          break;
+        case 'xiaohongshu_probe':
+          // Read-only diagnostics: user/me + one user_posted. Prefer no navigation.
+          try {
+            await startBrowser();
+            const userId = String(command.userId || command.user_id || '597804a15e87e70f59fd8c57').trim();
+            const p = await getXiaohongshuPage();
+            let url = pageUrlSafe(p);
+            const cookieMap = await readXiaohongshuCookieMap();
+            const cookieSummary = {
+              hasA1: Boolean(cookieMap.get('a1')),
+              hasWebSession: Boolean(cookieMap.get('web_session')),
+              a1Len: String(cookieMap.get('a1') || '').length,
+              webSessionLen: String(cookieMap.get('web_session') || '').length,
+              webSessionPrefix: String(cookieMap.get('web_session') || '').slice(0, 8),
+            };
+            // Only navigate to explore if blank and not login-dead — never to profile.
+            if ((!url || url === 'about:blank' || !/xiaohongshu\.com/i.test(url)) && !xiaohongshuLoginDead) {
+              if (!/\/login|website-login|captcha|verify/i.test(url)) {
+                await p.goto('https://www.xiaohongshu.com/explore', { waitUntil: 'domcontentloaded', timeout: 45_000 });
+                await applyXiaohongshuLocalStorage(p);
+                await p.waitForTimeout(800);
+                url = pageUrlSafe(p);
+              }
+            }
+            const pageInfo = {
+              url: String(url).slice(0, 200),
+              loginDead: xiaohongshuLoginDead,
+              loginDeadReason: xiaohongshuLoginDeadReason,
+              signCommonLen: xiaohongshuSignCache.xsCommon?.length || 0,
+              signRapLen: xiaohongshuSignCache.rap?.length || 0,
+              signAgeMs: xiaohongshuSignCache.capturedAt ? Date.now() - xiaohongshuSignCache.capturedAt : -1,
+            };
+            // user/me without forcing navigation
+            let me = null;
+            try {
+              me = await p.evaluate(async () => {
+                try {
+                  const res = await fetch('https://edith.xiaohongshu.com/api/sns/web/v2/user/me', {
+                    credentials: 'include',
+                    headers: { accept: 'application/json, text/plain, */*', referer: location.href },
+                  });
+                  const body = await res.json().catch(() => ({}));
+                  return {
+                    httpStatus: res.status,
+                    code: body?.code,
+                    msg: body?.msg,
+                    guest: body?.data?.guest,
+                    userId: body?.data?.user_id,
+                    nickname: body?.data?.nickname,
+                    redId: body?.data?.red_id,
+                  };
+                } catch (e) {
+                  return { err: String(e?.message || e) };
+                }
+              });
+            } catch (e) {
+              me = { err: String(e?.message || e) };
+            }
+            // One user_posted for single account
+            let posted = null;
+            try {
+              // Temporarily allow API path even if login-dead flag set — probe is explicit.
+              const wasDead = xiaohongshuLoginDead;
+              if (wasDead) clearXiaohongshuLoginDead('probe allow once');
+              posted = await fetchXiaohongshuUserPosted(p, userId, { num: 10 });
+              if (wasDead && !(posted?.ok)) {
+                markXiaohongshuLoginDead('probe still failed');
+              }
+            } catch (e) {
+              posted = { ok: false, err: String(e?.message || e) };
+            }
+            const postedSummary = posted ? {
+              ok: posted.ok,
+              status: posted.status,
+              code: posted.code,
+              msg: posted.msg,
+              notes: Array.isArray(posted.notes) ? posted.notes.length : 0,
+              nickname: posted.nickname || '',
+              signMeta: posted.signMeta || null,
+              attempts: (posted.signMeta?.attempts || posted.attempts || []).slice?.(0, 4) || posted.attempts,
+            } : null;
+            // Also try a native-ish second call: same page fetch without our wrapper extras if me worked
+            log(`XHS_PROBE cookies=${JSON.stringify(cookieSummary)} page=${JSON.stringify(pageInfo)} me=${JSON.stringify(me)} posted=${JSON.stringify(postedSummary)}`);
+            emit('xiaohongshu_probe', {
+              cookies: cookieSummary,
+              page: pageInfo,
+              me,
+              posted: postedSummary,
+              userId,
+            });
+          } catch (error) {
+            log(`XHS_PROBE failed: ${error.message}`);
+            emit('xiaohongshu_probe', { error: error.message });
+          }
           break;
         case 'xiaohongshu_scan':
-          // After panel login, force cookie write so restart keeps session.
+          // Only persist when we still have a session; never overwrite good disk
+          // state with empty/guest cookies after login death.
           try {
-            await persistStorageState();
-            log('xiaohongshu_scan → forced persistStorageState');
+            const wrote = await persistStorageState({ force: false, reason: 'xiaohongshu_scan' });
+            log(wrote
+              ? 'xiaohongshu_scan → persistStorageState ok'
+              : 'xiaohongshu_scan → persistStorageState skipped (protect session)');
           } catch (error) {
             log(`xiaohongshu_scan persist failed: ${error.message}`);
           }
@@ -2512,9 +3617,13 @@ wss.on('connection', (socket) => {
         case 'persist_state':
         case 'persist':
           try {
-            await persistStorageState();
-            log('manual persistStorageState ok');
-            emit('status', { status: 'healthy', message: '浏览器 storage state 已写盘' });
+            // Manual persist is NOT allowed to wipe XHS web_session.
+            const wrote = await persistStorageState({ force: false, reason: 'manual_persist' });
+            log(wrote ? 'manual persistStorageState ok' : 'manual persistStorageState skipped (protect session)');
+            emit('status', {
+              status: wrote ? 'healthy' : 'degraded',
+              message: wrote ? '浏览器 storage state 已写盘' : 'storage state 未写入（保护会话，拒绝覆盖无 web_session 快照）',
+            });
           } catch (error) {
             emit('error', { message: `persist failed: ${error.message}` });
           }

@@ -76,6 +76,18 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	lines, _ := tailLines(s.opts.LogPath, 5000)
 	services := buildServiceStates(lines)
+	writeJSON(w, http.StatusOK, overviewResponse{
+		UpdatedAt: time.Now().Format("15:04:05"),
+		Services:  services,
+		Activity:  parseActivity(lines, 12),
+		Resources: readResources(),
+		Attention: buildOverviewAttention(services),
+	})
+}
+
+// buildOverviewAttention lists only items that need a human. Auto-heal states
+// (e.g. Douyin IM reconnecting) stay on the service card but not here.
+func buildOverviewAttention(services []serviceState) []attention {
 	attentionItems := make([]attention, 0, 4)
 	for _, item := range services {
 		if item.Status == "healthy" {
@@ -83,14 +95,19 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		switch item.ID {
 		case "douyin_im":
+			// Short reconnect / not-yet-connected is auto-heal territory (bot
+			// watchdog restarts sidecar then bot). Only surface hard failures
+			// or misconfig that actually need a human.
+			if item.StatusText == "重连中" || item.StatusText == "未连接" {
+				continue
+			}
 			title := "Douyin 网页 IM 异常"
 			desc := item.LastEvent
-			if item.StatusText == "重连中" {
-				title = "Douyin 网页 IM 重连中"
-				desc = "群聊连接断开，正在自动重连；若登录失效会自动请求扫码，打开浏览器即可扫"
-			} else if item.StatusText == "未连接" {
-				title = "Douyin 网页 IM 尚未连接"
-				desc = "账号可能已登录但 IM 初始化未完成；侧车会继续低频探测"
+			if item.StatusText == "待配置" {
+				title = "Douyin 网页 IM 待配置"
+				desc = "未唯一匹配目标群聊，请检查群号配置"
+			} else if item.StatusText == "连接异常" {
+				title = "Douyin 网页 IM 连接异常"
 			}
 			if desc == "" {
 				desc = item.StatusText
@@ -137,13 +154,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, overviewResponse{
-		UpdatedAt: time.Now().Format("15:04:05"),
-		Services:  services,
-		Activity:  parseActivity(lines, 12),
-		Resources: readResources(),
-		Attention: attentionItems,
-	})
+	return attentionItems
 }
 
 func buildServiceStates(lines []string) []serviceState {

@@ -50,12 +50,18 @@
 - 多群独立订阅与作品游标，支持按群配置 `@全体成员`
 - **IM 只读转发**（可选）：私信 + 指定群的群主消息 → QQ（不回写抖音）
 - 私信标题格式：`【昵称|抖音】`；图片消息经桥接透传 URL；部分客户端卡片（如 type=110 空正文）有可读占位
+- 私信**回复**尽量拆成引用栈：`我/对方：【分享图文|视频 标题】` + `对方：正文`；短时双推（约 3s）软去重
 - IM 断连自愈：软告警 → 侧重启 → Bot 进程重启（systemd）→ 仍未恢复再告警
 
 ### 📕 小红书监控
 - 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
+- **主路径**：页内 `mnsv2 → XYS_` 签名 + 缓存 `X-S-Common` / `x-rap-param` → `user_posted` API（失败**不** goto 用户主页）
+- 登录态：Chromium Profile + `weibo-storage-state.json`（cookie + 小红书 localStorage）；登录成功才 force 写盘，失败扫描不覆盖好会话
+- 游标防洪水：只转发约 **12 小时内**新帖、单次最多 3 条；游标落后过多只跳游标不灌历史
+- 可选 `BROWSER_PROXY_SERVER` 给浏览器挂代理；**不建议**自动轮换出口（易冲登录/风控）
 - 复用微博/抖音同一 Chromium Profile；登录二维码私聊管理员
 - 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
+- **视频帖**：QQ 侧目前稳定发封面图 + 小红书链接，列表接口**不保证**视频文件本体
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -127,7 +133,8 @@ cd ../..
 - 日志 `[NIM-live] gift in ... source=score-only|…unitChicken`；**不**实时刷屏。`getLiveList` 从 `userInfo` 解析主播以便发现进行中的直播。
 - 本场累计写入 `storage/live-sessions/<房间ID>.json`（git 忽略），重启后同 `liveId` 会 `resume session` 接着累。
 - 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知格式：
-  `⏹️ 名字的直播已结束` + 可选行：直播时长 / 本场鸡腿值 / 本场总选记分收入 / 最高在线人数（对应值 >0 才输出）。
+  `【房主|频道】` + 可选行：记分值 / 鸡腿值 / 最高在线人数 / 直播时长（对应值 >0 才输出）+ 时间戳；**不写**「直播已结束」行。
+- 直播弹幕 / 其他偶像进出：与房间消息同款 `【房主|频道】` 骨架（弹幕为 `昵称: 内容`；进出为 `昵称进入/离开了直播间`，可选观看时长），末行时间戳；不加 💬/👀 前缀。
 - `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开**当前已连接**直播间的事件；无法跟踪未订阅房间/未连接直播间的全站行踪。
 - 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
 - 侧卡仅监听 `127.0.0.1` 的随机端口，不对局域网或公网开放。
@@ -221,26 +228,37 @@ npm run test:douyin-im
 
 ### 📕 小红书帖子监控（可选）
 
-小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。实现参考了 [jackwener/xhs-cli](https://github.com/jackwener/xhs-cli) 的真实页面浏览与 `window.__INITIAL_STATE__` 提取方式，以及 [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) 的登录态实践；没有引入易随签名规则变化的直连 API。
+小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。**当前主路径**是登录页（explore）上的页内签名后调用 edith `user_posted`，而不是每轮 `goto` 用户主页扒 DOM：
+
+1. 浏览器保持登录（Profile + `weibo-storage-state.json`，含 cookie 与小红书 localStorage）
+2. 页内 `mnsv2` 生成 `XYS_`，并尽量带上缓存的 `X-S-Common` / `x-rap-param`（版本号优先读页面 `webBuild`）
+3. `fetch` `user_posted?user_id=…` 拉笔记列表；**API 失败不再 goto 用户主页兜底**
+4. 登录失效（`login-dead` / guest / `-100`）时**禁止**自动刷小红书页；需面板扫码重登
+5. 失败扫描**不会**用空 cookie 覆盖已落盘的好会话；面板热重载 SIGHUP **只打 bot 主进程**（避免误杀 Chrome）
+
+实现仍参考 [jackwener/xhs-cli](https://github.com/jackwener/xhs-cli) / [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) 的登录与页面实践；**没有**稳定的纯进程外 HTTP 复刻（签名依赖页内 VM）。
 
 ```json
 {
   "XIAOHONGSHU_ENABLED": true,
-  "XIAOHONGSHU_POLL_SECONDS": 90,
+  "XIAOHONGSHU_POLL_SECONDS": 60,
+  "BROWSER_PROXY_SERVER": "",
   "XIAOHONGSHU_SUBSCRIPTIONS": {}
 }
 ```
 
 > ⚠️ **坑（先看）**
-> - **浏览器 `healthy` ≠ 能拉帖**：Cookie/Profile 有值仍可能跳登录页；真正可用要看 notes 拉取成功（`notes_ok` / 管理面板 Attention）。
+> - **浏览器 `healthy` / Cookie 在 ≠ 能拉帖**：应用 `notes_ok` / 管理面板 Attention / `user/me` 非 guest 判断。
 > - **短链 `xhslink` 需解析为内部 `user_id`** 后再订阅；不要手填无效 ID。
 > - 用户说「登好了」后仍应执行 `bot xiaohongshu scan` 验证 notes>0；不要只看侧卡状态绿灯。
 > - 登录态与微博/抖音共用 `BROWSER_PROFILE_DIR`，**按账号凭据保护**，勿提交 Git。
-> - 风控：建议轮询 ≥60 秒；程序强制最低 30 秒，并串行访问账号。
+> - 风控：建议轮询 ≥60 秒（默认/回落 60）；程序强制最低 30 秒，并串行访问账号。
+> - **勿频繁侧重启 / 自动切代理 / 狂刷 explore**：会冲登录并加重风控；`api_stuck` 默认**不**静默重启浏览器。
+> - 游标：首次成功只建基线；之后仅转发约 **12 小时内**且相对游标更新的帖，单次最多 3 条；落后过多只跳游标。
+> - **视频本体**：列表接口通常只有封面；QQ 转发封面 + 链接，点开小红书看正片。
 
 - 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；订阅与轮询等多数字段热重载，总开关等标「需重启」的项仍需重启 Bot。
 - 命令：`bot xiaohongshu add <个人主页链接|内部 user_id> [at_all]` 等，见下方命令表。
-- 首次扫描只记最新帖为基线，不转发历史；之后按发布时间推送图文/视频、标题、封面和链接。
 - `bot xiaohongshu login` 把登录二维码私聊给管理员。
 - 开播提醒是保守附加能力：仅当主页明确出现直播入口时才通知；**无**弹幕/人数/下播统计；无法可靠识别时不猜测。
 
@@ -255,7 +273,7 @@ npm run test:douyin-im
 ```bash
 git clone git@github.com:sjsj1849/pocket48-bot.git
 cd pocket48-bot
-git checkout v0.2.3   # 或最新 tag
+git checkout v0.2.4   # 或最新 tag
 go build -o pocket48-bot ./cmd/bot
 # 可选：管理面板二进制（内嵌 admin-ui）
 go build -o pocket48-admin ./cmd/admin
@@ -405,8 +423,9 @@ bot code <验证码>          # 输入验证码完成登录
 | `BROWSER_SIDECAR_CMD` | 微博/抖音/小红书共用浏览器侧卡命令 | `"node ./sidecar/weibo-auth/index.mjs"` |
 | `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
+| `BROWSER_PROXY_SERVER` | 可选：Chromium 代理（如 `http://127.0.0.1:17890`） | `""` |
 | `XIAOHONGSHU_ENABLED` | 启用小红书监控 | `false` |
-| `XIAOHONGSHU_POLL_SECONDS` | 小红书个人主页轮询间隔（最低 30 秒） | `90` |
+| `XIAOHONGSHU_POLL_SECONDS` | 小红书轮询间隔（秒；配置低于 30 回落 60） | `60` |
 | `XIAOHONGSHU_SUBSCRIPTIONS` | QQ 群→小红书内部用户 ID 订阅 | `{}` |
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
 | `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |

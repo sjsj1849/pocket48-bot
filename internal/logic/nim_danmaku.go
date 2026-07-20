@@ -1276,10 +1276,15 @@ func (b *Bot) handleDanmakuMessage(roomID int64, d *DanmakuMessage) {
 	if fromID == 0 || !b.isKnownStar(fromID) || fromID == b.getRoomOwnerID(roomID) {
 		return
 	}
-	targetGroups := b.getTargetGroupsForRoom(roomID)
-	roomName := b.getRoomNameForDanmaku(roomID)
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, napcat.TextSegment(fmt.Sprintf("💬 %s直播间 · %s: %s", roomName, d.Nick, d.Text)))
+	// Same layout as room messages: 【Owner|Channel】 / nick: text / timestamp
+	owner, channel := b.getRoomOwnerAndChannel(roomID)
+	nick := strings.TrimSpace(d.Nick)
+	if nick == "" {
+		nick = "未知用户"
+	}
+	text := fmt.Sprintf("【%s|%s】\n%s: %s\n%s", owner, channel, nick, d.Text, time.Now().Format("2006-01-02 15:04:05"))
+	for _, gid := range b.getTargetGroupsForRoom(roomID) {
+		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
 	}
 }
 
@@ -1429,29 +1434,54 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	b.liveSessionsMu.Unlock()
 	b.removeLiveSessionFile(roomID)
 
-	name := strings.TrimSpace(snapshot.LiveOwnerName)
-	if name == "" {
-		name = b.getRoomNameForDanmaku(roomID)
+	// Align with room message style: 【Owner|Channel】 + stats + timestamp (no "直播已结束" line).
+	owner := strings.TrimSpace(snapshot.LiveOwnerName)
+	channel := ""
+	if info, err := b.getCachedRoomInfo(roomID); err == nil && info != nil {
+		if owner == "" {
+			owner = strings.TrimSpace(info.OwnerName)
+		}
+		channel = strings.TrimSpace(info.ChannelName)
 	}
-	text := fmt.Sprintf("⏹️ %s的直播已结束", name)
-	if snapshot.StartedAt > 0 {
-		duration := time.Since(time.UnixMilli(snapshot.StartedAt))
-		text += "\n直播时长：" + formatDouyinDuration(duration)
+	if owner == "" {
+		owner = b.getRoomNameForDanmaku(roomID)
+	}
+	if channel == "" {
+		channel = "包间"
+	}
+
+	var body []string
+	if snapshot.AnnualScore > 0 {
+		body = append(body, "记分值："+formatScoreValue(snapshot.AnnualScore))
 	}
 	if snapshot.ChickenLegs > 0 {
-		text += fmt.Sprintf("\n本场鸡腿值：%d", snapshot.ChickenLegs)
-	}
-	if snapshot.AnnualScore > 0 {
-		text += "\n本场总选记分收入：" + formatScoreValue(snapshot.AnnualScore)
+		body = append(body, fmt.Sprintf("鸡腿值：%d", snapshot.ChickenLegs))
 	}
 	if snapshot.PeakOnline > 0 {
-		text += fmt.Sprintf("\n最高在线人数：%d", snapshot.PeakOnline)
+		body = append(body, fmt.Sprintf("最高在线人数：%d", snapshot.PeakOnline))
 	}
+	// Duration last among stats, then timestamp (same as 上麦 / 开播 notices).
+	if snapshot.StartedAt > 0 {
+		duration := time.Since(time.UnixMilli(snapshot.StartedAt))
+		body = append(body, "直播时长："+formatLiveDuration(duration))
+	}
+	body = append(body, time.Now().Format("2006-01-02 15:04:05"))
+
+	text := fmt.Sprintf("【%s|%s】\n%s", owner, channel, strings.Join(body, "\n"))
 	log.Printf("[NIM-live] finish session room=%d liveId=%s legs=%d score=%s peak=%d",
 		roomID, snapshot.LiveID, snapshot.ChickenLegs, formatScoreValue(snapshot.AnnualScore), snapshot.PeakOnline)
 	for _, gid := range b.getTargetGroupsForRoom(roomID) {
 		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
 	}
+}
+
+// formatLiveDuration matches room-message plain style (no emoji), e.g. "1小时2分3秒".
+func formatLiveDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	total := int(duration.Seconds())
+	return fmt.Sprintf("%d小时%d分%d秒", total/3600, total%3600/60, total%60)
 }
 
 func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
@@ -1464,26 +1494,35 @@ func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
 	}
 	now := time.Now()
 	key := fmt.Sprintf("%d:%s", roomID, m.UserID)
-	roomName := b.getRoomNameForDanmaku(roomID)
-	var text string
+	owner, channel := b.getRoomOwnerAndChannel(roomID)
+	nick := strings.TrimSpace(m.Nick)
+	if nick == "" {
+		nick = "未知用户"
+	}
+	// Same layout as room messages: 【Owner|Channel】 / body / timestamp
+	var body []string
 	switch m.Event {
 	case "memberEnter":
 		b.memberEnterMu.Lock()
 		b.memberEnterTimes[key] = now
 		b.memberEnterMu.Unlock()
-		text = fmt.Sprintf("👀 %s进入了%s的直播间\n%s", m.Nick, roomName, now.Format("2006-01-02 15:04:05"))
+		body = append(body, nick+"进入了直播间")
 	case "memberExit":
-		var duration string
+		body = append(body, nick+"离开了直播间")
 		b.memberEnterMu.Lock()
 		if entered, ok := b.memberEnterTimes[key]; ok {
-			duration = fmt.Sprintf("\n观看时长%s", now.Sub(entered).Round(time.Second))
+			sec := int64(now.Sub(entered).Round(time.Second).Seconds())
+			if sec >= 60 {
+				body = append(body, "观看时长"+formatWatchDuration(sec))
+			}
 			delete(b.memberEnterTimes, key)
 		}
 		b.memberEnterMu.Unlock()
-		text = fmt.Sprintf("👀 %s离开了%s的直播间%s\n%s", m.Nick, roomName, duration, now.Format("2006-01-02 15:04:05"))
 	default:
 		return
 	}
+	body = append(body, now.Format("2006-01-02 15:04:05"))
+	text := fmt.Sprintf("【%s|%s】\n%s", owner, channel, strings.Join(body, "\n"))
 	for _, gid := range b.getTargetGroupsForRoom(roomID) {
 		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
 	}
@@ -1530,4 +1569,20 @@ func (b *Bot) getRoomNameForDanmaku(roomID int64) string {
 		}
 	}
 	return fmt.Sprintf("房间%d", roomID)
+}
+
+// getRoomOwnerAndChannel returns display parts for 【Owner|Channel】 headers
+// used by live-end / danmaku / member-event forwards.
+func (b *Bot) getRoomOwnerAndChannel(roomID int64) (owner, channel string) {
+	if info, err := b.getCachedRoomInfo(roomID); err == nil && info != nil {
+		owner = strings.TrimSpace(info.OwnerName)
+		channel = strings.TrimSpace(info.ChannelName)
+	}
+	if owner == "" {
+		owner = b.getRoomNameForDanmaku(roomID)
+	}
+	if channel == "" {
+		channel = "包间"
+	}
+	return owner, channel
 }

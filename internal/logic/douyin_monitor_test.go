@@ -110,6 +110,14 @@ func TestFormatDouyinIMGroupNotification(t *testing.T) {
 	}
 }
 
+func TestFormatDouyinPrivateNotificationHeader(t *testing.T) {
+	got := formatDouyinPrivateNotificationHeader("葡萄吞十七", "葡萄吞十七(唐欣怡)", "消息正文")
+	want := "【葡萄吞十七|抖音】\n葡萄吞十七(唐欣怡)：消息正文"
+	if got != want {
+		t.Fatalf("header=%q", got)
+	}
+}
+
 func TestResolveDouyinSenderLabels(t *testing.T) {
 	box, line := resolveDouyinSenderLabels(douyinBrowserEvent{
 		SenderNickname: "葡萄吞十七",

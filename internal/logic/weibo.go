@@ -1450,8 +1450,17 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 	thStyle := func(align string) string {
 		return fmt.Sprintf(`padding:11px 12px;border-bottom:1px solid #e7ebf1;color:#7a8495;font-size:12px;font-weight:650;text-align:%s;`, align)
 	}
+	// extra is appended last so callers can override font-size/color cleanly.
 	tdStyle := func(align string, extra string) string {
-		return fmt.Sprintf(`padding:10px 12px;border-bottom:1px solid #e7ebf1;%s;font-size:13px;text-align:%s;`, extra, align)
+		base := fmt.Sprintf(`padding:10px 12px;border-bottom:1px solid #e7ebf1;font-size:13px;text-align:%s;`, align)
+		extra = strings.TrimSpace(extra)
+		if extra == "" {
+			return base
+		}
+		if !strings.HasSuffix(extra, ";") {
+			extra += ";"
+		}
+		return base + extra
 	}
 
 	var thead strings.Builder
@@ -1476,7 +1485,7 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 				} else if r.signDelta == "new" {
 					color = "#2466b3"
 				}
-				deltaHTML = fmt.Sprintf(` <span style="color:%s;font-size:12px;font-weight:600;">(%s)</span>`, color, esc(r.signDelta))
+				deltaHTML = fmt.Sprintf(`&nbsp;<span style="color:%s;font-size:12px;font-weight:600;">(%s)</span>`, color, esc(r.signDelta))
 			}
 			bg := "#ffffff"
 			if r.rank%2 == 0 {
@@ -1486,54 +1495,57 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 			for _, c := range cols {
 				switch c.key {
 				case "rank":
-					fmt.Fprintf(&tableRows, `<td style="%s">%d</td>`, tdStyle(c.align, "color:#667085"), r.rank)
+					// Keep rank cell minimal — mobile mail clients are picky about first-column styles.
+					fmt.Fprintf(&tableRows, `<td align="center" style="padding:10px 8px;border-bottom:1px solid #e7ebf1;color:#667085;font-size:13px;">%d</td>`, r.rank)
 				case "name":
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px;font-weight:600"), esc(r.name))
+					fmt.Fprintf(&tableRows, `<td align="left" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px;font-weight:600"), esc(r.name))
 				case "sign":
-					fmt.Fprintf(&tableRows, `<td style="%s">%s%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px"), esc(r.sign), deltaHTML)
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px"), esc(r.sign), deltaHTML)
 				case "like":
 					val := "-"
 					if r.hasLike {
 						val = r.like
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
 				case "read":
 					val := "-"
 					if r.hasRead {
 						val = r.read
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
 				case "fans":
 					val := "-"
 					if r.hasFans {
 						val = r.fans
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
 				case "posts":
 					val := "-"
 					if r.hasPosts {
 						val = r.posts
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
 				case "level":
 					val := "-"
 					if r.hasLevel {
 						val = r.level
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="center" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
 				case "heat":
 					val := "-"
 					if r.hasHeat {
 						val = r.heat
 					}
-					fmt.Fprintf(&tableRows, `<td style="%s">%s</td>`, tdStyle(c.align, "color:#667085;font-size:12px"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="left" style="%s">%s</td>`, tdStyle(c.align, "color:#667085;font-size:12px"), esc(val))
 				}
 			}
 			tableRows.WriteString(`</tr>`)
 		}
 	}
 
-	return fmt.Sprintf(`<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #e7ebf1;border-radius:8px;overflow:hidden;">
+	// Avoid overflow/border-radius on tables — many mobile mail clients mangle them and
+	// can surface raw <td> fragments as plain text (seen on 2026-07-19 rank #6).
+	return fmt.Sprintf(`<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #e7ebf1;">
 <thead>
 %s
 </thead>
@@ -1571,10 +1583,12 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 				marginTop = "22px"
 			}
 			fmt.Fprintf(&sectionsHTML, `<div style="margin-top:%s;">
-<div style="display:flex;align-items:center;gap:8px;margin:0 0 10px;">
-<span style="display:inline-block;padding:4px 10px;border-radius:6px;background:#edf4ff;color:#2466b3;font-size:12px;font-weight:650;">%s</span>
-<span style="color:#667085;font-size:12px;">%d 个超话</span>
-</div>
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 10px;border-collapse:collapse;">
+<tr>
+<td style="padding:4px 10px;border-radius:6px;background:#edf4ff;color:#2466b3;font-size:12px;font-weight:650;">%s</td>
+<td style="padding-left:8px;color:#667085;font-size:12px;">%d 个超话</td>
+</tr>
+</table>
 %s
 </div>`, marginTop, esc(secTitle), len(sec.Results), buildWeiboSuperCountHTMLTable(sec.Results, signBaseline, likeBaseline, postBaseline))
 		}

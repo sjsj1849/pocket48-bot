@@ -73,6 +73,10 @@ type XiaohongshuMonitor struct {
 	// loginAlertHits: sliding window of re-login / risk failures for email alerts.
 	loginAlertHits []time.Time
 	loginLastAlert time.Time
+	// sidecarRestartAt: last silent weibo-auth restart for API-stuck (461) heal.
+	sidecarRestartAt time.Time
+	// proxyRotateAt: last mihomo-xhs outbound rotate for IP risk.
+	proxyRotateAt time.Time
 }
 
 func NewXiaohongshuMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins func(string)) *XiaohongshuMonitor {
@@ -85,6 +89,25 @@ func NewXiaohongshuMonitor(cfg *config.Config, client *napcat.Client, notifyAdmi
 }
 
 func (m *XiaohongshuMonitor) SetBrowserBridge(browser *WeiboAuthBridge) { m.browser = browser }
+
+// requestProxyRotateForIPRisk: fixed-egress mode — NEVER switch mihomo nodes automatically.
+// User 2026-07-20: keep GLOBAL pinned (TW-X1-1); rotating correlated with session death / risk.
+func (m *XiaohongshuMonitor) requestProxyRotateForIPRisk(reason string) {
+	if m == nil {
+		return
+	}
+	log.Printf("[Xiaohongshu] proxy rotate SKIPPED (fixed egress): %s", reason)
+}
+
+// requestSidecarRestartForAPI is intentionally a no-op restart.
+// User policy 2026-07-20: Xiaohongshu must stay on API path without thrashing Chromium;
+// silent Restart was killing login/captcha and making risk worse. We only log.
+func (m *XiaohongshuMonitor) requestSidecarRestartForAPI(reason string) {
+	if m == nil {
+		return
+	}
+	log.Printf("[Xiaohongshu] api_stuck noted (no sidecar restart): %s", reason)
+}
 
 func xiaohongshuAccountsFromConfig(cfg *config.Config) []xiaohongshuAccountCommand {
 	seen := make(map[string]xiaohongshuAccountCommand)
@@ -268,6 +291,23 @@ func (m *XiaohongshuMonitor) HandleBrowserEvent(event xiaohongshuBrowserEvent) {
 		st := strings.ToLower(strings.TrimSpace(event.Status))
 		if st == "login_required" || st == "qrcode_expired" || st == "login_error" {
 			m.noteXiaohongshuLoginError(event.UserID, event.Message)
+		}
+		// IP risk (300012): surface degraded + email window, NEVER thrash sidecar restart.
+		// Prefer rotating mihomo-xhs outbound (scripts/xhs_proxy_rotate.py) then soft retry.
+		if st == "ip_risk" {
+			log.Printf("[Xiaohongshu] status=degraded message=%s", event.Message)
+			m.noteXiaohongshuLoginError(event.UserID, event.Message)
+			m.requestProxyRotateForIPRisk(event.Message)
+			return
+		}
+		// API stuck (461 / empty notes, not login): sidecar asked for auto-heal restart.
+		if st == "api_stuck" {
+			// Skip if message clearly says IP risk.
+			if strings.Contains(event.Message, "IP存在风险") || strings.Contains(event.Message, "300012") {
+				log.Printf("[Xiaohongshu] api_stuck ignored (IP risk): %s", event.Message)
+				return
+			}
+			m.requestSidecarRestartForAPI(event.Message)
 		}
 	}
 }
@@ -464,16 +504,35 @@ func (m *XiaohongshuMonitor) handleNotes(event xiaohongshuBrowserEvent) {
 		if latest == 0 {
 			continue
 		}
+		// Bootstrap: first successful snapshot after empty cursor — remember tip, no flood.
 		if item.LastNoteTime == 0 {
 			item.LastNoteTime, item.LastNoteID = latest, latestID
+			log.Printf("[Xiaohongshu] cursor bootstrap user=%s last=%s time=%d (no forward)", event.UserID, latestID, latest)
 			continue
 		}
+		// Catch-up / stale-cursor guard:
+		// After long outage or cursor reset, "newer than LastNote*" can include days-old notes
+		// (user report 2026-07-20: forwarded 07-17 post as if new). Never flood history.
+		const maxForwardAge = 12 * time.Hour
+		const maxForwardBatch = 3
+		nowUnix := time.Now().Unix()
+		minCreate := nowUnix - int64(maxForwardAge/time.Second)
+		staleCursor := latest > item.LastNoteTime+int64((48*time.Hour)/time.Second)
+
 		var unseen []xiaohongshuNote
 		for _, note := range event.Notes {
 			isNewer := note.CreateTime > item.LastNoteTime || (note.CreateTime == item.LastNoteTime && note.ID > item.LastNoteID)
-			if note.ID != "" && isNewer && note.CreateTime <= time.Now().Add(5*time.Minute).Unix() {
-				unseen = append(unseen, note)
+			if note.ID == "" || !isNewer {
+				continue
 			}
+			// Reject future clock skew and too-old catch-up posts.
+			if note.CreateTime > nowUnix+int64((5*time.Minute)/time.Second) {
+				continue
+			}
+			if note.CreateTime < minCreate {
+				continue
+			}
+			unseen = append(unseen, note)
 		}
 		sort.Slice(unseen, func(i, j int) bool {
 			if unseen[i].CreateTime == unseen[j].CreateTime {
@@ -481,6 +540,18 @@ func (m *XiaohongshuMonitor) handleNotes(event xiaohongshuBrowserEvent) {
 			}
 			return unseen[i].CreateTime < unseen[j].CreateTime
 		})
+		if staleCursor && len(unseen) == 0 {
+			// Cursor far behind but all "new" notes are outside the forward window → jump cursor only.
+			log.Printf("[Xiaohongshu] cursor catch-up jump user=%s from=%s/%d to=%s/%d (no old flood)",
+				event.UserID, item.LastNoteID, item.LastNoteTime, latestID, latest)
+			item.LastNoteTime, item.LastNoteID = latest, latestID
+			continue
+		}
+		if len(unseen) > maxForwardBatch {
+			// Keep only the newest few within the window.
+			unseen = unseen[len(unseen)-maxForwardBatch:]
+			log.Printf("[Xiaohongshu] forward batch capped user=%s n=%d", event.UserID, len(unseen))
+		}
 		if len(unseen) > 0 {
 			jobs = append(jobs, job{groupID, *item, unseen})
 		}

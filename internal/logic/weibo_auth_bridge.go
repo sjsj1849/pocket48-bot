@@ -82,6 +82,8 @@ type weiboAuthCommand struct {
 	XiaohongshuEnabled     bool                        `json:"xiaohongshuEnabled"`
 	XiaohongshuPollSeconds int                         `json:"xiaohongshuPollSeconds,omitempty"`
 	XiaohongshuAccounts    []xiaohongshuAccountCommand `json:"xiaohongshuAccounts,omitempty"`
+	// ProxyServer is optional Playwright proxy (e.g. http://127.0.0.1:17890).
+	ProxyServer string `json:"proxyServer,omitempty"`
 }
 
 type WeiboAuthBridge struct {
@@ -289,6 +291,7 @@ func (b *WeiboAuthBridge) Start() error {
 		XiaohongshuEnabled:     b.cfg.XiaohongshuEnabled,
 		XiaohongshuPollSeconds: b.cfg.XiaohongshuPollSeconds,
 		XiaohongshuAccounts:    xiaohongshuAccountsFromConfig(b.cfg),
+		ProxyServer:            strings.TrimSpace(b.cfg.BrowserProxyServer),
 	}); err != nil {
 		b.Stop()
 		return err
@@ -496,7 +499,7 @@ func (b *WeiboAuthBridge) RequestDouyinLogin() error {
 }
 
 func (b *WeiboAuthBridge) SyncXiaohongshu() error {
-	return b.send(weiboAuthCommand{Cmd: "xiaohongshu_sync", XiaohongshuEnabled: true, XiaohongshuPollSeconds: b.cfg.XiaohongshuPollSeconds, XiaohongshuAccounts: xiaohongshuAccountsFromConfig(b.cfg)})
+	return b.send(weiboAuthCommand{Cmd: "xiaohongshu_sync", XiaohongshuEnabled: b.cfg.XiaohongshuEnabled, XiaohongshuPollSeconds: b.cfg.XiaohongshuPollSeconds, XiaohongshuAccounts: xiaohongshuAccountsFromConfig(b.cfg)})
 }
 
 func (b *WeiboAuthBridge) ScanXiaohongshu() error {
