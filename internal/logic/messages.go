@@ -145,7 +145,7 @@ func (b *Bot) pollRoom(roomID int64) (hadNewMsgs bool) {
 	}
 	b.clearPocketAuthExpired()
 
-	b.checkRoomOnMic(roomInfo)
+	// On-mic is handled by onMicLoop (independent REST), not gated by QChat.
 
 	// Smart limit: polling interval short → fewer messages needed
 	limit := b.smartMessageLimit()
@@ -844,6 +844,7 @@ func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
 
 	voiceUsers, err := b.pocket.GetRoomVoiceList(roomInfo.ChannelID, roomInfo.ServerID)
 	if err != nil {
+		// Auth expiry is handled by the caller loop when applicable; keep this quiet on transient fails.
 		return
 	}
 
@@ -861,7 +862,11 @@ func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
 	b.onMicLastCheck[roomInfo.ChannelID] = time.Now()
 	b.mu.Unlock()
 
-	if !ok || prev == isOnMic || !isOnMic {
+	// Seed state on first observation (do not spam "上麦了" for already-on-mic after restart).
+	if !ok {
+		return
+	}
+	if prev == isOnMic || !isOnMic {
 		return
 	}
 
@@ -878,9 +883,58 @@ func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
 		return
 	}
 
-	msg := fmt.Sprintf("【%s|%s】\n%s上麦了\n%s", idolName, roomInfo.ChannelName, idolName, time.Now().Format("2006-01-02 15:04:05"))
+	now := time.Now()
+	msg := fmt.Sprintf("【%s|%s】\n%s上麦了\n%s", idolName, roomInfo.ChannelName, idolName, now.Format("2006-01-02 15:04:05"))
+	log.Printf("[OnMic] room=%d owner=%s(%d) detected on-mic → notify groups=%v", roomInfo.ChannelID, idolName, roomInfo.OwnerID, targetGroups)
 	for _, gid := range targetGroups {
 		b.napcat.SendGroupMessage(gid, napcat.TextSegment(msg))
+	}
+}
+
+// onMicLoop polls Pocket48 REST voice list independently of QChat message realtime.
+// Previously checkRoomOnMic only ran inside pollRoom, which is skipped while QChat is
+// healthy — so on-mic announcements could lag tens of minutes vs bots that always REST-poll.
+func (b *Bot) onMicLoop() {
+	const tick = 15 * time.Second
+	log.Printf("[OnMic] REST voice-list loop started (interval=%s, independent of QChat)", tick)
+	for {
+		if !b.isMonitoring {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if b.isPocketAuthExpired() {
+			time.Sleep(tick)
+			continue
+		}
+
+		roomIDs := make(map[int64]bool)
+		for _, rooms := range b.cfg.GroupSubscriptions {
+			for _, roomID := range rooms {
+				roomIDs[roomID] = true
+			}
+		}
+
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 8)
+		for roomID := range roomIDs {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(id int64) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				roomInfo, err := b.getCachedRoomInfo(id)
+				if err != nil {
+					if !b.handlePocketAuthError(err) {
+						// silent: room closed / transient are common
+					}
+					return
+				}
+				b.clearPocketAuthExpired()
+				b.checkRoomOnMic(roomInfo)
+			}(roomID)
+		}
+		wg.Wait()
+		time.Sleep(tick)
 	}
 }
 
