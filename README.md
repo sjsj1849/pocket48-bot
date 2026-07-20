@@ -62,6 +62,7 @@
 - 复用微博/抖音同一 Chromium Profile；登录二维码私聊管理员
 - 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
 - **视频帖**：QQ 侧目前稳定发封面图 + 小红书链接，列表接口**不保证**视频文件本体
+- **浏览器内存**：侧卡默认 `--renderer-process-limit=4`；每 5 分钟 prune 孤儿页并打 `browserDiag`；抖音作品已是 Cookie+HTTP，登录页用完即关，不常驻
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -212,6 +213,7 @@ cd ../..
 - 最高在线人数来自 `WebcastRoomUserSeqMessage`/`WebcastRoomStatsMessage`。抖音未下发人数的场次不会显示该字段。
 - 公开主页通常可在未登录状态读取；需要登录时由管理员显式执行 `bot douyin login`，二维码只私聊超级管理员和管理员。
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
+- 抖音**作品**扫描优先 Cookie+HTTP，不依赖常驻创作者主页标签；`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存。抖音 **IM** 仍需长驻 IM 页。
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
 - 需要监控的账号通过 `DOUYIN_SUBSCRIPTIONS` 或 `bot douyin add` 手动维护。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
@@ -256,6 +258,7 @@ npm run test:douyin-im
 > - **勿频繁侧重启 / 自动切代理 / 狂刷 explore**：会冲登录并加重风控；`api_stuck` 默认**不**静默重启浏览器。
 > - 游标：首次成功只建基线；之后仅转发约 **12 小时内**且相对游标更新的帖，单次最多 3 条；落后过多只跳游标。
 > - **视频本体**：列表接口通常只有封面；QQ 转发封面 + 链接，点开小红书看正片。
+> - **内存诊断**：日志中的 `browserDiag(...)` 会打印当前标签角色/URL 摘要与 node heap；出现大量 `orphan` 页再考虑侧重启。
 
 - 管理面板「配置 → 小红书」可设轮询周期、按 QQ 群增删个人主页订阅；订阅与轮询等多数字段热重载，总开关等标「需重启」的项仍需重启 Bot。
 - 命令：`bot xiaohongshu add <个人主页链接|内部 user_id> [at_all]` 等，见下方命令表。
@@ -273,7 +276,7 @@ npm run test:douyin-im
 ```bash
 git clone git@github.com:sjsj1849/pocket48-bot.git
 cd pocket48-bot
-git checkout v0.2.4   # 或最新 tag
+git checkout v0.2.5   # 或最新 tag
 go build -o pocket48-bot ./cmd/bot
 # 可选：管理面板二进制（内嵌 admin-ui）
 go build -o pocket48-admin ./cmd/admin

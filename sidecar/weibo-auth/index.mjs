@@ -30,6 +30,7 @@ let douyinIMInitRetryTimer;
 let douyinIMHealthTimer;
 let douyinContactSyncTimer;
 let douyinContactPersistTimer;
+let browserHousekeepTimer;
 let douyinIMSocket;
 let refreshRunning = false;
 let douyinScanning = false;
@@ -557,7 +558,9 @@ async function startBrowser() {
       '--disable-audio-output',
       '--disable-breakpad',
       '--disable-crash-reporter',
-      '--renderer-process-limit=6',
+      // Keep in sync with intentional long-lived tabs (main/weibo + xhs + douyin IM).
+      // Login/lookup pages are temporary and should not force a high permanent limit.
+      '--renderer-process-limit=4',
       '--js-flags=--max-old-space-size=256',
     ];
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
@@ -632,6 +635,20 @@ async function startBrowser() {
     });
     // Drop leftover tabs from previous runs (profile can restore many pages).
     await pruneBrowserTabs({ reason: 'start' });
+    // Disable automatic session-style multi-tab restore growth: blank main only.
+    try {
+      for (const p of context.pages()) {
+        if (p !== page && !p.isClosed()) {
+          const u = pageUrlSafe(p);
+          // Keep nothing at cold start except the primary page; dedicated tabs open lazily.
+          if (!/im\.douyin\.com|xiaohongshu\.com\/explore|\/login|captcha|verify|passport\./i.test(u)) {
+            await p.close().catch(() => {});
+          }
+        }
+      }
+    } catch {}
+    await logBrowserPagesDiag('start');
+    scheduleBrowserHousekeeping();
     log(`browser profile ready at ${profileDir}`);
   })();
   try {
@@ -665,6 +682,8 @@ async function getXiaohongshuPage() {
 }
 
 // Long-lived tabs we intentionally keep. Everything else is a leak / leftover.
+// douyinPage is only for QR login and is released after login finishes.
+// douyinLookupPage is temporary and released after nickname lookup.
 function browserKeepPages() {
   return [page, douyinPage, douyinIMPage, douyinLookupPage, xiaohongshuPage]
     .filter((p) => p && !p.isClosed());
@@ -672,6 +691,52 @@ function browserKeepPages() {
 
 function pageUrlSafe(p) {
   try { return p.url() || ''; } catch { return ''; }
+}
+
+function pageRole(p) {
+  if (p === page) return 'main';
+  if (p === douyinPage) return 'douyin-login';
+  if (p === douyinIMPage) return 'douyin-im';
+  if (p === douyinLookupPage) return 'douyin-lookup';
+  if (p === xiaohongshuPage) return 'xiaohongshu';
+  return 'orphan';
+}
+
+// A: diagnostic dump of open tabs + node heap (RSS still needs `ps` outside).
+async function logBrowserPagesDiag(reason = 'manual') {
+  if (!context) {
+    log(`browserDiag(${reason}): no context`);
+    return;
+  }
+  const keep = new Set(browserKeepPages());
+  const pages = context.pages().filter((p) => p && !p.isClosed());
+  const mem = process.memoryUsage();
+  const rows = pages.map((p, i) => {
+    const url = pageUrlSafe(p).slice(0, 120);
+    return `#${i} role=${pageRole(p)} keep=${keep.has(p) ? 1 : 0} url=${url || '(empty)'}`;
+  });
+  log(
+    `browserDiag(${reason}): pages=${pages.length} keep=${keep.size} `
+    + `nodeHeapMB=${Math.round(mem.heapUsed / 1024 / 1024)} `
+    + `nodeRssMB=${Math.round((mem.rss || 0) / 1024 / 1024)} `
+    + `| ${rows.join(' || ') || '(none)'}`,
+  );
+}
+
+function scheduleBrowserHousekeeping() {
+  clearInterval(browserHousekeepTimer);
+  // Periodic prune + diag to catch leaked tabs / growing node heap.
+  browserHousekeepTimer = setInterval(() => {
+    if (shuttingDown || !context) return;
+    void (async () => {
+      try {
+        await pruneBrowserTabs({ reason: 'timer' });
+        await logBrowserPagesDiag('timer');
+      } catch (error) {
+        log(`browser housekeeping failed: ${error.message}`);
+      }
+    })();
+  }, 5 * 60_000);
 }
 
 // Aggressive prune: keep only known utility tabs + IM/login by URL if ref was lost.
@@ -707,6 +772,9 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     closed += 1;
   }
   if (closed > 0) log(`pruneBrowserTabs(${reason}): closed ${closed} orphan tab(s); keep=${keep.size}`);
+  // If douyin lookup page was closed externally, drop ref.
+  if (douyinLookupPage && douyinLookupPage.isClosed()) douyinLookupPage = undefined;
+  if (douyinPage && douyinPage.isClosed()) douyinPage = undefined;
 }
 
 // Back-compat name used by scan loops.
@@ -741,6 +809,17 @@ async function releaseDouyinLookupPage() {
   }
   try { await douyinLookupPage.close(); } catch {}
   douyinLookupPage = undefined;
+}
+
+// Douyin works path is Cookie+HTTP only. Login page is temporary — close after QR flow.
+async function releaseDouyinPage(reason = 'manual') {
+  if (!douyinPage || douyinPage.isClosed()) {
+    douyinPage = undefined;
+    return;
+  }
+  try { await douyinPage.close(); } catch {}
+  douyinPage = undefined;
+  log(`releaseDouyinPage(${reason}): closed temporary douyin login tab`);
 }
 
 async function syncDouyinContacts({ force = false } = {}) {
@@ -1919,12 +1998,15 @@ async function requestDouyinLoginQRCode() {
     if (cookies.get('LOGIN_STATUS') === '1' || cookies.get('sessionid') || cookies.get('sessionid_ss')) {
       await persistStorageState();
       emit('douyin_status', { status: 'healthy', message: '抖音浏览器登录成功' });
+      // Works/IM no longer need this tab; free a renderer.
+      await releaseDouyinPage('login-ok');
       void scanAllDouyin();
       void startDouyinIM();
       return;
     }
   }
   emit('douyin_status', { status: 'qrcode_expired', message: '抖音登录二维码已过期' });
+  await releaseDouyinPage('login-expired');
 }
 
 async function xiaohongshuLoggedIn() {
@@ -3111,6 +3193,7 @@ async function shutdown() {
   clearInterval(douyinTimer);
   clearInterval(xiaohongshuTimer);
   clearInterval(douyinContactSyncTimer);
+  clearInterval(browserHousekeepTimer);
   stopDouyinIM();
   try {
     if (douyinContactPersistTimer) await persistDouyinContacts();
