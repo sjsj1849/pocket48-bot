@@ -80,8 +80,8 @@ func TestClassifyDouyinIMEvent(t *testing.T) {
 		t.Fatalf("incoming private classification=%q", got)
 	}
 	private.SenderUID = "self"
-	if got := classifyDouyinIMEvent(private, "target", "owner", "self"); got != "private_self" {
-		t.Fatalf("outgoing private message should be private_self, got %q", got)
+	if got := classifyDouyinIMEvent(private, "target", "owner", "self"); got != "" {
+		t.Fatalf("outgoing private message must be ignored, got %q", got)
 	}
 }
 
@@ -200,10 +200,10 @@ func TestInferDouyinQuotedName(t *testing.T) {
 	}
 }
 
-func TestClassifyDouyinIMEventSelfIsPrivateSelf(t *testing.T) {
+func TestClassifyDouyinIMEventRejectsExplicitSelfUID(t *testing.T) {
 	event := douyinBrowserEvent{ConversationType: 1, SenderUID: "self", SelfUID: "self"}
-	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "private_self" {
-		t.Fatalf("self message classified as %q, want private_self", got)
+	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "" {
+		t.Fatalf("self message classified as %q", got)
 	}
 }
 
