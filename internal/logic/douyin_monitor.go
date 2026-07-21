@@ -76,6 +76,7 @@ type douyinBrowserEvent struct {
 	Link             string       `json:"link"`
 	Images           []string     `json:"images,omitempty"`
 	Index            string       `json:"index"`
+	IsSelfChat       bool         `json:"isSelfChat,omitempty"`
 }
 
 type douyinLiveState struct {
@@ -734,9 +735,10 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 	}
 	m.mu.Unlock()
-	// Never mirror messages we sent ourselves (private or group). Own private DMs
-	// were briefly forwarded for image recovery and leaked peer chats — disabled.
-	if event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID) {
+	// Own messages: only allow private notes-to-self (flagged isSelfChat by sidecar).
+	// Own messages to other peers / groups are never mirrored.
+	isOwnSender := event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID)
+	if isOwnSender && !(event.ConversationType == 1 && event.IsSelfChat) {
 		return
 	}
 	conversationID := ""
@@ -786,11 +788,15 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 			segments = appendTextWithQQFaces(segments, "\n"+timeText)
 		}
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, segments)
-	case "private_incoming":
+	case "private_incoming", "private_self":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
 			return
 		}
 		boxName, lineName := resolveDouyinSenderLabels(event)
+		if kind == "private_self" {
+			boxName = "我"
+			lineName = "我"
+		}
 		quotedName := inferDouyinQuotedName(event, lineName, selfUID)
 		// Share-card quotes without a name: if quoted UID is empty after filter but
 		// quoted text looks like a share we treat unknown as empty (JS should set 我).
@@ -1198,7 +1204,11 @@ func classifyDouyinIMEvent(event douyinBrowserEvent, conversationID, ownerUID, s
 		if event.SenderUID == "" {
 			return ""
 		}
-		// Own outbound private messages are not forwarded.
+		// Notes-to-self only when sidecar flagged isSelfChat (peer map / conv id check).
+		if event.IsSelfChat && (event.SenderUID == selfUID || event.SenderUID == event.SelfUID) {
+			return "private_self"
+		}
+		// Own outbound to other peers: ignore.
 		if selfUID != "" && event.SenderUID == selfUID {
 			return ""
 		}

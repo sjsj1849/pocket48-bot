@@ -56,6 +56,7 @@ type weiboAuthEvent struct {
 	Link             string            `json:"link,omitempty"`
 	Images           []string          `json:"images,omitempty"`
 	Index            string            `json:"index,omitempty"`
+	IsSelfChat       bool              `json:"isSelfChat,omitempty"`
 	UserID           string            `json:"userId,omitempty"`
 	Notes            []xiaohongshuNote `json:"notes,omitempty"`
 	LiveActive       bool              `json:"liveActive,omitempty"`
@@ -369,6 +370,7 @@ func (b *WeiboAuthBridge) readLoop() {
 					CreateTime: event.CreateTime, ReceivedAt: event.ReceivedAt,
 					QuotedName: event.QuotedName, QuotedText: event.QuotedText, QuotedSenderUID: event.QuotedSenderUID,
 					Text: event.Text, Link: event.Link, Images: event.Images, Index: event.Index,
+					IsSelfChat: event.IsSelfChat,
 				})
 			}
 		case "xiaohongshu_account", "xiaohongshu_notes", "xiaohongshu_qrcode", "xiaohongshu_status", "xiaohongshu_account_error", "xiaohongshu_error":
