@@ -790,6 +790,14 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 		boxName, lineName := resolveDouyinSenderLabels(event)
 		quotedName := inferDouyinQuotedName(event, lineName, selfUID)
+		// Share-card quotes without a name: if quoted UID is empty after filter but
+		// quoted text looks like a share we treat unknown as empty (JS should set 我).
+		// Reply-to-share covers: keep at most one image (CDN mirrors of same cover).
+		if event.Link != "" || strings.HasPrefix(strings.TrimSpace(event.QuotedText), "[分享图文]") || strings.HasPrefix(strings.TrimSpace(event.QuotedText), "[视频]") {
+			if len(images) > 1 {
+				images = images[:1]
+			}
+		}
 		text = formatDouyinReplyText(lineName, text, quotedName, event.QuotedText)
 		// Business forward (not an ops alert) — still QQ private to admins.
 		// Same layout: title+body → images → timestamp.
@@ -818,10 +826,22 @@ func uniqueHTTPURLs(urls []string) []string {
 		if u == "" || (!strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://")) {
 			continue
 		}
-		if _, ok := seen[u]; ok {
+		// De-dupe CDN mirrors of the same asset (query tokens differ, path same).
+		key := u
+		if i := strings.Index(u, "?"); i >= 0 {
+			key = u[:i]
+		}
+		// Also collapse identical basenames under different hosts when path ends the same.
+		if j := strings.LastIndex(key, "/"); j >= 0 && j+1 < len(key) {
+			base := key[j+1:]
+			if len(base) >= 8 {
+				key = "base:" + base
+			}
+		}
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[u] = struct{}{}
+		seen[key] = struct{}{}
 		out = append(out, u)
 		if len(out) >= 9 {
 			break

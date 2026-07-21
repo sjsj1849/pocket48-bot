@@ -264,7 +264,16 @@ function replyDetails(content, ext = {}) {
     if (!quotedText && (node.msg_type === 27 || node.messageType === 27 || node.type === 27)) {
       quotedText = '[图片]';
     }
-    const quotedSenderUid = firstText(node, uidKeys);
+    // Nested share-card bags often carry the *content author* user_id (not the IM
+    // sender who forwarded the card). Never treat those as quotedSenderUid.
+    const looksLikeShareBag = Boolean(
+      node.itemId || node.item_id || node.aweme_id || node.awemeId
+      || node.related_share_video || node.relatedShareVideo
+      || node.share_id || node.shareId
+      || node.aweType === 700 || node.aweType === '700'
+      || node.content_title || node.content_thumb || node.cover_url
+    );
+    const quotedSenderUid = looksLikeShareBag ? '' : firstText(node, uidKeys);
     const quotedServerMessageId = firstText(node, serverIdKeys);
     const quotedClientMessageId = firstText(node, clientIdKeys);
     if (quotedName || quotedText || quotedSenderUid || quotedServerMessageId || quotedClientMessageId) {
@@ -1436,6 +1445,39 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     }
     // Light-interaction / emoji: one image is enough (avoid static+animate double send).
     images = pickBestStickerURLs(images, 1);
+  } else if (
+    // Reply-to-share / share card with multiple CDN mirrors of the same cover.
+    messageType === 7
+    && (
+      link
+      || content?.related_share_video
+      || content?.share_id
+      || content?.aweType === 700
+      || looksLikeDouyinShareCardText(quotedText)
+      || looksLikeDouyinShareCardText(text)
+    )
+  ) {
+    const cover = content.__douyin_video_cover || firstCoverURL(content) || firstCoverURL(content?.related_share_video || {});
+    if (cover) images = [cover];
+    else if (images.length > 1) images = pickBestStickerURLs(images, 1);
+  }
+  // Final de-dupe by path (ignore query tokens) — same cover often appears 3x.
+  if (images.length > 1) {
+    const seen = new Set();
+    const deduped = [];
+    for (const url of images) {
+      let key = url;
+      try {
+        const u = new URL(url);
+        key = u.pathname;
+      } catch {
+        key = String(url).split('?')[0];
+      }
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(url);
+    }
+    images = deduped;
   }
   if (messageType === 27) {
     if (!text) text = '[图片]';
