@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
 import { extractProfileLive, normalizeAwemeList } from './douyin-parser.mjs';
-import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, compactDouyinShareQuote } from './douyin-im.mjs';
+import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, compactDouyinShareQuote, looksLikeDouyinShareCardText } from './douyin-im.mjs';
 import { extractXiaohongshuProfile, normalizeXiaohongshuNotes } from './xiaohongshu-parser.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((arg) => {
@@ -1251,6 +1251,26 @@ function enrichDouyinIMQuote(message) {
   // Heuristic for type=7 frames that only carry nested share-card text as quote:
   // if quotedText is a share card and quote uid still unknown, prefer marking as self
   // when we ourselves recently sent the same share (text cache by content match).
+  // Also: quotedSenderUid is often the *content author* of the shared post, not the
+  // IM sender — if cache says we sent this card, force 「我」even when uid differs.
+  if (quotedText && looksLikeDouyinShareCardText(quotedText)) {
+    const compact = compactDouyinShareQuote(quotedText) || quotedText;
+    for (const entry of douyinIMTextByServerId.values()) {
+      if (!entry?.isSelf) continue;
+      const et = compactDouyinShareQuote(entry.text) || entry.text;
+      if (
+        et === compact
+        || entry.text === quotedText
+        || (compact && String(entry.text || '').includes(compact.replace(/^\[分享图文\]\s*/, '').slice(0, 20)))
+        || (compact && String(et || '').includes(String(quotedText).replace(/^\[分享图文\]\s*/, '').slice(0, 20)))
+      ) {
+        quotedName = '我';
+        quotedSenderUid = String(entry.senderUid || douyinIMIdentity.selfUid || '');
+        quotedText = compact || quotedText;
+        break;
+      }
+    }
+  }
   if (quotedText && !quotedSenderUid && !quotedName) {
     const compact = compactDouyinShareQuote(quotedText);
     for (const entry of douyinIMTextByServerId.values()) {
@@ -1267,6 +1287,8 @@ function enrichDouyinIMQuote(message) {
   if (!quotedName && quotedSenderUid && douyinIMIdentity.selfUid && quotedSenderUid === douyinIMIdentity.selfUid) {
     quotedName = '我';
   }
+  // Share-card quote with no reliable name: if private reply and only one side is self,
+  // leave name empty rather than inventing — unless cache already marked 我 above.
   // When only a bare ref id is present and cache miss, still mark as reply to self if uid matches.
   if (!quotedText && !quotedName && (message.quotedServerMessageId || message.quotedClientMessageId)) {
     // leave empty; Go side will only show reply stack when text exists
