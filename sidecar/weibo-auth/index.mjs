@@ -1476,13 +1476,14 @@ async function publishDouyinIMMessage(message) {
   if (!message.internalMetadata) {
     rememberDouyinIMText(message, { isSelf: isOwn });
   }
+  // Never mirror our own outbound messages (private or group). Own messages are
+  // only cached for quote resolution. Forwarding own DMs to admins leaked chats
+  // (e.g. 发给唐欣怡) — user rejected that.
+  if (isOwn) return;
   if (message.internalMetadata) return;
   const isPrivate = message.conversationType === 1 && settings.douyinIMPrivateEnabled;
   const isTargetGroup = message.conversationType === 2
     && message.conversationId === douyinIMIdentity.conversationId;
-  // Own messages: still forward PRIVATE (self-chat / notes-to-self / outbound DM) so
-  // admins can recover images they sent. Never forward own group messages to QQ.
-  if (isOwn && !isPrivate) return;
   if (!isPrivate && !isTargetGroup) return;
 
   // Sparse video share (type 8/77/105): field 8 JSON often empty on private shares
