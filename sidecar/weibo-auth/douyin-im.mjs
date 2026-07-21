@@ -415,6 +415,7 @@ function extractDouyinItemId(content = {}, ext = {}) {
   const keys = [
     'itemId', 'item_id', 'aweme_id', 'awemeId', 'awemeid',
     'group_id', 'groupId', 'video_id', 'videoId', 'media_id', 'mediaId',
+    'share_item_id', 'shareItemId',
   ];
   const bags = [
     content,
@@ -434,7 +435,17 @@ function extractDouyinItemId(content = {}, ext = {}) {
   ];
   for (const [k, v] of Object.entries(ext || {})) {
     if (!/aweme|item|video|share|card|media|content/i.test(k)) continue;
+    // Plain numeric share ids often live as raw strings in ext (e.g. a:share_item_id).
+    if (typeof v === 'string' && /^\d{8,}$/.test(v.trim())) {
+      bags.push(v.trim());
+      continue;
+    }
     bags.push(parseMaybeJSON(v) || (typeof v === 'object' ? v : null));
+  }
+  // Explicit ext keys used by type 105 sparse private shares.
+  for (const k of ['a:share_item_id', 'share_item_id', 'a:item_id', 's:item_id']) {
+    const v = ext?.[k];
+    if (v != null && String(v).trim()) bags.push(String(v).trim());
   }
   const visit = (node, depth = 0) => {
     if (!node || depth > 5) return '';
@@ -468,7 +479,7 @@ function extractDouyinItemId(content = {}, ext = {}) {
   try {
     const blob = JSON.stringify(content || {}).slice(0, 8000);
     const m = blob.match(/\/video\/(\d{8,})/i)
-      || blob.match(/"(?:itemId|item_id|aweme_id|awemeId)"\s*:\s*"?(\d{8,})/i);
+      || blob.match(/"(?:itemId|item_id|aweme_id|awemeId|share_item_id)"\s*:\s*"?(\d{8,})/i);
     if (m) return m[1];
   } catch {}
   return '';
@@ -1407,14 +1418,18 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
       || messageType === 8
       || messageType === 77
       || messageType === 105
+      || ext['a:share_item_id']
+      || ext.share_item_id
     );
     if (relatedId && looksLikeShare) {
       link = `https://www.douyin.com/video/${relatedId}`;
       const cover = firstCoverURL(content) || firstCoverURL(related || {});
       if (cover) content.__douyin_video_cover = cover;
       // If body is empty but this is clearly a share-with-caption frame, keep a short label.
-      if (!text && (messageType === 7 || content.aweType === 700 || content.share_id)) {
-        text = formatDouyinVideoShare(content, ext).text || '[视频]';
+      if (!text && (messageType === 7 || messageType === 8 || messageType === 105 || content.aweType === 700 || content.share_id || ext['a:share_item_id'])) {
+        const formatted = formatDouyinVideoShare(content, ext);
+        text = formatted.text || '[视频]';
+        if (formatted.link) link = formatted.link;
       }
     }
   }
@@ -1618,10 +1633,66 @@ export function buildDouyinIMWebSocketURL(selfUid) {
   return `wss://frontier-im.douyin.com/ws/v2?${params}`;
 }
 
-export function isOwnDouyinIMMessage(senderUid, selfUid) {
+function isOwnDouyinIMMessage(senderUid, selfUid) {
   const sender = String(senderUid || '').trim();
   const self = String(selfUid || '').trim();
   return sender !== '' && self !== '' && sender === self;
+}
+
+// Learn peer uid for private conversations from *incoming* messages (not self).
+// Used to allow forwarding only "notes to self", not own messages to other people.
+const douyinPrivatePeerByConv = new Map();
+
+function rememberDouyinPrivatePeer(conversationId, peerUid, { isSelf = false } = {}) {
+  const conv = String(conversationId || '').trim();
+  const peer = String(peerUid || '').trim();
+  if (!conv || !peer) return;
+  if (isSelf) return; // never learn peer from our own sends
+  douyinPrivatePeerByConv.set(conv, peer);
+  if (douyinPrivatePeerByConv.size > 2_000) {
+    douyinPrivatePeerByConv.delete(douyinPrivatePeerByConv.keys().next().value);
+  }
+}
+
+function isDouyinSelfChatConversation(conversationId, selfUid) {
+  const c = String(conversationId || '').trim();
+  const s = String(selfUid || '').trim();
+  if (!c || !s) return false;
+  if (c === s) return true;
+  // Common 1:1 id shapes: "uid:uid", "0:uid:uid", "1:uid:uid"
+  if (c === `${s}:${s}`) return true;
+  if (c.endsWith(`:${s}:${s}`) || c.includes(`:${s}:${s}:`) || c.startsWith(`${s}:${s}`)) return true;
+  if (c === `0:${s}` || c === `1:${s}` || c === `0:${s}:${s}` || c === `1:${s}:${s}`) return true;
+  // Known peer for this conv is ourselves
+  const known = douyinPrivatePeerByConv.get(c);
+  if (known && known === s) return true;
+  // Numeric parts of id are only self (e.g. "0_12495_12495")
+  const parts = c.split(/[:_\-]/).filter((p) => /^\d{5,}$/.test(p));
+  if (parts.length >= 2 && parts.every((p) => p === s)) return true;
+  if (parts.length === 1 && parts[0] === s) return true;
+  return false;
+}
+
+/**
+ * Own private message should forward only when talking to self (file helper / notes).
+ * If we know this conversation's peer is someone else → never forward.
+ * If conversation looks like self-chat → forward.
+ * If peer unknown and id doesn't look like self-chat → don't forward (safe default).
+ */
+function shouldForwardOwnPrivate(message, selfUid) {
+  if (!message || message.conversationType !== 1) return false;
+  const self = String(selfUid || '').trim();
+  const conv = String(message.conversationId || '').trim();
+  const shortId = String(message.conversationShortId || '').trim();
+  if (!self || !conv) return false;
+  const knownPeer = douyinPrivatePeerByConv.get(conv);
+  if (knownPeer && knownPeer !== self) return false;
+  if (knownPeer && knownPeer === self) return true;
+  if (shortId && shortId === self) return true;
+  if (isDouyinSelfChatConversation(conv, self)) return true;
+  if (shortId && isDouyinSelfChatConversation(shortId, self)) return true;
+  // Unknown peer: refuse (avoids leaking DMs to 唐欣怡 etc. on first outbound).
+  return false;
 }
 
 export {
@@ -1630,6 +1701,10 @@ export {
   isDouyinControlCommand,
   isDouyinSystemNotice,
   looksLikeDouyinShareCardText,
+  isOwnDouyinIMMessage,
+  isDouyinSelfChatConversation,
+  shouldForwardOwnPrivate,
+  rememberDouyinPrivatePeer,
 };
 
 export const douyinIMInternals = { decodeFields, asString, asNumber };

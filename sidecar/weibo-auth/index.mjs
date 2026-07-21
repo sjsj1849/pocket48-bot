@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
 import { extractProfileLive, normalizeAwemeList } from './douyin-parser.mjs';
-import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, compactDouyinShareQuote, looksLikeDouyinShareCardText } from './douyin-im.mjs';
+import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, compactDouyinShareQuote, looksLikeDouyinShareCardText, shouldForwardOwnPrivate, rememberDouyinPrivatePeer } from './douyin-im.mjs';
 import { extractXiaohongshuProfile, normalizeXiaohongshuNotes } from './xiaohongshu-parser.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((arg) => {
@@ -1476,19 +1476,40 @@ async function publishDouyinIMMessage(message) {
   if (!message.internalMetadata) {
     rememberDouyinIMText(message, { isSelf: isOwn });
   }
-  // Never mirror our own outbound messages (private or group). Own messages are
-  // only cached for quote resolution. Forwarding own DMs to admins leaked chats
-  // (e.g. 发给唐欣怡) — user rejected that.
-  if (isOwn) return;
   if (message.internalMetadata) return;
+
   const isPrivate = message.conversationType === 1 && settings.douyinIMPrivateEnabled;
   const isTargetGroup = message.conversationType === 2
     && message.conversationId === douyinIMIdentity.conversationId;
+
+  // Learn private peers from *incoming* messages so we can refuse forwarding own
+  // messages into other people's DMs (only allow notes-to-self).
+  if (isPrivate && !isOwn) {
+    rememberDouyinPrivatePeer(message.conversationId, message.senderUid, { isSelf: false });
+  }
+
+  // Own messages: only forward private notes-to-self, never own messages to peers/groups.
+  if (isOwn) {
+    const allowSelf = isPrivate && shouldForwardOwnPrivate(message, douyinIMIdentity.selfUid);
+    if (!allowSelf) {
+      if (isPrivate) {
+        log(
+          `Douyin IM skip own-private (not self-chat) conv=${message.conversationId}`
+          + ` short=${message.conversationShortId || '-'}`
+          + ` type=${message.messageType}`,
+        );
+      }
+      return;
+    }
+    message = { ...message, isSelfChat: true };
+    log(`Douyin IM allow own self-chat conv=${message.conversationId} type=${message.messageType}`);
+  }
   if (!isPrivate && !isTargetGroup) return;
 
   // Sparse video share (type 8/77/105): field 8 JSON often empty on private shares
   // (contentLen=0). Douyin then sends the real caption as a separate type=7 with
   // quotedText="[视频]". Forwarding bare "[视频]" produces a useless second QQ bubble.
+  // Exception: if we can recover a link/itemId (e.g. ext a:share_item_id), keep it.
   const bareVideo = String(message.text || '').trim() === '[视频]';
   const sparseVideoShare = [8, 77, 105].includes(Number(message.messageType))
     && bareVideo
@@ -1589,9 +1610,13 @@ async function publishDouyinIMMessage(message) {
   if (isPrivate || isTargetGroup) {
     log(
       `Douyin IM publish type=${message.messageType} convType=${message.conversationType}`
+      + ` conv=${message.conversationId || '-'}`
+      + ` short=${message.conversationShortId || '-'}`
+      + ` selfChat=${message.isSelfChat ? 1 : 0}`
       + ` sender=${message.senderUid} name=${senderName || '-'} nick=${senderNickname || '-'} remark=${senderRemark || '-'}`
       + ` text=${String(message.text || '').slice(0, 80)}`
       + ` images=${Array.isArray(message.images) ? message.images.length : 0}`
+      + ` link=${String(message.link || '').slice(0, 80)}`
       + (hasQuoteRef ? ` quoted=${JSON.stringify({
         name: message.quotedName || '',
         text: String(message.quotedText || '').slice(0, 60),

@@ -203,7 +203,11 @@ func TestInferDouyinQuotedName(t *testing.T) {
 func TestClassifyDouyinIMEventRejectsExplicitSelfUID(t *testing.T) {
 	event := douyinBrowserEvent{ConversationType: 1, SenderUID: "self", SelfUID: "self"}
 	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "" {
-		t.Fatalf("self message classified as %q", got)
+		t.Fatalf("self message without isSelfChat classified as %q", got)
+	}
+	event.IsSelfChat = true
+	if got := classifyDouyinIMEvent(event, "", "", event.SelfUID); got != "private_self" {
+		t.Fatalf("self-chat message classified as %q, want private_self", got)
 	}
 }
 
