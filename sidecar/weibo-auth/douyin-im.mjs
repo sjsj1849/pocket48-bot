@@ -1264,6 +1264,25 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     text = '[回复]';
   }
 
+  // Caption + shared video (common private share: type=8 empty card + type=7 caption JSON
+  // with related_share_video.itemId). Keep the caption; attach the video link for QQ.
+  // Do NOT rewrite body to bare [视频] — that loses the user's text.
+  if (!link && content && typeof content === 'object') {
+    const sharedId = extractDouyinItemId(content, ext);
+    const related = content.related_share_video || content.relatedShareVideo || null;
+    const relatedId = sharedId
+      || String(related?.itemId || related?.item_id || related?.aweme_id || related?.awemeId || '').trim();
+    if (relatedId) {
+      link = `https://www.douyin.com/video/${relatedId}`;
+      const cover = firstCoverURL(content) || firstCoverURL(related || {});
+      if (cover) content.__douyin_video_cover = cover;
+      // If body is empty but this is clearly a share-with-caption frame, keep a short label.
+      if (!text && (messageType === 7 || content.aweType === 700 || content.share_id)) {
+        text = formatDouyinVideoShare(content, ext).text || '[视频]';
+      }
+    }
+  }
+
   // System notices / control metadata should not be forwarded to QQ.
   const internalMetadata = /^\d+:\d+:\d+:\d+$/.test(text)
     || isDouyinSystemNotice(messageType, content)
@@ -1276,6 +1295,9 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     // Video cards: only keep the best cover, not every CDN mirror in the payload.
     const cover = content.__douyin_video_cover || firstCoverURL(content);
     images = cover ? [cover] : pickBestStickerURLs(images, 1);
+  } else if (content?.__douyin_video_cover) {
+    // Caption+share (type 7 with related_share_video): prefer one cover if present.
+    images = [content.__douyin_video_cover];
   } else if ([5, 50002, 70002].includes(messageType) || isLightInteractionMessage(messageType, content, ext)) {
     for (const url of extractStickerImageURLs(content, ext)) {
       if (!images.includes(url)) images.push(url);
