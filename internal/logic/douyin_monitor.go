@@ -734,7 +734,10 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		}
 	}
 	m.mu.Unlock()
-	if event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID) {
+	// Own group messages are never mirrored to QQ. Own private messages are allowed
+	// (self-chat / notes-to-self / outbound DM) so admins can recover sent images.
+	isOwnSender := event.SenderUID != "" && (event.SenderUID == event.SelfUID || event.SenderUID == selfUID)
+	if isOwnSender && event.ConversationType == 2 {
 		return
 	}
 	conversationID := ""
@@ -784,11 +787,16 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 			segments = appendTextWithQQFaces(segments, "\n"+timeText)
 		}
 		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, segments)
-	case "private_incoming":
+	case "private_incoming", "private_self":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
 			return
 		}
 		boxName, lineName := resolveDouyinSenderLabels(event)
+		if kind == "private_self" {
+			// Force self labels so QQ shows 「我」instead of empty nickname.
+			boxName = "我"
+			lineName = "我"
+		}
 		quotedName := inferDouyinQuotedName(event, lineName, selfUID)
 		// Share-card quotes without a name: if quoted UID is empty after filter but
 		// quoted text looks like a share we treat unknown as empty (JS should set 我).
@@ -812,6 +820,7 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		if timeText != "" {
 			segments = appendTextWithQQFaces(segments, "\n"+timeText)
 		}
+		log.Printf("[Douyin-IM] forward %s type=%d text=%q images=%d link=%q", kind, event.MessageType, truncateDouyinLogText(text, 80), len(images), event.Link)
 		for _, uid := range uniqueAdminIDs(m.cfg) {
 			m.napcat.SendPrivateMessage(uid, segments)
 		}
@@ -1192,9 +1201,17 @@ func classifyDouyinIMEvent(event douyinBrowserEvent, conversationID, ownerUID, s
 			return "group_owner"
 		}
 	case 1:
-		if event.SenderUID != "" && event.SenderUID != selfUID {
-			return "private_incoming"
+		if event.SenderUID == "" {
+			return ""
 		}
+		// Private self (notes-to-self / outbound DM from our account).
+		if selfUID != "" && event.SenderUID == selfUID {
+			return "private_self"
+		}
+		if event.SelfUID != "" && event.SenderUID == event.SelfUID {
+			return "private_self"
+		}
+		return "private_incoming"
 	}
 	return ""
 }
