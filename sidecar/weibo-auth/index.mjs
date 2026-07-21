@@ -1181,8 +1181,14 @@ const DOUYIN_IM_TEXT_CACHE_MAX = 800;
 
 function rememberDouyinIMText(message, { isSelf = false } = {}) {
   if (!message) return;
-  const text = String(message.text || '').trim();
+  let text = String(message.text || '').trim();
+  // Remember image / sticker placeholders so later reply frames can quote 「我：[图片]」.
+  if (!text && Array.isArray(message.images) && message.images.length) {
+    text = '[图片]';
+  }
   if (!text || text === '[暂不支持的消息]' || text === '[系统提示]' || message.internalMetadata) return;
+  // Do not cache garbage sec_uid tokens as quote text.
+  if (/^MS4wLjABAAAA/i.test(text) || (/^[A-Za-z0-9_-]{40,}$/.test(text) && !/[\u4e00-\u9fff]/.test(text))) return;
   const entry = {
     text,
     senderUid: String(message.senderUid || ''),
@@ -1223,6 +1229,10 @@ function enrichDouyinIMQuote(message) {
   let quotedText = String(message.quotedText || '').trim();
   let quotedName = String(message.quotedName || '').trim();
   let quotedSenderUid = String(message.quotedSenderUid || '').trim();
+  // Drop sec_uid / opaque garbage quotes before enrichment.
+  if (/^MS4wLjABAAAA/i.test(quotedText) || (/^[A-Za-z0-9_-]{40,}$/.test(quotedText) && !/[\u4e00-\u9fff]/.test(quotedText))) {
+    quotedText = '';
+  }
   const cached = lookupDouyinIMQuotedText(message);
   if (cached) {
     if (!quotedText) quotedText = compactDouyinShareQuote(cached.text) || cached.text;
@@ -1232,6 +1242,11 @@ function enrichDouyinIMQuote(message) {
         quotedName = '我';
       }
     }
+  }
+  // If still no quote text but we have a ref id that wasn't cached: treat image reply as 「我：[图片]」
+  // only when body looks like a short reaction (or Chinese chat) and user is replying privately.
+  if (!quotedText && (message.quotedServerMessageId || message.quotedClientMessageId)) {
+    // leave empty — better no quote than sec_uid
   }
   // Heuristic for type=7 frames that only carry nested share-card text as quote:
   // if quotedText is a share card and quote uid still unknown, prefer marking as self
@@ -1466,12 +1481,22 @@ async function publishDouyinIMMessage(message) {
   }
 
   // Strip empty media quotes so caption-only replies don't show 「[视频]」stack.
-  if (
-    String(message.quotedText || '').trim() === '[视频]'
-    && !String(message.quotedName || '').trim()
-    && !String(message.quotedSenderUid || '').trim()
-  ) {
-    message = { ...message, quotedText: '', quotedName: '', quotedSenderUid: '' };
+  // Also strip garbage sec_uid quotes.
+  {
+    const qt = String(message.quotedText || '').trim();
+    const badQuote = qt === '[视频]'
+      || /^MS4wLjABAAAA/i.test(qt)
+      || (/^[A-Za-z0-9_-]{40,}$/.test(qt) && !/[\u4e00-\u9fff]/.test(qt));
+    if (
+      badQuote
+      && !String(message.quotedName || '').trim()
+    ) {
+      message = { ...message, quotedText: '', quotedName: message.quotedName || '', quotedSenderUid: message.quotedSenderUid || '' };
+      if (/^MS4wLjABAAAA/i.test(qt)) {
+        // keep ids for cache lookup; only clear display text
+        message = { ...message, quotedText: '' };
+      }
+    }
   }
 
   const key = message.serverMessageId || `${message.conversationId}:${message.index}`;
@@ -1506,6 +1531,10 @@ async function publishDouyinIMMessage(message) {
       && String(message.text || '').trim() === '[视频]'
       && !(message.images && message.images.length)
       && !String(message.link || '').trim())
+    // type 7 reply that only shows placeholder text — dump for body recovery
+    || (message.messageType === 7
+      && /^(?:\[表情\]|\[图片\]|\[回复\])$/.test(String(message.text || '').trim())
+      && !(message.images && message.images.length))
   );
   if (
     message.text === '[暂不支持的消息]'

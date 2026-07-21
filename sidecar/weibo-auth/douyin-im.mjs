@@ -152,11 +152,78 @@ function formatDouyinStickerText(text, messageType) {
   if (!label) return '';
   if (label === 'favorite_emoji') return '[表情]';
   if (label.startsWith('[') && label.endsWith(']')) return label;
+  // Never wrap real chat / ids as stickers.
+  if (looksLikeGarbageChatToken(label) || /[\u4e00-\u9fff]/.test(label) && label.length > 12) {
+    return label;
+  }
   // Type 5 is emoji/sticker; named stickers also ride as type 7 plain text.
   if (messageType === 5 || DOUYIN_STICKER_LABELS.has(label)) {
     return `[${label}]`;
   }
   return label;
+}
+
+// Reject tokens that are not human chat (sec_uid, long opaque ids, pure hex, etc.).
+function looksLikeGarbageChatToken(value) {
+  const s = String(value || '').trim();
+  if (!s) return true;
+  if (/^MS4wLjABAAAA/i.test(s)) return true; // Douyin sec_uid
+  if (/^https?:\/\//i.test(s) && !/douyin\.com\/video\//i.test(s)) return true;
+  if (/^[0-9a-f]{16,}$/i.test(s)) return true;
+  if (/^[A-Za-z0-9_-]{40,}$/.test(s) && !/[\u4e00-\u9fff]/.test(s)) return true;
+  if (/^\d{10,}$/.test(s)) return true; // bare long numeric ids as "quote"
+  return false;
+}
+
+function sanitizeQuotedText(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  if (looksLikeGarbageChatToken(s)) return '';
+  // Share-card labels are ok; keep compact.
+  if (looksLikeDouyinShareCardText(s)) return compactDouyinShareQuote(s) || s;
+  return s;
+}
+
+function collectChineseChatRuns(node, out = [], depth = 0) {
+  if (depth > 6 || node == null) return out;
+  if (typeof node === 'string') {
+    const s = node.trim();
+    if (
+      s
+      && /[\u4e00-\u9fff]/.test(s)
+      && s.length <= 200
+      && !looksLikeGarbageChatToken(s)
+      && !looksLikeDouyinShareCardText(s)
+      && !/^[a-z][a-z0-9_]*$/i.test(s)
+    ) {
+      if (!out.includes(s)) out.push(s);
+    }
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectChineseChatRuns(item, out, depth + 1);
+    return out;
+  }
+  if (typeof node !== 'object') return out;
+  for (const [key, value] of Object.entries(node)) {
+    // Skip pure identity / media id fields
+    if (/sec_uid|secUid|user_id|userId|uid|itemId|aweme|share_id|client_message|server_message/i.test(key)) {
+      continue;
+    }
+    collectChineseChatRuns(value, out, depth + 1);
+  }
+  return out;
+}
+
+function bestChineseChatRun(...sources) {
+  const runs = [];
+  for (const src of sources) {
+    if (!src) continue;
+    if (typeof src === 'string') collectChineseChatRuns(src, runs);
+    else collectChineseChatRuns(src, runs);
+  }
+  runs.sort((a, b) => b.length - a.length);
+  return runs[0] || '';
 }
 
 function replyDetails(content, ext = {}) {
@@ -169,9 +236,11 @@ function replyDetails(content, ext = {}) {
     'sender_name', 'senderName', 'replyName', 'from_user_name', 'fromUserName',
     'user_name', 'userName', 'name', 'display_name', 'displayName', 'remark_name', 'remarkName',
   ];
+  // Prefer explicit quote/reply text keys; avoid generic "content" which often holds sec_uid / media meta.
   const textKeys = [
-    'text', 'content', 'message', 'msg', 'replyText', 'quote_text', 'quotedText', 'hint',
-    'msg_content', 'msgContent', 'body', 'summary', 'desc', 'content_text', 'contentText',
+    'replyText', 'quote_text', 'quotedText', 'ref_text', 'refText',
+    'text', 'message', 'msg', 'hint', 'summary', 'desc', 'content_text', 'contentText',
+    'msg_content', 'msgContent', 'body',
   ];
   const uidKeys = [
     'sender_uid', 'senderUid', 'from_uid', 'fromUid', 'user_id', 'userId', 'uid',
@@ -189,7 +258,12 @@ function replyDetails(content, ext = {}) {
   const dig = (node) => {
     if (!node || typeof node !== 'object') return empty;
     const quotedName = firstText(node, nameKeys);
-    const quotedText = firstText(node, textKeys);
+    let quotedText = firstText(node, textKeys);
+    if (looksLikeGarbageChatToken(quotedText)) quotedText = '';
+    // Some reply bags put media type only — normalize.
+    if (!quotedText && (node.msg_type === 27 || node.messageType === 27 || node.type === 27)) {
+      quotedText = '[图片]';
+    }
     const quotedSenderUid = firstText(node, uidKeys);
     const quotedServerMessageId = firstText(node, serverIdKeys);
     const quotedClientMessageId = firstText(node, clientIdKeys);
@@ -224,11 +298,14 @@ function replyDetails(content, ext = {}) {
         }
         const hit = dig(parsed);
         if (hit.quotedName || hit.quotedText || hit.quotedSenderUid || hit.quotedServerMessageId || hit.quotedClientMessageId) {
+          hit.quotedText = sanitizeQuotedText(hit.quotedText);
           return hit;
         }
         if (typeof value === 'string' && value.trim() && !value.trim().startsWith('{')) {
-          // Bare reply text under a reply_* key.
-          return { ...empty, quotedText: value.trim() };
+          const bare = value.trim();
+          if (!looksLikeGarbageChatToken(bare)) {
+            return { ...empty, quotedText: bare };
+          }
         }
       }
       if (value && typeof value === 'object') queue.push(value);
@@ -237,13 +314,6 @@ function replyDetails(content, ext = {}) {
         if (maybe) queue.push(maybe);
       }
     }
-  }
-
-  // Secondary: dig top-level content/ext even if key names are opaque.
-  const topHit = dig(content) || dig(ext);
-  if (topHit && (topHit.quotedText || topHit.quotedServerMessageId)) {
-    // Only accept if it looks like a nested reply object, not the current message body.
-    // Avoid treating content.text as quotedText: dig() would pick content.text first.
   }
 
   // Ext-only ID refs (common when body is not duplicated).
@@ -262,7 +332,7 @@ function replyDetails(content, ext = {}) {
   if (extServer || extClient || extUid) {
     return {
       quotedName: '',
-      quotedText: firstText(ext, ['s:ref_text', 'a:ref_text', 's:reply_text', 'a:reply_text', 'ref_text']) || '',
+      quotedText: sanitizeQuotedText(firstText(ext, ['s:ref_text', 'a:ref_text', 's:reply_text', 'a:reply_text', 'ref_text']) || ''),
       quotedSenderUid: extUid,
       quotedServerMessageId: extServer,
       quotedClientMessageId: extClient,
@@ -509,10 +579,16 @@ function lightInteractionBags(content, ext = {}) {
     parseMaybeJSON(ext.light_interaction),
     parseMaybeJSON(ext.light_interaction_mob),
     parseMaybeJSON(ext['a:sticker']),
+    parseMaybeJSON(ext['a:emoji']),
+    parseMaybeJSON(ext['a:emoticon']),
     parseMaybeJSON(ext.sticker),
+    parseMaybeJSON(ext.emoji),
     parseMaybeJSON(content?.sticker),
     parseMaybeJSON(content?.emoji),
     parseMaybeJSON(content?.emoticon),
+    parseMaybeJSON(ext['a:add_ext']),
+    parseMaybeJSON(ext['s:add_ext']),
+    parseMaybeJSON(ext['a:video_emoji_rec']),
     ext,
   ].filter(Boolean);
 }
@@ -523,14 +599,22 @@ function extractLightInteractionLabel(content, ext = {}) {
     'text', 'content', 'name', 'title', 'label', 'emoji_name', 'emojiName',
     'interaction_name', 'interactionName', 'sticker_name', 'stickerName',
     'display_name', 'displayName', 'hint', 'msg', 'desc', 'emoji_desc',
+    'show_name', 'showName',
   ];
   for (const bag of bags) {
     const label = firstText(bag, keys);
     if (!label) continue;
+    if (looksLikeGarbageChatToken(label)) continue;
     if (label === 'favorite_emoji') return '[表情]';
     if (label.startsWith('[') && label.endsWith(']')) return label;
     // Prefer short sticker-like labels; still accept longer ones when type is light interaction.
     return formatDouyinStickerText(label, 5) || `[${label}]`;
+  }
+  // video_emoji_rec often is an array of {name, show_name}
+  const rec = parseMaybeJSON(ext['a:video_emoji_rec']);
+  if (Array.isArray(rec) && rec[0]) {
+    const n = rec[0].show_name || rec[0].name || rec[0].text;
+    if (n && !looksLikeGarbageChatToken(n)) return formatDouyinStickerText(n, 5) || `[${n}]`;
   }
   return '';
 }
@@ -865,11 +949,16 @@ function extractImageURLs(content = {}, ext = {}, messageType = 0) {
 
 function extractChatBody(content = {}, ext = {}) {
   const preferredKeys = [
-    'text', 'content', 'message', 'msg', 'title', 'description', 'content_title',
+    'text', 'message', 'msg', 'title', 'description', 'content_title',
     'hint', 'body', 'richText', 'rich_text', 'display_text', 'displayText',
+    'reply_text', 'replyText', 'comment', 'comment_text', 'commentText',
+    // "content" last — often holds nested objects / ids on reply-to-image frames
+    'content',
   ];
+  // Prefer non-reply bags first, then allow reply_* bags for body recovery
+  // (image-reply frames sometimes put the caption only under reply_text / etc.).
   const contentWithoutReply = Object.fromEntries(
-    Object.entries(content || {}).filter(([key]) => !/reply|quote|reference|referenced/i.test(key)),
+    Object.entries(content || {}).filter(([key]) => !/quote|reference|referenced|ref_msg|parent_msg/i.test(key)),
   );
   let text = firstText(contentWithoutReply, preferredKeys);
   if (text && (content?.content_name === text || content?.author_name === text || content?.nickname === text)) {
@@ -877,18 +966,27 @@ function extractChatBody(content = {}, ext = {}) {
       text = '';
     }
   }
+  if (looksLikeGarbageChatToken(text)) text = '';
+  if (text) return text;
+
+  // Deep Chinese run recovery from content (reply-to-image often nests caption oddly).
+  text = bestChineseChatRun(content);
   if (text) return text;
 
   // Some reply-to-media frames put body only in ext JSON blobs.
   for (const [key, value] of Object.entries(ext || {})) {
-    if (!/reply|quote|ref|content|text|msg|body|hint|display/i.test(key)) continue;
+    if (!/reply|quote|ref|content|text|msg|body|hint|display|light_interaction|sticker|emoji/i.test(key)) continue;
     const parsed = parseMaybeJSON(value);
     if (parsed) {
       const nested = firstText(parsed, preferredKeys);
-      if (nested && !/^[a-z][a-z0-9_]*$/i.test(nested)) return nested;
+      if (nested && !looksLikeGarbageChatToken(nested) && !/^[a-z][a-z0-9_]*$/i.test(nested)) return nested;
+      const run = bestChineseChatRun(parsed);
+      if (run) return run;
     }
     const raw = String(value || '').trim();
-    if (raw && /[\u4e00-\u9fff]/.test(raw) && raw.length <= 200 && !raw.startsWith('{')) return raw;
+    if (raw && /[\u4e00-\u9fff]/.test(raw) && raw.length <= 200 && !raw.startsWith('{') && !looksLikeGarbageChatToken(raw)) {
+      return raw;
+    }
   }
   return '';
 }
@@ -1139,9 +1237,10 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
 
   const contentKeyList = content && typeof content === 'object' ? Object.keys(content) : [];
   let text = typeof content?.text === 'string' ? content.text.trim() : '';
+  if (looksLikeGarbageChatToken(text)) text = '';
   const replyFromContent = replyDetails(content, ext);
   let quotedName = replyFromContent.quotedName;
-  let quotedText = replyFromContent.quotedText;
+  let quotedText = sanitizeQuotedText(replyFromContent.quotedText);
   let quotedSenderUid = replyFromContent.quotedSenderUid;
   let quotedServerMessageId = replyFromContent.quotedServerMessageId || '';
   let quotedClientMessageId = replyFromContent.quotedClientMessageId || '';
@@ -1255,8 +1354,21 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
         if (text) quotedText = card;
       }
     }
+    // Reply-to-image / nested caption recovery: if body is still empty or only a
+    // media placeholder, dig Chinese chat from content/ext (not sec_uid / ids).
+    if ((!text || text === '[图片]' || text === '[表情]' || text === '[回复]') && contentParseOk) {
+      const recovered = bestChineseChatRun(content, ext);
+      if (recovered && recovered !== quotedText) {
+        // If recovered text equals what we thought was quote and body empty, prefer as body.
+        text = recovered;
+      }
+    }
     text = formatDouyinStickerText(text, messageType);
   }
+
+  // Sanitize quote after all recovery paths (nested pb may reintroduce garbage).
+  quotedText = sanitizeQuotedText(quotedText);
+  if (looksLikeGarbageChatToken(text)) text = '';
 
   // If we still have no body but replyDetails found a quote, surface a reply placeholder
   // so QQ at least shows "replied to X" instead of 暂不支持 — only when quote exists.
