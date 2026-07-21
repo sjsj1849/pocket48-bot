@@ -1379,12 +1379,27 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
   // Caption + shared video (common private share: type=8 empty card + type=7 caption JSON
   // with related_share_video.itemId). Keep the caption; attach the video link for QQ.
   // Do NOT rewrite body to bare [视频] — that loses the user's text.
-  if (!link && content && typeof content === 'object') {
+  // Do NOT attach video links for stickers / light-interaction (type 5 / 50002 / 70002):
+  // those frames often carry unrelated itemId metadata but are emoji packs, not shares.
+  const isStickerLikeType = [5, 50002, 70002].includes(messageType)
+    || isLightInteractionMessage(messageType, content, ext);
+  if (!link && !isStickerLikeType && content && typeof content === 'object') {
     const sharedId = extractDouyinItemId(content, ext);
     const related = content.related_share_video || content.relatedShareVideo || null;
     const relatedId = sharedId
       || String(related?.itemId || related?.item_id || related?.aweme_id || related?.awemeId || '').trim();
-    if (relatedId) {
+    // Only treat as video share when it looks like a real share card / caption frame,
+    // not when we merely found a random long id in sticker metadata.
+    const looksLikeShare = Boolean(
+      related
+      || content.share_id
+      || content.aweType === 700
+      || messageType === 7
+      || messageType === 8
+      || messageType === 77
+      || messageType === 105
+    );
+    if (relatedId && looksLikeShare) {
       link = `https://www.douyin.com/video/${relatedId}`;
       const cover = firstCoverURL(content) || firstCoverURL(related || {});
       if (cover) content.__douyin_video_cover = cover;
@@ -1393,6 +1408,11 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
         text = formatDouyinVideoShare(content, ext).text || '[视频]';
       }
     }
+  }
+
+  // Stickers must never carry a video link even if something set it earlier.
+  if (isStickerLikeType) {
+    link = '';
   }
 
   // System notices / control metadata should not be forwarded to QQ.
