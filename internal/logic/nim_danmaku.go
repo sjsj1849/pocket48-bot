@@ -1459,9 +1459,9 @@ func (b *Bot) finishLiveSession(roomID int64) {
 		body = append(body, fmt.Sprintf("鸡腿值：%d", snapshot.ChickenLegs))
 	}
 	if snapshot.PeakOnline > 0 {
-		// onlineNum from Pocket48 LIVEUPDATE / getLiveOne is the platform "人气" style
-		// metric (not verified concurrent occupancy). Label accordingly until we find a real concurrent field.
-		body = append(body, fmt.Sprintf("最高人气：%d", snapshot.PeakOnline))
+		// Prefer label 最高在线 when peak came from liveUpdateInfo.online (concurrent-like).
+		// PeakPopularity (if set) is platform 人气; fall back to single peak field for now.
+		body = append(body, fmt.Sprintf("最高在线人数：%d", snapshot.PeakOnline))
 	}
 	// Duration last among stats, then timestamp (same as 上麦 / 开播 notices).
 	if snapshot.StartedAt > 0 {
