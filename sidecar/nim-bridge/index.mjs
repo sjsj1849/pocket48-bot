@@ -73,20 +73,24 @@ function findPositiveNumber(value, keys) {
   const wanted = new Map(keys.map((key, index) => [key.toLowerCase(), index]));
   let best;
   let bestIndex = Number.MAX_SAFE_INTEGER;
-  const walk = (node) => {
+  let bestPath = '';
+  const walk = (node, path = '') => {
     if (!node || typeof node !== 'object') return;
     if (Array.isArray(node)) {
-      for (const child of node) walk(child);
+      for (const child of node) walk(child, path);
       return;
     }
     for (const [key, child] of Object.entries(node)) {
+      const nextPath = path ? `${path}.${key}` : key;
       const index = wanted.get(key.toLowerCase());
       const number = Number(child);
       if (index !== undefined && Number.isFinite(number) && number >= 0 && index < bestIndex) {
+        // Prefer liveUpdateInfo.online over bare online elsewhere when same priority.
         best = number;
         bestIndex = index;
+        bestPath = nextPath;
       }
-      walk(child);
+      walk(child, nextPath);
     }
   };
   walk(value);
@@ -94,17 +98,25 @@ function findPositiveNumber(value, keys) {
 }
 
 function liveOnlineCount(custom) {
-  // Prefer fields that look like true concurrent viewers over popularity/heat.
-  // Pocket48 LIVEUPDATE historically exposes onlineNum which behaves like 人气/累计相关指标,
-  // not pure concurrent occupancy — we still read it as fallback until a better field appears.
+  // 2026-07-22 胡晓慧 live: LIVEUPDATE carries liveUpdateInfo.online (27→1475, concurrent-like).
+  // Old code only matched onlineNum/onlineCount/… so pick was always empty and peak fell back to
+  // getLiveOne.onlineNum (platform 人气). Prefer plain "online" under liveUpdateInfo first.
+  if (custom && typeof custom === 'object') {
+    const nested = custom.liveUpdateInfo || custom.live_update_info || custom.liveUpdate;
+    if (nested && nested.online != null) {
+      const n = Number(nested.online);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+  }
   return findPositiveNumber(custom, [
-    // concurrent-ish names first
+    // concurrent-ish names first (includes nested liveUpdateInfo.online)
     'currentOnline', 'concurrentNum', 'concurrentOnline', 'realOnlineNum', 'realOnline',
     'onlineUserNum', 'onlineUsers', 'watchingCount', 'audienceCount', 'watcherCount',
     'liveOnlineNum', 'liveOnline', 'personNum', 'peopleNum', 'viewers',
-    // generic / known API
+    'online', // liveUpdateInfo.online — real concurrent in 2026 LIVEUPDATE samples
+    // generic / known API (often 人气)
     'onlineCount', 'userCount', 'memberCount', 'onlineNum',
-    // popularity / heat last (do not prefer)
+    // popularity / heat last
     'hotValue', 'popularity', 'popularityValue', 'heat', 'uv', 'pv',
   ]);
 }
