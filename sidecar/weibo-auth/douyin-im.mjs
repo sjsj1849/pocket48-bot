@@ -709,11 +709,33 @@ function isLightInteractionMessage(messageType, content, ext = {}) {
 // Type 1 is Douyin IM system / in-chat notice (not user chat).
 // Real sample 2026-07-18 陆苇: keys aweType,scene,tips,template,... scene=go_to_maya_notice
 // firstText used to walk scene as body text → "go_to_maya_notice" leaked to QQ.
-function isDouyinSystemNotice(messageType, content = {}) {
-  if (messageType === 1) return true;
-  if (!content || typeof content !== 'object') return false;
+// Real sample 2026-07-22 肥家: type=1001 aweType=100140 biz=aweme_im_group_chat_notice
+// template 「{1}通过{0}的个人主页加入了群聊…」 — attributed to group owner, must not forward.
+function isDouyinSystemNotice(messageType, content = {}, ext = {}) {
+  // Dedicated system / group-notice message types
+  if (messageType === 1 || messageType === 1001) return true;
+  if (!content || typeof content !== 'object') content = {};
   if (content.scene === 'go_to_maya_notice') return true;
   if (content.template != null && content.tips != null && content.show_on_screen != null) return true;
+
+  const aweType = Number(content.aweType ?? content.awe_type ?? 0);
+  // 100140 = group member join/leave style notices in recent samples
+  if (aweType === 100140 || aweType === 1001) return true;
+
+  const biz = String(ext['a:biz'] || ext.biz || content?.a_biz || content?.biz || '').trim();
+  if (/group_chat_notice|group_notice|im_group_notice|member_join|member_leave/i.test(biz)) return true;
+  if (biz === 'aweme_im_group_chat_notice') return true;
+
+  // Template placeholders for join/invite system copy (even if type is unexpected)
+  const tpl = String(content.template || content.text || content.tips || '').trim();
+  if (
+    /加入了群聊|退出了群聊|被移出群聊|邀请.*入群|通过.*个人主页加入|新成员可查看历史消息|成为了群主|修改了群名/.test(tpl)
+  ) {
+    return true;
+  }
+  // Unresolved template tokens like {0}/{1} with join wording
+  if (/\{[01]\}/.test(tpl) && /群聊|入群|退群|成员/.test(tpl)) return true;
+
   return false;
 }
 
@@ -724,6 +746,7 @@ function isDouyinControlCommand(messageType, content = {}, ext = {}) {
   if (content && typeof content === 'object' && content.command_type != null) return true;
   const biz = String(ext['a:biz'] || ext.biz || content?.a_biz || '').trim();
   if (biz === 'conv_biz_ext_change_cmd') return true;
+  if (/group_chat_notice|im_group_notice/i.test(biz)) return true;
   return false;
 }
 
@@ -1304,7 +1327,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     }
   } else if (isLightInteractionMessage(messageType, content, ext)) {
     text = extractLightInteractionLabel(content, ext) || '[表情]';
-  } else if (isDouyinSystemNotice(messageType, content)) {
+  } else if (isDouyinSystemNotice(messageType, content, ext)) {
     // Keep a short label for logs; mark as internal so QQ does not forward machine scenes.
     text = formatDouyinSystemNotice(content);
   } else if (messageType === 110) {
@@ -1441,10 +1464,12 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
 
   // System notices / control metadata should not be forwarded to QQ.
   const internalMetadata = /^\d+:\d+:\d+:\d+$/.test(text)
-    || isDouyinSystemNotice(messageType, content)
+    || isDouyinSystemNotice(messageType, content, ext)
     || isDouyinControlCommand(messageType, content, ext)
     || text === 'go_to_maya_notice'
-    || text === '[控制消息]';
+    || text === '[控制消息]'
+    || text === '[系统提示]'
+    || /加入了群聊|退出了群聊|被移出群聊|新成员可查看历史消息/.test(String(text || ''));
   // Extract image URLs for type 27 (and sticker/emoji frames when present).
   let images = extractImageURLs(content, ext, messageType);
   if (isDouyinVideoShare(messageType, content)) {

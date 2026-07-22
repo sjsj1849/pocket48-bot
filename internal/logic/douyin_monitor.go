@@ -759,6 +759,12 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		if !m.cfg.DouyinIMEnabled || m.cfg.BoundGroupID == 0 {
 			return
 		}
+		// Drop group system notices that sometimes still leak with owner as sender
+		// (e.g. type=1001 join-via-profile templates).
+		if isDouyinGroupSystemNoticeText(text) {
+			log.Printf("[Douyin-IM] skip group system notice type=%d text=%q", event.MessageType, truncateDouyinLogText(text, 80))
+			return
+		}
 		boxName, lineName := resolveDouyinSenderLabels(event)
 		groupName := strings.TrimSpace(target.GroupName)
 		if groupName == "" {
@@ -956,6 +962,30 @@ func isDouyinGarbageQuoteText(s string) bool {
 }
 
 // Group chat header already carries sender|group (Pocket48-style). Body may include "名（备注）：".
+// isDouyinGroupSystemNoticeText matches Douyin group join/leave/admin system
+// templates that must never be mirrored to QQ (even if attributed to the owner).
+func isDouyinGroupSystemNoticeText(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return false
+	}
+	if strings.Contains(t, "加入了群聊") ||
+		strings.Contains(t, "退出了群聊") ||
+		strings.Contains(t, "被移出群聊") ||
+		strings.Contains(t, "新成员可查看历史消息") ||
+		strings.Contains(t, "通过") && strings.Contains(t, "个人主页加入") ||
+		strings.Contains(t, "成为了群主") ||
+		strings.Contains(t, "修改了群名") {
+		return true
+	}
+	// Unresolved template tokens {0}/{1}
+	if (strings.Contains(t, "{0}") || strings.Contains(t, "{1}")) &&
+		(strings.Contains(t, "群聊") || strings.Contains(t, "成员") || strings.Contains(t, "入群")) {
+		return true
+	}
+	return false
+}
+
 func formatDouyinIMGroupNotification(title, text, timeText string) string {
 	return fmt.Sprintf("%s\n%s\n%s", title, text, timeText)
 }
