@@ -25,8 +25,12 @@ func (b *Bot) loadLiveSessionsFromDisk() {
 		return
 	}
 	loaded := 0
+	finished := 0
 	b.liveSessionsMu.Lock()
 	defer b.liveSessionsMu.Unlock()
+	if b.finishedLives == nil {
+		b.finishedLives = make(map[string]LiveGiftSession)
+	}
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -36,10 +40,10 @@ func (b *Bot) loadLiveSessionsFromDisk() {
 			continue
 		}
 		var session LiveGiftSession
-		if err := json.Unmarshal(raw, &session); err != nil || session.LiveID == "" || session.Ended {
+		if err := json.Unmarshal(raw, &session); err != nil || session.LiveID == "" {
 			continue
 		}
-		// Drop very old unfinished sessions (>24h) to avoid stale summaries.
+		// Drop very old sessions (>24h) to avoid stale summaries.
 		if session.StartedAt > 0 && time.Since(time.UnixMilli(session.StartedAt)) > 24*time.Hour {
 			_ = os.Remove(filepath.Join(liveSessionStoreDir, e.Name()))
 			continue
@@ -49,6 +53,16 @@ func (b *Bot) loadLiveSessionsFromDisk() {
 			continue
 		}
 		cp := session
+		if session.Ended {
+			// Recently finished: keep in finishedLives so discovery cannot re-open zero-score.
+			b.finishedLives[session.LiveID] = cp
+			finished++
+			// Drop ended files older than 6h to avoid disk pile-up.
+			if session.StartedAt > 0 && time.Since(time.UnixMilli(session.StartedAt)) > 6*time.Hour {
+				_ = os.Remove(filepath.Join(liveSessionStoreDir, e.Name()))
+			}
+			continue
+		}
 		b.liveSessions[roomID] = &cp
 		loaded++
 		log.Printf("[NIM-live] restored session room=%d liveId=%s legs=%d score=%s peak=%d",
@@ -56,6 +70,9 @@ func (b *Bot) loadLiveSessionsFromDisk() {
 	}
 	if loaded > 0 {
 		log.Printf("[NIM-live] restored %d live session(s) from disk", loaded)
+	}
+	if finished > 0 {
+		log.Printf("[NIM-live] remembered %d finished live(s) from disk (block re-open)", finished)
 	}
 }
 
@@ -82,5 +99,7 @@ func (b *Bot) persistLiveSession(roomID int64, session *LiveGiftSession) {
 }
 
 func (b *Bot) removeLiveSessionFile(roomID int64) {
-	_ = os.Remove(liveSessionPath(roomID))
+	// Ended sessions are left on disk (Ended=true) so restart can block re-open.
+	// Only remove non-ended leftovers or when explicitly cleaning after long TTL in load.
+	_ = roomID
 }

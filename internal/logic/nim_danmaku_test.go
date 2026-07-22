@@ -550,12 +550,84 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 func TestBeginLiveSessionDoesNotResetSameLive(t *testing.T) {
 	_ = os.Remove(liveSessionPath(123))
 	t.Cleanup(func() { _ = os.Remove(liveSessionPath(123)) })
-	bot := &Bot{liveSessions: make(map[int64]*LiveGiftSession)}
+	bot := &Bot{liveSessions: make(map[int64]*LiveGiftSession), finishedLives: make(map[string]LiveGiftSession)}
 	room := &pocket48.RoomInfo{ChannelID: 123, OwnerName: "测试成员"}
 	bot.beginLiveSession(room, "live-1", 789, 10)
 	bot.liveSessions[123].ChickenLegs = 99
 	bot.beginLiveSession(room, "live-1", 789, 20)
 	if got := bot.liveSessions[123]; got.ChickenLegs != 99 || got.PeakOnline != 20 {
 		t.Fatalf("same live was reset: %#v", got)
+	}
+}
+
+func TestFinishLiveBlocksReopenSameLiveID(t *testing.T) {
+	_ = os.Remove(liveSessionPath(123))
+	t.Cleanup(func() { _ = os.Remove(liveSessionPath(123)) })
+	bot := &Bot{
+		cfg:           &config.Config{GroupSubscriptions: map[string][]int64{}},
+		liveSessions:  make(map[int64]*LiveGiftSession),
+		finishedLives: make(map[string]LiveGiftSession),
+		roomInfoCache: map[int64]cachedRoomInfo{
+			123: {
+				info:      &pocket48.RoomInfo{ChannelID: 123, ChannelName: "包间", OwnerName: "测试成员"},
+				expiresAt: time.Now().Add(time.Hour),
+			},
+		},
+	}
+	room := &pocket48.RoomInfo{ChannelID: 123, OwnerName: "测试成员", ChannelName: "包间"}
+	bot.beginLiveSession(room, "live-1", 789, 10)
+	bot.liveSessions[123].AnnualScore = 487
+	bot.finishLiveSession(123)
+	if bot.liveSessions[123] != nil {
+		t.Fatalf("session should be removed from active map after finish")
+	}
+	if bot.beginLiveSession(room, "live-1", 789, 99) {
+		t.Fatal("must not re-open finished live with zero score")
+	}
+	if bot.liveSessions[123] != nil {
+		t.Fatalf("must not create new session: %#v", bot.liveSessions[123])
+	}
+	if fin, ok := bot.finishedLives["live-1"]; !ok || fin.AnnualScore != 487 {
+		t.Fatalf("finished score not retained: %#v ok=%v", fin, ok)
+	}
+}
+
+func TestFinishMissingRequiresMultipleMisses(t *testing.T) {
+	_ = os.Remove(liveSessionPath(1))
+	t.Cleanup(func() { _ = os.Remove(liveSessionPath(1)) })
+	bot := &Bot{
+		liveSessions:  make(map[int64]*LiveGiftSession),
+		finishedLives: make(map[string]LiveGiftSession),
+		cfg:           &config.Config{},
+		roomInfoCache: map[int64]cachedRoomInfo{
+			1: {
+				info:      &pocket48.RoomInfo{ChannelID: 1, ChannelName: "包间", OwnerName: "测"},
+				expiresAt: time.Now().Add(time.Hour),
+			},
+		},
+	}
+	bot.liveSessions[1] = &LiveGiftSession{LiveID: "L1", StartedAt: time.Now().UnixMilli(), LiveOwnerName: "测"}
+	// one miss — hold
+	bot.finishMissingLiveSessions(map[string]struct{}{})
+	if bot.liveSessions[1] == nil || bot.liveSessions[1].Ended {
+		t.Fatal("single miss must not finish")
+	}
+	if bot.liveSessions[1].MissTicks != 1 {
+		t.Fatalf("MissTicks=%d", bot.liveSessions[1].MissTicks)
+	}
+	// still present — reset
+	bot.finishMissingLiveSessions(map[string]struct{}{"L1": {}})
+	if bot.liveSessions[1].MissTicks != 0 {
+		t.Fatalf("active list must reset MissTicks, got %d", bot.liveSessions[1].MissTicks)
+	}
+	// three misses — finish
+	for i := 0; i < liveListMissThreshold; i++ {
+		bot.finishMissingLiveSessions(map[string]struct{}{})
+	}
+	if bot.liveSessions[1] != nil {
+		t.Fatal("session should be finished and removed after threshold misses")
+	}
+	if _, ok := bot.finishedLives["L1"]; !ok {
+		t.Fatal("finished live should be remembered")
 	}
 }
