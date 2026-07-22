@@ -75,7 +75,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lines, _ := tailLines(s.opts.LogPath, 5000)
-	services := buildServiceStates(lines)
+	flags := loadOverviewFeatureFlags(s.opts.ConfigPath)
+	services := buildServiceStates(lines, flags)
 	writeJSON(w, http.StatusOK, overviewResponse{
 		UpdatedAt: time.Now().Format("15:04:05"),
 		Services:  services,
@@ -83,6 +84,44 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		Resources: readResources(),
 		Attention: buildOverviewAttention(services),
 	})
+}
+
+// overviewFeatureFlags controls which platform cards appear on the overview page.
+// Disabled platforms (e.g. XIAOHONGSHU_ENABLED=false) are omitted so the dashboard
+// only reflects services actually in use.
+type overviewFeatureFlags struct {
+	DouyinEnabled      bool
+	DouyinIMEnabled    bool
+	XiaohongshuEnabled bool
+}
+
+func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
+	// Defaults: show core services; platform cards follow config (missing key = off for XHS,
+	// on for douyin/im only if historically true — read JSON booleans explicitly).
+	flags := overviewFeatureFlags{
+		DouyinEnabled:      true,
+		DouyinIMEnabled:    true,
+		XiaohongshuEnabled: false,
+	}
+	raw := map[string]json.RawMessage{}
+	if err := readJSONFile(configPath, &raw); err != nil {
+		return flags
+	}
+	readBool := func(key string, def bool) bool {
+		enc, ok := raw[key]
+		if !ok || len(enc) == 0 {
+			return def
+		}
+		var v bool
+		if err := json.Unmarshal(enc, &v); err != nil {
+			return def
+		}
+		return v
+	}
+	flags.DouyinEnabled = readBool("DOUYIN_ENABLED", true)
+	flags.DouyinIMEnabled = readBool("DOUYIN_IM_ENABLED", true) && flags.DouyinEnabled
+	flags.XiaohongshuEnabled = readBool("XIAOHONGSHU_ENABLED", false)
+	return flags
 }
 
 // buildOverviewAttention lists only items that need a human. Auto-heal states
@@ -157,7 +196,7 @@ func buildOverviewAttention(services []serviceState) []attention {
 	return attentionItems
 }
 
-func buildServiceStates(lines []string) []serviceState {
+func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceState {
 	active, uptime := serviceActiveAndUptime()
 	states := []serviceState{
 		{ID: "bot", Name: "Bot", Subtitle: "主控服务与任务调度", Status: choose(active, "healthy", "down"), StatusText: choose(active, "运行中", "已停止"), Uptime: uptime, Detail: "pocket48-bot.service", LastEvent: "任务调度正常"},
@@ -165,9 +204,15 @@ func buildServiceStates(lines []string) []serviceState {
 		{ID: "pocket_live", Name: "Live NIM", Subtitle: "口袋48直播礼物与结束事件", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "NIM Chatroom", LastEvent: "等待直播链路状态"},
 		{ID: "napcat", Name: "NapCat", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
-		{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
-		{ID: "xiaohongshu", Name: "Xiaohongshu", Subtitle: "小红书帖子与开播提醒", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"},
-		{ID: "douyin_im", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "未连接", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待网页 IM 初始化"},
+	}
+	if flags.DouyinEnabled {
+		states = append(states, serviceState{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"})
+	}
+	if flags.XiaohongshuEnabled {
+		states = append(states, serviceState{ID: "xiaohongshu", Name: "Xiaohongshu", Subtitle: "小红书帖子与开播提醒", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"})
+	}
+	if flags.DouyinIMEnabled {
+		states = append(states, serviceState{ID: "douyin_im", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "未连接", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待网页 IM 初始化"})
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]

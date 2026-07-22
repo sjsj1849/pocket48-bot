@@ -81,7 +81,7 @@ func (s *Server) checkServiceAlerts(now time.Time) {
 	}
 
 	lines, _ := tailLines(s.opts.LogPath, 5000)
-	services := buildServiceStates(lines)
+	services := buildServiceStates(lines, loadOverviewFeatureFlags(s.opts.ConfigPath))
 	state := s.loadAlertState()
 	changed := false
 	for _, service := range services {

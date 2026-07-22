@@ -89,7 +89,7 @@ func TestCleanLogMessageTruncatesLongContent(t *testing.T) {
 func TestDouyinInitMissingIsConnectingNotLoginRequired(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/16 12:00:02 [Douyin-IM] status=init_missing message=retrying",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true})
 	for _, state := range states {
 		if state.ID != "douyin_im" {
 			continue
@@ -105,7 +105,7 @@ func TestDouyinInitMissingIsConnectingNotLoginRequired(t *testing.T) {
 func TestDouyinReadyIsHealthy(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 11:01:45 [Douyin] status=ready message=抖音作品监控已就绪",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true})
 	for _, state := range states {
 		if state.ID != "douyin" {
 			continue
@@ -118,10 +118,39 @@ func TestDouyinReadyIsHealthy(t *testing.T) {
 	t.Fatal("Douyin state not found")
 }
 
+func TestBuildServiceStatesHidesDisabledXiaohongshu(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/21 12:00:00 [Xiaohongshu] status=login_required message=need login",
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: false})
+	for _, state := range states {
+		if state.ID == "xiaohongshu" {
+			t.Fatalf("xiaohongshu must be hidden when disabled: %#v", states)
+		}
+	}
+}
+
+func TestBuildServiceStatesShowsXiaohongshuWhenEnabled(t *testing.T) {
+	states := buildServiceStates([]string{
+		"2026/07/21 12:00:00 [Xiaohongshu] status=notes_ok message=ok",
+	}, overviewFeatureFlags{XiaohongshuEnabled: true})
+	found := false
+	for _, state := range states {
+		if state.ID == "xiaohongshu" {
+			found = true
+			if state.Status != "healthy" {
+				t.Fatalf("xiaohongshu state = %#v", state)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("xiaohongshu missing when enabled")
+	}
+}
+
 func TestDouyinLoginErrorIsDown(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 11:01:45 [Douyin] status=login_error message=cookies failed",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID == "douyin" && state.Status != "down" {
 			t.Fatalf("Douyin state = %#v", state)
@@ -132,7 +161,7 @@ func TestDouyinLoginErrorIsDown(t *testing.T) {
 func TestDouyinWorksScanCookieYesIsHealthy(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/19 15:20:43 [Weibo-auth] douyin works scan via HTTP accounts=4 cookie=yes",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID != "douyin" {
 			continue
@@ -151,7 +180,7 @@ func TestDouyinWorksScanCookieYesIsHealthy(t *testing.T) {
 func TestDouyinWorksScanCookieNoNeedsLogin(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/19 15:20:43 [Weibo-auth:stdout] [weibo-auth] douyin works scan via HTTP accounts=1 cookie=no",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID != "douyin" {
 			continue
@@ -169,7 +198,7 @@ func TestDouyinLoginRequiredBeatsOlderWorksScan(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/19 15:00:00 [Weibo-auth] douyin works scan via HTTP accounts=4 cookie=yes",
 		"2026/07/19 15:10:00 [Douyin] status=login_required message=抖音浏览器需要登录",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID != "douyin" {
 			continue
@@ -186,7 +215,7 @@ func TestDouyinLoginRequiredBeatsOlderWorksScan(t *testing.T) {
 func TestNapCatFailedToConnectIsDown(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/18 10:01:12 ❌ Failed to connect to NapCat: dial tcp 127.0.0.1:3001: connect: connection refused. Retrying in 5s...",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID != "napcat" {
 			continue
@@ -203,7 +232,7 @@ func TestNapCatStatusDisconnectedIsDown(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/18 10:00:00 ✅ Connected to NapCat successfully",
 		"2026/07/18 10:05:00 [NapCat] status=disconnected message=read loop ended",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID != "napcat" {
 			continue
@@ -220,7 +249,7 @@ func TestNIMHealthPopulatesQChatAndLiveStates(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 09:00:00 [NIM-health] qchat=connected",
 		"2026/07/17 09:00:00 [NIM-live-health] status=idle connected=0 configured=0",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	statusByID := make(map[string]serviceState)
 	for _, state := range states {
 		statusByID[state.ID] = state
@@ -237,7 +266,7 @@ func TestNewestLiveDiscoveryFailureOverridesOlderHealthyStatus(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 09:00:00 [NIM-live-health] status=idle connected=0 configured=0",
 		"2026/07/17 09:00:30 [NIM-live] active live discovery failed: bad response",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID == "pocket_live" && state.Status != "down" {
 			t.Fatalf("live state = %#v", state)
@@ -249,7 +278,7 @@ func TestNapCatDisconnectOverridesOlderConnection(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/17 09:00:00 ✅ Connected to NapCat successfully",
 		"2026/07/17 09:00:30 ⚠️ NapCat read error (disconnected?): unexpected EOF",
-	})
+	}, overviewFeatureFlags{DouyinEnabled: true, DouyinIMEnabled: true, XiaohongshuEnabled: true})
 	for _, state := range states {
 		if state.ID == "napcat" {
 			if state.Status != "down" || state.StatusText != "连接中断" {
