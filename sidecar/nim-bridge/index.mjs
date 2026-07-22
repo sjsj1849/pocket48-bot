@@ -94,10 +94,43 @@ function findPositiveNumber(value, keys) {
 }
 
 function liveOnlineCount(custom) {
+  // Prefer fields that look like true concurrent viewers over popularity/heat.
+  // Pocket48 LIVEUPDATE historically exposes onlineNum which behaves like 人气/累计相关指标,
+  // not pure concurrent occupancy — we still read it as fallback until a better field appears.
   return findPositiveNumber(custom, [
-    'onlineNum', 'onlineCount', 'userCount', 'memberCount',
-    'watchingCount', 'audienceCount', 'currentOnline'
+    // concurrent-ish names first
+    'currentOnline', 'concurrentNum', 'concurrentOnline', 'realOnlineNum', 'realOnline',
+    'onlineUserNum', 'onlineUsers', 'watchingCount', 'audienceCount', 'watcherCount',
+    'liveOnlineNum', 'liveOnline', 'personNum', 'peopleNum', 'viewers',
+    // generic / known API
+    'onlineCount', 'userCount', 'memberCount', 'onlineNum',
+    // popularity / heat last (do not prefer)
+    'hotValue', 'popularity', 'popularityValue', 'heat', 'uv', 'pv',
   ]);
+}
+
+function collectPositiveNumberFields(value, out = {}, path = '', depth = 0) {
+  if (value == null || depth > 6) return out;
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    out[path || '(root)'] = value;
+    return out;
+  }
+  if (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim())) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) out[path || '(root)'] = n;
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.slice(0, 20).forEach((item, i) => collectPositiveNumberFields(item, out, `${path}[${i}]`, depth + 1));
+    return out;
+  }
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      const next = path ? `${path}.${key}` : key;
+      collectPositiveNumberFields(child, out, next, depth + 1);
+    }
+  }
+  return out;
 }
 
 function handleLiveMessages(binding, messages) {
@@ -140,6 +173,14 @@ function handleLiveMessages(binding, messages) {
 
       if (messageType === 'LIVEUPDATE') {
         const onlineNum = liveOnlineCount(custom);
+        // One-line diagnostic of numeric fields so we can spot concurrent vs 人气 keys on next live.
+        try {
+          const nums = collectPositiveNumberFields(custom);
+          const keys = Object.keys(nums).slice(0, 40).map((k) => `${k}=${nums[k]}`).join(',');
+          if (keys) {
+            console.error(`[nim-bridge] LIVEUPDATE room=${binding.pocketRoomId} pick=${onlineNum ?? '-'} fields=${keys}`);
+          }
+        } catch {}
         if (onlineNum !== undefined) emit('live_update', { ...base, data: { onlineNum, time } });
       }
 

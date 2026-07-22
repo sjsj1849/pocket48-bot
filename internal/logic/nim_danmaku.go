@@ -1393,6 +1393,7 @@ func (b *Bot) handleLiveUpdate(roomID int64, update *LiveUpdate) {
 		snap := *session
 		b.liveSessionsMu.Unlock()
 		b.persistLiveSession(roomID, &snap)
+		log.Printf("[NIM-live] peak onlineNum room=%d value=%d (platform metric, not verified concurrent)", roomID, update.OnlineNum)
 		return
 	}
 	b.liveSessionsMu.Unlock()
@@ -1458,7 +1459,9 @@ func (b *Bot) finishLiveSession(roomID int64) {
 		body = append(body, fmt.Sprintf("鸡腿值：%d", snapshot.ChickenLegs))
 	}
 	if snapshot.PeakOnline > 0 {
-		body = append(body, fmt.Sprintf("最高在线人数：%d", snapshot.PeakOnline))
+		// onlineNum from Pocket48 LIVEUPDATE / getLiveOne is the platform "人气" style
+		// metric (not verified concurrent occupancy). Label accordingly until we find a real concurrent field.
+		body = append(body, fmt.Sprintf("最高人气：%d", snapshot.PeakOnline))
 	}
 	// Duration last among stats, then timestamp (same as 上麦 / 开播 notices).
 	if snapshot.StartedAt > 0 {
