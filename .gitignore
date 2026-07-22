@@ -42,3 +42,4 @@ sidecar/weibo-auth/xhs_xys_probe.mjs
 # large local dumps
 bot.log
 scripts/llbot_auto_revive.py
+storage/live-liveupdate-dumps/

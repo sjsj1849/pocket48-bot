@@ -46,7 +46,7 @@
 ### 🎵 抖音监控
 - 指定账号的新视频、图文作品监控，自动过滤置顶旧作品
 - 持久化 Chromium Profile，可由管理员按需扫码登录
-- 开播、下播实时通知，直播结束汇总直播时长和最高在线人数（优先 `liveUpdateInfo.online` 实时在线；旧 onlineNum 为人气）
+- 开播、下播实时通知，直播结束汇总直播时长和最高人气（`liveUpdateInfo.online` / `onlineNum`，整场只升不降，属人气/人次，非实时并发在线）
 - 多群独立订阅与作品游标，支持按群配置 `@全体成员`
 - **IM 只读转发**（可选）：私信 + 指定群的群主消息 → QQ（不回写抖音）
 - 私信标题格式：`【昵称|抖音】`；图片消息经桥接透传 URL；部分客户端卡片（如 type=110 空正文）有可读占位
@@ -135,7 +135,7 @@ cd ../..
 - 日志 `[NIM-live] gift in ... source=score-only|…unitChicken`；**不**实时刷屏。`getLiveList` 从 `userInfo` 解析主播以便发现进行中的直播。
 - 本场累计写入 `storage/live-sessions/<房间ID>.json`（git 忽略），重启后同 `liveId` 会 `resume session` 接着累。
 - 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知格式：
-  `【房主|频道】` + 可选行：记分值 / 鸡腿值 / 最高在线人数 / 直播时长（对应值 >0 才输出）+ 时间戳；**不写**「直播已结束」行。最高在线人数优先取 LIVEUPDATE 的 `liveUpdateInfo.online`；若无则回退 `onlineNum`。
+  `【房主|频道】` + 可选行：记分值 / 鸡腿值 / 最高人气 / 直播时长（对应值 >0 才输出）+ 时间戳；**不写**「直播已结束」行。最高人气取 LIVEUPDATE 的 `liveUpdateInfo.online`（或 `onlineNum`）；实测只升不降，是人气/人次不是实时在线。下一场直播会把原始 LIVEUPDATE JSON 落到 `storage/live-liveupdate-dumps/` 以便继续找会波动的并发字段。
 - 直播弹幕 / 其他偶像进出：与房间消息同款 `【房主|频道】` 骨架（弹幕为 `昵称: 内容`；进出为 `昵称进入/离开了直播间`，可选观看时长），末行时间戳；不加 💬/👀 前缀。
 - `NIM_VIEWER_EVENT_ENABLED=true` 时转发其他小偶像进入/离开**当前已连接**直播间的事件；无法跟踪未订阅房间/未连接直播间的全站行踪。
 - 房间实时消息通过纯协议 QChat 接收。连接成功后对应房间停止 REST 轮询；QChat 断线时，`NIM_ROOM_MESSAGE_POLL_FALLBACK=true` 会自动恢复轮询。
