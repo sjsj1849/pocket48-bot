@@ -525,7 +525,7 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 	}
 	owner := "胡晓慧"
 	channel := "包间"
-	text := fmt.Sprintf("【%s|%s】\n记分值：%s\n最高人气：%d\n直播时长：%s\n%s",
+	text := fmt.Sprintf("【%s|%s】\n记分值：%s\n最高在线人数：%d\n直播时长：%s\n%s",
 		owner, channel, formatScoreValue(112), 497, formatLiveDuration(12*time.Minute+7*time.Second), "2026-07-20 00:50:00")
 	if !strings.HasPrefix(text, "【胡晓慧|包间】\n") {
 		t.Fatalf("header missing: %q", text)
@@ -538,7 +538,7 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 	}
 	// duration must appear after score/peak
 	iScore := strings.Index(text, "记分值")
-	iPeak := strings.Index(text, "最高人气")
+	iPeak := strings.Index(text, "最高在线人数")
 	iDur := strings.Index(text, "直播时长")
 	iTime := strings.Index(text, "2026-07-20")
 	if !(iScore < iPeak && iPeak < iDur && iDur < iTime) {
