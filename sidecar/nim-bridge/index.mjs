@@ -1,5 +1,7 @@
 import http from 'node:http';
 import process from 'node:process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { AndroidChatroomClient } from './android-chatroom.mjs';
 import { AndroidQChatClient } from './android-qchat.mjs';
@@ -98,9 +100,9 @@ function findPositiveNumber(value, keys) {
 }
 
 function liveOnlineCount(custom) {
-  // 2026-07-22 胡晓慧 live: LIVEUPDATE carries liveUpdateInfo.online (27→1475, concurrent-like).
-  // Old code only matched onlineNum/onlineCount/… so pick was always empty and peak fell back to
-  // getLiveOne.onlineNum (platform 人气). Prefer plain "online" under liveUpdateInfo first.
+  // 2026-07-22 胡晓慧 live: liveUpdateInfo.online only rises (27→1646, 0 downs) → 人气/人次，
+  // NOT fluctuating concurrent occupancy. Still use it for 「最高人气」 until we find a better field.
+  // Prefer nested liveUpdateInfo.online over getLiveOne-style onlineNum when both exist.
   if (custom && typeof custom === 'object') {
     const nested = custom.liveUpdateInfo || custom.live_update_info || custom.liveUpdate;
     if (nested && nested.online != null) {
@@ -109,14 +111,12 @@ function liveOnlineCount(custom) {
     }
   }
   return findPositiveNumber(custom, [
-    // concurrent-ish names first (includes nested liveUpdateInfo.online)
+    // still scan concurrent-ish names first in case platform adds them later
     'currentOnline', 'concurrentNum', 'concurrentOnline', 'realOnlineNum', 'realOnline',
     'onlineUserNum', 'onlineUsers', 'watchingCount', 'audienceCount', 'watcherCount',
     'liveOnlineNum', 'liveOnline', 'personNum', 'peopleNum', 'viewers',
-    'online', // liveUpdateInfo.online — real concurrent in 2026 LIVEUPDATE samples
-    // generic / known API (often 人气)
+    'online',
     'onlineCount', 'userCount', 'memberCount', 'onlineNum',
-    // popularity / heat last
     'hotValue', 'popularity', 'popularityValue', 'heat', 'uv', 'pv',
   ]);
 }
@@ -143,6 +143,59 @@ function collectPositiveNumberFields(value, out = {}, path = '', depth = 0) {
     }
   }
   return out;
+}
+
+// Dump raw LIVEUPDATE JSON for offline analysis (find fluctuating concurrent fields).
+// Rate-limited: first dump + then at most once per ~60s per room. Stored under storage/live-liveupdate-dumps/.
+const liveUpdateDumpLastAt = new Map(); // roomId -> ms
+const LIVEUPDATE_DUMP_INTERVAL_MS = 60_000;
+const LIVEUPDATE_DUMP_DIR = path.resolve(process.cwd(), 'storage', 'live-liveupdate-dumps');
+
+function dumpLiveUpdateRaw(binding, custom, raw) {
+  try {
+    const roomId = String(binding?.pocketRoomId || binding?.nimRoomId || 'unknown');
+    const now = Date.now();
+    const last = liveUpdateDumpLastAt.get(roomId) || 0;
+    const isFirst = last === 0;
+    if (!isFirst && now - last < LIVEUPDATE_DUMP_INTERVAL_MS) return;
+    liveUpdateDumpLastAt.set(roomId, now);
+
+    fs.mkdirSync(LIVEUPDATE_DUMP_DIR, { recursive: true });
+    const liveId = String(
+      custom?.liveUpdateInfo?.liveId
+      || custom?.liveUpdateInfo?.live_id
+      || custom?.sourceId
+      || custom?.liveId
+      || 'unknown',
+    ).replace(/[^\w.-]/g, '_');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(LIVEUPDATE_DUMP_DIR, `room${roomId}_${liveId}_${stamp}.json`);
+    const payload = {
+      dumpedAt: new Date().toISOString(),
+      pocketRoomId: binding?.pocketRoomId,
+      nimRoomId: binding?.nimRoomId,
+      messageType: 'LIVEUPDATE',
+      // custom is the parsed attach used for metrics; raw keeps full chatroom envelope when present
+      custom,
+      raw: raw && typeof raw === 'object'
+        ? {
+            type: raw.type ?? raw.msg_type_ ?? raw.msgType,
+            time: raw.time ?? raw.timetag_ ?? raw.msg_time_,
+            // avoid huge binary buffers
+            keys: Object.keys(raw),
+            attachPreview: typeof raw.attach === 'string' ? raw.attach.slice(0, 4000) : undefined,
+            customPreview: typeof raw.custom === 'string' ? raw.custom.slice(0, 4000) : undefined,
+            msg_attach_type: typeof raw.msg_attach_,
+            msg_setting_ext_type: typeof raw.msg_setting_?.ext_,
+          }
+        : null,
+      numericFields: collectPositiveNumberFields(custom),
+    };
+    fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    console.error(`[nim-bridge] LIVEUPDATE raw dump room=${roomId} file=${file}${isFirst ? ' (first)' : ''}`);
+  } catch (err) {
+    console.error(`[nim-bridge] LIVEUPDATE dump failed: ${err?.message || err}`);
+  }
 }
 
 function handleLiveMessages(binding, messages) {
@@ -185,7 +238,7 @@ function handleLiveMessages(binding, messages) {
 
       if (messageType === 'LIVEUPDATE') {
         const onlineNum = liveOnlineCount(custom);
-        // One-line diagnostic of numeric fields so we can spot concurrent vs 人气 keys on next live.
+        // Compact numeric diagnostic every update.
         try {
           const nums = collectPositiveNumberFields(custom);
           const keys = Object.keys(nums).slice(0, 40).map((k) => `${k}=${nums[k]}`).join(',');
@@ -193,10 +246,17 @@ function handleLiveMessages(binding, messages) {
             console.error(`[nim-bridge] LIVEUPDATE room=${binding.pocketRoomId} pick=${onlineNum ?? '-'} fields=${keys}`);
           }
         } catch {}
+        // Full raw dump (rate-limited) for finding fluctuating concurrent fields next live.
+        dumpLiveUpdateRaw(binding, custom, raw);
         if (onlineNum !== undefined) emit('live_update', { ...base, data: { onlineNum, time } });
       }
 
       if (messageType === 'CLOSELIVE') {
+        // Always dump once on close if we have custom payload.
+        try {
+          liveUpdateDumpLastAt.delete(String(binding?.pocketRoomId || binding?.nimRoomId || ''));
+          dumpLiveUpdateRaw(binding, custom, raw);
+        } catch {}
         emit('live_ended', { ...base, data: { onlineNum: liveOnlineCount(custom), time, reason: 'CLOSELIVE' } });
         void disconnectLive(binding.nimRoomId, 'live closed');
       }
