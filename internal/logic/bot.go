@@ -586,6 +586,9 @@ type LiveGiftSession struct {
 	AnnualScore   float64
 	PeakOnline    int64
 	Ended         bool
+	// MissTicks: consecutive discovery polls where this liveId was absent from getLiveList.
+	// finishMissing only ends after several misses to tolerate list flaps.
+	MissTicks int `json:"MissTicks,omitempty"`
 }
 
 type qchatPendingIdentity struct {
@@ -626,8 +629,8 @@ type Bot struct {
 	roomRealtimeTails      map[int64]chan struct{}
 	pendingPocketSMSMobile string
 	pocketAuthExpired      bool
-	lastWeiboAuthErrorAt     time.Time
-	lastWeiboAuthRestartAt  time.Time
+	lastWeiboAuthErrorAt   time.Time
+	lastWeiboAuthRestartAt time.Time
 	weiboAutoSignMu        sync.Mutex
 	mu                     sync.RWMutex
 
@@ -642,6 +645,9 @@ type Bot struct {
 	memberEnterMu    sync.Mutex
 	liveSessions     map[int64]*LiveGiftSession // Pocket48 room id -> current live statistics
 	liveSessionsMu   sync.Mutex
+	// finishedLives: recently ended sessions by liveId so a list flap / bot restart
+	// cannot open a fresh zero-score session for the same live and re-announce.
+	finishedLives map[string]LiveGiftSession
 }
 
 func NewBot(cfg *config.Config) *Bot {
@@ -714,6 +720,7 @@ func NewBot(cfg *config.Config) *Bot {
 		roomRealtimeTails:      make(map[int64]chan struct{}),
 		memberEnterTimes:       make(map[string]time.Time),
 		liveSessions:           make(map[int64]*LiveGiftSession),
+		finishedLives:          make(map[string]LiveGiftSession),
 		isMonitoring:           true,
 		isLiveMonitoring:       cfg.LiveMonitoring,
 		pollingInterval:        interval,

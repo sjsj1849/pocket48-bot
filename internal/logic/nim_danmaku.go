@@ -1305,6 +1305,7 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 	} else {
 		legSource = "score-only"
 	}
+	// Gift traffic also proves the live is still active (resets list-miss counter).
 	b.liveSessionsMu.Lock()
 	session := b.liveSessions[roomID]
 	if session != nil && !session.Ended {
@@ -1314,6 +1315,7 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 		if score > 0 {
 			session.AnnualScore += score
 		}
+		session.MissTicks = 0
 		snap := *session
 		b.liveSessionsMu.Unlock()
 		b.persistLiveSession(roomID, &snap)
@@ -1333,15 +1335,34 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 	if room == nil {
 		return false
 	}
+	if b.finishedLives == nil {
+		b.finishedLives = make(map[string]LiveGiftSession)
+	}
 	b.liveSessionsMu.Lock()
+	// Same live already marked finished (list flap / restart after announce): do not reopen zero-score.
+	if liveID != "" {
+		if fin, ok := b.finishedLives[liveID]; ok && fin.Ended {
+			b.liveSessionsMu.Unlock()
+			log.Printf("[NIM-live] skip re-open finished live room=%d liveId=%s score=%s peak=%d",
+				room.ChannelID, liveID, formatScoreValue(fin.AnnualScore), fin.PeakOnline)
+			return false
+		}
+	}
 	current := b.liveSessions[room.ChannelID]
 	if current != nil && current.LiveID == liveID {
+		// Already tracking this live — keep score/legs; only refresh peak.
+		if current.Ended {
+			// In-memory ended: do not resurrect empty.
+			b.liveSessionsMu.Unlock()
+			log.Printf("[NIM-live] skip re-open ended in-memory session room=%d liveId=%s", room.ChannelID, liveID)
+			return false
+		}
 		changed := false
 		if initialOnline > current.PeakOnline {
 			current.PeakOnline = initialOnline
 			changed = true
 		}
-		active := !current.Ended
+		current.MissTicks = 0
 		var snap LiveGiftSession
 		if changed {
 			snap = *current
@@ -1350,16 +1371,25 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 		if changed {
 			b.persistLiveSession(room.ChannelID, &snap)
 		}
-		return active
+		return true
 	}
 	// Prefer disk restore if present for same liveId (restart recovery).
-	if current == nil {
+	if current == nil || current.LiveID != liveID {
 		if raw, err := os.ReadFile(liveSessionPath(room.ChannelID)); err == nil {
 			var disk LiveGiftSession
-			if json.Unmarshal(raw, &disk) == nil && !disk.Ended && disk.LiveID == liveID {
+			if json.Unmarshal(raw, &disk) == nil && disk.LiveID == liveID {
+				if disk.Ended {
+					// Disk has ended snapshot: remember and do not re-announce empty.
+					b.finishedLives[liveID] = disk
+					b.liveSessionsMu.Unlock()
+					log.Printf("[NIM-live] skip re-open ended disk session room=%d liveId=%s score=%s",
+						room.ChannelID, liveID, formatScoreValue(disk.AnnualScore))
+					return false
+				}
 				if initialOnline > disk.PeakOnline {
 					disk.PeakOnline = initialOnline
 				}
+				disk.MissTicks = 0
 				cp := disk
 				b.liveSessions[room.ChannelID] = &cp
 				b.liveSessionsMu.Unlock()
@@ -1369,6 +1399,13 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 				return true
 			}
 		}
+	}
+	// Different liveId already active for this room: finish old first (true new stream).
+	if current != nil && !current.Ended && current.LiveID != "" && current.LiveID != liveID {
+		b.liveSessionsMu.Unlock()
+		log.Printf("[NIM-live] replacing session room=%d oldLive=%s newLive=%s", room.ChannelID, current.LiveID, liveID)
+		b.finishLiveSession(room.ChannelID)
+		b.liveSessionsMu.Lock()
 	}
 	session := &LiveGiftSession{
 		LiveID: liveID, LiveRoomID: nimRoomID, LiveOwnerID: room.OwnerID,
@@ -1390,11 +1427,15 @@ func (b *Bot) handleLiveUpdate(roomID int64, update *LiveUpdate) {
 	session := b.liveSessions[roomID]
 	if session != nil && !session.Ended && update.OnlineNum > session.PeakOnline {
 		session.PeakOnline = update.OnlineNum
+		session.MissTicks = 0 // real live traffic proves still active
 		snap := *session
 		b.liveSessionsMu.Unlock()
 		b.persistLiveSession(roomID, &snap)
 		log.Printf("[NIM-live] peak popularity room=%d value=%d (liveUpdateInfo.online / onlineNum; not concurrent viewers)", roomID, update.OnlineNum)
 		return
+	}
+	if session != nil && !session.Ended {
+		session.MissTicks = 0
 	}
 	b.liveSessionsMu.Unlock()
 }
@@ -1406,6 +1447,10 @@ func (b *Bot) handleLiveEnded(roomID int64, ended *LiveEnded) {
 	b.finishLiveSession(roomID)
 }
 
+// liveListMissThreshold: getLiveList flaps; require this many consecutive misses
+// (~30s * N) before treating a live as ended via list-disappear fallback.
+const liveListMissThreshold = 3
+
 func (b *Bot) finishMissingLiveSessions(activeLiveIDs map[string]struct{}) {
 	var endedRooms []int64
 	b.liveSessionsMu.Lock()
@@ -1413,8 +1458,20 @@ func (b *Bot) finishMissingLiveSessions(activeLiveIDs map[string]struct{}) {
 		if session == nil || session.Ended || session.LiveID == "" {
 			continue
 		}
-		if _, active := activeLiveIDs[session.LiveID]; !active {
+		if _, active := activeLiveIDs[session.LiveID]; active {
+			session.MissTicks = 0
+			continue
+		}
+		// Still receiving live updates / gifts → list miss is a flap; don't end yet.
+		// MissTicks only advances when discovery says absent.
+		session.MissTicks++
+		if session.MissTicks >= liveListMissThreshold {
+			log.Printf("[NIM-live] liveId absent from getLiveList for %d polls room=%d liveId=%s → finish",
+				session.MissTicks, roomID, session.LiveID)
 			endedRooms = append(endedRooms, roomID)
+		} else {
+			log.Printf("[NIM-live] liveId missing from getLiveList room=%d liveId=%s miss=%d/%d (hold)",
+				roomID, session.LiveID, session.MissTicks, liveListMissThreshold)
 		}
 	}
 	b.liveSessionsMu.Unlock()
@@ -1432,8 +1489,33 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	}
 	session.Ended = true
 	snapshot := *session
+	// Remember finished live so discovery cannot reopen a zero-score twin.
+	if b.finishedLives == nil {
+		b.finishedLives = make(map[string]LiveGiftSession)
+	}
+	if snapshot.LiveID != "" {
+		b.finishedLives[snapshot.LiveID] = snapshot
+		// Bound map size
+		if len(b.finishedLives) > 64 {
+			// drop arbitrary oldest-ish entry
+			for k := range b.finishedLives {
+				if k != snapshot.LiveID {
+					delete(b.finishedLives, k)
+					break
+				}
+			}
+		}
+	}
+	delete(b.liveSessions, roomID)
 	b.liveSessionsMu.Unlock()
-	b.removeLiveSessionFile(roomID)
+	// Keep disk file briefly as ended snapshot for crash recovery across restarts,
+	// then remove after announcing (removeLiveSessionFile still called — we re-write ended first).
+	endedSnap := snapshot
+	endedSnap.Ended = true
+	b.persistLiveSession(roomID, &endedSnap)
+	// Actually: if we persist Ended=true, beginLiveSession disk path must refuse reopen.
+	// Keep ended file on disk for restart protection (loaded into finishedLives).
+	// Do not delete immediately.
 
 	// Align with room message style: 【Owner|Channel】 + stats + timestamp (no "直播已结束" line).
 	owner := strings.TrimSpace(snapshot.LiveOwnerName)
