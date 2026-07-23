@@ -916,8 +916,13 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 		quotedLine = quotedName + "：" + quotedText
 	}
 	// Placeholder-only reply body: just show quote + sender line without bare 「[回复]」.
+	// Sticker/image under a chip-id "quote" must not become 「（回复）」 — empty quote already dropped above.
 	if text == "" || text == "[回复]" {
 		senderName = strings.TrimSpace(senderName)
+		if quotedText == "" {
+			// No real quote: keep empty body (caller may still attach images).
+			return ""
+		}
 		if senderName == "" {
 			return quotedLine
 		}
@@ -935,8 +940,8 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 	return quotedLine + "\n" + senderName + "：" + body
 }
 
-// isDouyinGarbageQuoteText rejects sec_uid / long opaque tokens that were
-// mistakenly used as quoted message text (e.g. MS4wLjABAAAA…).
+// isDouyinGarbageQuoteText rejects sec_uid / long opaque tokens / bare short
+// integers that were mistakenly used as quoted message text.
 func isDouyinGarbageQuoteText(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -944,6 +949,31 @@ func isDouyinGarbageQuoteText(s string) bool {
 	}
 	if strings.HasPrefix(s, "MS4wLjABAAAA") {
 		return true
+	}
+	// Short bare integers: reaction/chip ids, not real chat quotes.
+	if len(s) <= 6 {
+		allDigit := true
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				allDigit = false
+				break
+			}
+		}
+		if allDigit {
+			return true
+		}
+	}
+	if len(s) >= 10 {
+		allDigit := true
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				allDigit = false
+				break
+			}
+		}
+		if allDigit {
+			return true
+		}
 	}
 	if len(s) >= 40 {
 		// long base64-ish / hex without CJK
