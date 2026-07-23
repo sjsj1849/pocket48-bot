@@ -1229,8 +1229,13 @@ function enrichDouyinIMQuote(message) {
   let quotedText = String(message.quotedText || '').trim();
   let quotedName = String(message.quotedName || '').trim();
   let quotedSenderUid = String(message.quotedSenderUid || '').trim();
-  // Drop sec_uid / opaque garbage quotes before enrichment.
-  if (/^MS4wLjABAAAA/i.test(quotedText) || (/^[A-Za-z0-9_-]{40,}$/.test(quotedText) && !/[\u4e00-\u9fff]/.test(quotedText))) {
+  // Drop sec_uid / opaque / bare-integer garbage quotes before enrichment.
+  if (
+    /^MS4wLjABAAAA/i.test(quotedText)
+    || (/^[A-Za-z0-9_-]{40,}$/.test(quotedText) && !/[\u4e00-\u9fff]/.test(quotedText))
+    || /^\d{1,6}$/.test(quotedText)
+    || /^\d{10,}$/.test(quotedText)
+  ) {
     quotedText = '';
   }
   const cached = lookupDouyinIMQuotedText(message);
@@ -1243,10 +1248,31 @@ function enrichDouyinIMQuote(message) {
       }
     }
   }
-  // If still no quote text but we have a ref id that wasn't cached: treat image reply as 「我：[图片]」
-  // only when body looks like a short reaction (or Chinese chat) and user is replying privately.
+  // Resolve quote speaker from recent text cache when protocol only gives quote body.
+  if (quotedText && !quotedName) {
+    for (const entry of douyinIMTextByServerId.values()) {
+      if (!entry?.text) continue;
+      const et = String(entry.text).trim();
+      if (et === quotedText || et.startsWith(quotedText) || quotedText.startsWith(et.slice(0, 20))) {
+        if (entry.isSelf || (douyinIMIdentity.selfUid && entry.senderUid === douyinIMIdentity.selfUid)) {
+          quotedName = '我';
+        } else if (entry.senderUid) {
+          const id = resolveDouyinSenderIdentity('', entry.senderUid, '');
+          quotedName = id.remarkName || id.nickname || '';
+          if (!quotedSenderUid) quotedSenderUid = entry.senderUid;
+        }
+        if (quotedName) break;
+      }
+    }
+  }
+  // Contact book: if we have quote uid, prefer remark/nick.
+  if (quotedSenderUid && !quotedName) {
+    const id = resolveDouyinSenderIdentity('', quotedSenderUid, '');
+    quotedName = id.remarkName || id.nickname || '';
+  }
+  // If still no quote text but we have a ref id that wasn't cached: leave empty.
   if (!quotedText && (message.quotedServerMessageId || message.quotedClientMessageId)) {
-    // leave empty — better no quote than sec_uid
+    // leave empty — better no quote than chip id
   }
   // Heuristic for type=7 frames that only carry nested share-card text as quote:
   // if quotedText is a share card and quote uid still unknown, prefer marking as self
@@ -1287,12 +1313,6 @@ function enrichDouyinIMQuote(message) {
   if (!quotedName && quotedSenderUid && douyinIMIdentity.selfUid && quotedSenderUid === douyinIMIdentity.selfUid) {
     quotedName = '我';
   }
-  // Share-card quote with no reliable name: if private reply and only one side is self,
-  // leave name empty rather than inventing — unless cache already marked 我 above.
-  // When only a bare ref id is present and cache miss, still mark as reply to self if uid matches.
-  if (!quotedText && !quotedName && (message.quotedServerMessageId || message.quotedClientMessageId)) {
-    // leave empty; Go side will only show reply stack when text exists
-  }
   // Normalize video/share quote labels (keep title when present).
   if (quotedText) quotedText = compactDouyinShareQuote(quotedText) || quotedText;
   // If quote is bare [视频] and cache has a richer video line, upgrade.
@@ -1305,6 +1325,8 @@ function enrichDouyinIMQuote(message) {
       }
     }
   }
+  // Final sanitize (chip ids may reappear from cache).
+  if (/^\d{1,6}$/.test(quotedText) || /^\d{10,}$/.test(quotedText)) quotedText = '';
   return {
     ...message,
     quotedText,

@@ -172,6 +172,9 @@ function looksLikeGarbageChatToken(value) {
   if (/^[0-9a-f]{16,}$/i.test(s)) return true;
   if (/^[A-Za-z0-9_-]{40,}$/.test(s) && !/[\u4e00-\u9fff]/.test(s)) return true;
   if (/^\d{10,}$/.test(s)) return true; // bare long numeric ids as "quote"
+  // Short bare integers are almost never real chat quotes — usually chip/reaction ids
+  // (real sample 2026-07-23: quotedText "108" / "7" under type-7 caption frames).
+  if (/^\d{1,6}$/.test(s)) return true;
   return false;
 }
 
@@ -1436,8 +1439,11 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
     const looksLikeShare = Boolean(
       related
       || content.share_id
+      || content.shareId
       || content.aweType === 700
-      || messageType === 7
+      || content.aweType === '700'
+      // Do NOT treat bare type=7 as share — real chat replies often contain stray
+      // numeric ids that are NOT video itemIds (2026-07-23: uid leaked as /video/uid).
       || messageType === 8
       || messageType === 77
       || messageType === 105
