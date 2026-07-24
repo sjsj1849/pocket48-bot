@@ -97,7 +97,9 @@ func sendSMTP(cfg Config, message []byte) error {
 			_ = conn.Close()
 			return err
 		}
-		if ok, _ := client.Extension("STARTTLS"); ok {
+		// Local postfix (127.0.0.1/localhost) often offers STARTTLS with a
+		// non-matching cert; skip STARTTLS for loopback so port 25 works.
+		if ok, _ := client.Extension("STARTTLS"); ok && !isLoopbackSMTPHost(host) {
 			tlsCfg := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
 			if err := client.StartTLS(tlsCfg); err != nil {
 				_ = client.Close()
@@ -107,6 +109,7 @@ func sendSMTP(cfg Config, message []byte) error {
 	}
 	defer client.Close()
 
+	// Only AUTH when a password is configured (local MTA usually needs none).
 	if pass != "" {
 		auth := smtp.PlainAuth("", user, pass, host)
 		if ok, _ := client.Extension("AUTH"); ok {
@@ -144,6 +147,11 @@ func sendSMTP(cfg Config, message []byte) error {
 		return err
 	}
 	return client.Quit()
+}
+
+func isLoopbackSMTPHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	return h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]"
 }
 
 // NormalizePanelURL returns a trimmed panel base URL or empty.
