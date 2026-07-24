@@ -1713,6 +1713,39 @@ func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCoun
 	return sections
 }
 
+// ResendWeiboSuperCountDailyEmail rebuilds the daily HTML (+ optional PNG) from
+// already-fetched results and sends via ALERT_EMAIL_* (used for manual backfill).
+func ResendWeiboSuperCountDailyEmail(
+	cfg *config.Config,
+	results []monitor.WeiboSuperCountResult,
+	failed []string,
+	title string,
+	now time.Time,
+	signBaseline, likeBaseline, postBaseline map[string]int,
+) error {
+	if cfg == nil {
+		return fmt.Errorf("nil config")
+	}
+	// Single section is enough for snapshot resend (group split needs live bot state).
+	sections := []weiboSuperCountHTMLSection{{Title: "全部超话", Results: results}}
+	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
+	shotHTML := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, true)
+	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
+	filename := fmt.Sprintf("weibo-super-count-%s.png", now.Format("2006-01-02"))
+	var atts []emailAttachment
+	if png, err := renderHTMLToPNG(shotHTML); err != nil {
+		log.Printf("[WeiboSuperCount] html→png failed: %v (email without image)", err)
+	} else {
+		atts = append(atts, emailAttachment{
+			Name:        filename,
+			ContentType: "image/png",
+			Data:        png,
+		})
+	}
+	plain := formatWeiboSuperCountDualRanking(results, failed, title, now, signBaseline, likeBaseline, postBaseline)
+	return sendAdminHTMLEmail(cfg, subject, htmlBody, plain, atts...)
+}
+
 // sendWeiboSuperCountDailyEmail sends ONE email with multi-group tables + PNG attachment.
 func (b *Bot) sendWeiboSuperCountDailyEmail(reportText, title string, results []monitor.WeiboSuperCountResult, failed []string, now time.Time, signBaseline, likeBaseline, postBaseline map[string]int) {
 	sections := b.buildWeiboSuperCountEmailSections(results)
