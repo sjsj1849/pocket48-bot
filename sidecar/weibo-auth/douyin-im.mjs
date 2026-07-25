@@ -796,8 +796,17 @@ function compactDouyinShareQuote(text) {
     }
     return '[分享图文]';
   }
+  // [分享视频] must be checked before [分享] (starts-with overlap).
+  if (raw.startsWith('[分享视频]')) {
+    const rest = raw.slice('[分享视频]'.length).trim().replace(/^[:：\\-\\s]+/, '');
+    if (rest) {
+      const short = rest.length > 40 ? `${rest.slice(0, 40)}…` : rest;
+      return `[分享视频] ${short}`;
+    }
+    return '[分享视频]';
+  }
   if (raw.startsWith('[分享]')) {
-    const rest = raw.slice('[分享]'.length).trim().replace(/^[:：\-\s]+/, '');
+    const rest = raw.slice('[分享]'.length).trim().replace(/^[:：\\-\\s]+/, '');
     if (rest) {
       const short = rest.length > 40 ? `${rest.slice(0, 40)}…` : rest;
       return `[分享] ${short}`;
@@ -817,6 +826,7 @@ function looksLikeDouyinShareCardText(text) {
   return Boolean(
     raw.startsWith('[分享图文]')
     || raw.startsWith('[分享]')
+    || raw.startsWith('[分享视频]')
     || raw.startsWith('[视频]')
     || /^\[分享图文\]/.test(raw)
   );
