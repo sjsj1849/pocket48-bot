@@ -1172,6 +1172,23 @@ function extractTextFromOtherFields(message, skipFields = new Set([1, 2, 3, 4, 5
   }
   bodyCandidates.sort((a, b) => b.text.length - a.text.length);
   quoteCandidates.sort((a, b) => b.text.length - a.text.length);
+  // Fallback: scan skipped text-bearing fields (1-7) for raw Chinese runs when
+  // JSON content was empty. Reply-to-share frames stash body in these fields.
+  if (bodyCandidates.length === 0) {
+    const fallbackSkipFields = new Set([1, 2, 3, 4, 5, 6, 7, 9, 10, 14]);
+    for (const [number, values] of message.entries()) {
+      if (!fallbackSkipFields.has(number)) continue;
+      for (const value of values || []) {
+        if (!(value instanceof Uint8Array) || value.length === 0) continue;
+        const asStr = asString(value);
+        if (!asStr || /^[a-z][a-z0-9_]*$/i.test(asStr)) continue;
+        if (!/[\u4e00-\u9fff]/.test(asStr) || asStr.length > 200) continue;
+        if (looksLikeDouyinShareCardText(asStr)) continue;
+        if (looksLikeGarbageChatToken(asStr)) continue;
+        bodyCandidates.push({ number, text: asStr.trim(), source: 'skipped-raw' });
+      }
+    }
+  }
   return {
     text: bodyCandidates[0]?.text || '',
     quotedText: quoteCandidates[0]?.text || '',
