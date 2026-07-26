@@ -1664,8 +1664,9 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 
 // buildWeiboSuperCountEmailSections groups results into email sections (one table per group).
 // If no groups configured, returns a single section with all results.
-func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCountResult) []weiboSuperCountHTMLSection {
-	groups := b.getWeiboSuperCountGroups()
+// buildWeiboSuperCountSections groups results by configured groups and returns
+// HTML sections. Standalone version (no Bot instance needed) for resend tool.
+func buildWeiboSuperCountSections(groups map[string]*config.WeiboSuperCountGroupInfo, topics map[string]*config.WeiboSuperCountTopic, results []monitor.WeiboSuperCountResult) []weiboSuperCountHTMLSection {
 	if len(groups) == 0 {
 		return []weiboSuperCountHTMLSection{{Title: "全部超话", Results: results}}
 	}
@@ -1683,21 +1684,35 @@ func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCoun
 		if ginfo != nil && strings.TrimSpace(ginfo.Name) != "" {
 			name = ginfo.Name
 		}
-		// filterResultsByGroup matches GroupName to group id key
-		groupResults := b.filterResultsByGroup(results, gid)
-		// also try display name if id != name
+		var groupResults []monitor.WeiboSuperCountResult
+		for _, r := range results {
+			oid := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
+			if t, ok := topics[oid]; ok && t.GroupName == gid {
+				groupResults = append(groupResults, r)
+			}
+		}
 		if len(groupResults) == 0 && name != gid {
-			groupResults = b.filterResultsByGroup(results, name)
+			for _, r := range results {
+				oid := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
+				if t, ok := topics[oid]; ok && t.GroupName == name {
+					groupResults = append(groupResults, r)
+				}
+			}
 		}
 		if len(groupResults) == 0 {
 			continue
 		}
+		sort.Slice(groupResults, func(i, j int) bool {
+			if groupResults[i].SignCount != groupResults[j].SignCount {
+				return groupResults[i].SignCount > groupResults[j].SignCount
+			}
+			return strings.ToLower(groupResults[i].Name) < strings.ToLower(groupResults[j].Name)
+		})
 		for _, r := range groupResults {
 			used[normalizeWeiboSuperOID(r.OID)] = struct{}{}
 		}
 		sections = append(sections, weiboSuperCountHTMLSection{Title: name, Results: groupResults})
 	}
-	// leftover topics without group assignment
 	var leftover []monitor.WeiboSuperCountResult
 	for _, r := range results {
 		if _, ok := used[normalizeWeiboSuperOID(r.OID)]; !ok {
@@ -1713,6 +1728,10 @@ func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCoun
 	return sections
 }
 
+func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCountResult) []weiboSuperCountHTMLSection {
+	return buildWeiboSuperCountSections(b.getWeiboSuperCountGroups(), b.getWeiboSuperCountTopics(), results)
+}
+
 // ResendWeiboSuperCountDailyEmail rebuilds the daily HTML (+ optional PNG) from
 // already-fetched results and sends via ALERT_EMAIL_* (used for manual backfill).
 func ResendWeiboSuperCountDailyEmail(
@@ -1726,8 +1745,8 @@ func ResendWeiboSuperCountDailyEmail(
 	if cfg == nil {
 		return fmt.Errorf("nil config")
 	}
-	// Single section is enough for snapshot resend (group split needs live bot state).
-	sections := []weiboSuperCountHTMLSection{{Title: "全部超话", Results: results}}
+	// Build grouped sections from config.
+	sections := buildWeiboSuperCountSections(cfg.WeiboSuperCountGroups, cfg.WeiboSuperCountTopics, results)
 	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
 	shotHTML := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, true)
 	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
