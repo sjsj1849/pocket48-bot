@@ -891,6 +891,33 @@ function contentPreview(raw, max = 180) {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
+// Strip protobuf metadata / binary control chars from raw text strings.
+// Douyin's emoji-reaction frames leak \x11a:video_emoji_rec\x12[...] JSON.
+// Returns { clean: string, stickers: string[] }.
+function cleanDouyinRawText(raw) {
+  const s = String(raw || '');
+  // Remove binary control characters (0x00-0x1f except \t \n \r)
+  let clean = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+  // Detect a:video_emoji_rec with embedded JSON (protobuf may leave stray char before [)
+  const stickers = [];
+  const emojiMatch = clean.match(/a:video_emoji_rec.{0,2}\[([\s\S]*?)\]/);
+  if (emojiMatch) {
+    const rawJson = '[' + emojiMatch[1] + ']';
+    try {
+      const arr = JSON.parse(rawJson);
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item && item.name) stickers.push(item.name);
+        }
+      }
+    } catch {}
+    clean = clean.replace(/a:video_emoji_rec.{0,2}\[[\s\S]*?\]/, '').trim();
+  }
+  // Also strip bare \x11a:... field metadata that wasn't in brackets.
+  clean = clean.replace(/\x11?[a-z]:[a-z_]+/g, '').trim();
+  return { clean, stickers };
+}
+
 // When field 8 is not JSON (common suspicion for image-reply frames), try to pull
 // readable UTF-8 runs out of the raw bytes so we can at least see 哈哈 / 这是要干嘛.
 function extractPrintableRuns(bytes, minLen = 2, maxRuns = 12) {
@@ -1343,8 +1370,16 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
         }
       }
       if (video.text === '[视频]' && other.text && !looksLikeDouyinShareCardText(other.text) && /[\u4e00-\u9fff]/.test(other.text)) {
-        const t = String(other.text).trim().slice(0, 80);
-        if (t && t.length >= 2) video = { ...video, text: `[视频] ${t}` };
+        const cleaned = cleanDouyinRawText(other.text);
+        let t = cleaned.clean.trim().slice(0, 80);
+        // If stickers were found, prefer them over the raw share-card fallback.
+        if (cleaned.stickers.length > 0) {
+          t = `[表情] ${cleaned.stickers.join(' ')}`;
+        }
+        // If cleaning reduced text to less than sensible chat, skip appending.
+        if (t && t.length >= 2 && !/^\s*$/.test(t)) {
+          video = { ...video, text: `[视频] ${t}` };
+        }
       }
     }
     text = video.text;
