@@ -1192,6 +1192,7 @@ function rememberDouyinIMText(message, { isSelf = false } = {}) {
   const entry = {
     text,
     senderUid: String(message.senderUid || ''),
+    conversationId: String(message.conversationId || ''),
     isSelf: Boolean(isSelf),
     at: Date.now(),
   };
@@ -1249,20 +1250,30 @@ function enrichDouyinIMQuote(message) {
     }
   }
   // Resolve quote speaker from recent text cache when protocol only gives quote body.
+  // Match within the SAME conversation first: the same short text (e.g. 笑死我了) can
+  // exist in multiple DMs from different senders, and cross-conv matching mislabels
+  // the quote speaker (real sample 2026-08-04: own message quoted as 张若昀).
   if (quotedText && !quotedName) {
+    const conv = String(message.conversationId || '').trim();
+    const candidates = [];
     for (const entry of douyinIMTextByServerId.values()) {
       if (!entry?.text) continue;
       const et = String(entry.text).trim();
       if (et === quotedText || et.startsWith(quotedText) || quotedText.startsWith(et.slice(0, 20))) {
-        if (entry.isSelf || (douyinIMIdentity.selfUid && entry.senderUid === douyinIMIdentity.selfUid)) {
-          quotedName = '我';
-        } else if (entry.senderUid) {
-          const id = resolveDouyinSenderIdentity('', entry.senderUid, '');
-          quotedName = id.remarkName || id.nickname || '';
-          if (!quotedSenderUid) quotedSenderUid = entry.senderUid;
-        }
-        if (quotedName) break;
+        const score = conv && entry.conversationId === conv ? 0 : 1;
+        candidates.push({ score, entry });
       }
+    }
+    candidates.sort((a, b) => a.score - b.score || b.entry.at - a.entry.at);
+    for (const { entry } of candidates) {
+      if (entry.isSelf || (douyinIMIdentity.selfUid && entry.senderUid === douyinIMIdentity.selfUid)) {
+        quotedName = '我';
+      } else if (entry.senderUid) {
+        const id = resolveDouyinSenderIdentity('', entry.senderUid, '');
+        quotedName = id.remarkName || id.nickname || '';
+        if (!quotedSenderUid) quotedSenderUid = entry.senderUid;
+      }
+      if (quotedName) break;
     }
   }
   // Contact book: if we have quote uid, prefer remark/nick.

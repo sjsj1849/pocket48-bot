@@ -412,9 +412,10 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 	channelRole := msg.ExtInfo.ChannelRole
 	senderUserID := msg.ExtInfo.User.UserID
 	isOwnerMessage := channelRole == "2" || (senderUserID != 0 && senderUserID == room.OwnerID)
+	isStarMessage := channelRole == "3"
 
 	// Filter: only forward messages from room owner or other idols, skip fans.
-	if !isOwnerMessage {
+	if !isOwnerMessage && !isStarMessage {
 		if senderUserID == 0 {
 			return // cannot determine sender, skip
 		}

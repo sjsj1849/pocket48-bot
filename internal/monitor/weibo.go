@@ -866,6 +866,25 @@ func convertWeiboPostToCard(post *weiboMymblogPost, uid string) *WeiboCard {
 				}{URL: picURL},
 			})
 		}
+	} else if len(post.PicIDs) > 0 {
+		// mymblog API no longer returns pic_infos; build URLs from pic_ids.
+		for _, pid := range post.PicIDs {
+			if pid == "" {
+				continue
+			}
+			picURL := fmt.Sprintf("https://wx3.sinaimg.cn/orj360/%s.jpg", pid)
+			card.Pics = append(card.Pics, struct {
+				Type     string `json:"type"`
+				VideoSrc string `json:"videoSrc"`
+				Large    struct {
+					URL string `json:"url"`
+				} `json:"large"`
+			}{
+				Large: struct {
+					URL string `json:"url"`
+				}{URL: picURL},
+			})
+		}
 	}
 
 	// 转换视频/页面信息
@@ -1101,6 +1120,18 @@ func (m *WeiboMonitor) handleWebAPISuccess(config *WeiboConfig, cardID string, c
 	config.LastWeiboID = cardID
 	if config.OnNewWeibo != nil {
 		config.OnNewWeibo(config.UID, config.LastWeiboID)
+	}
+	// mymblog API no longer returns pic_infos/page_info; m.weibo.cn container
+	// still does. Enrich the card (pics + video) when web API returned sparse data.
+	if (card.PageInfo == nil || len(card.Pics) == 0) && config.ContainerID != "" {
+		if fullCard, err := m.fetchMWeiboCardByID(config, cardID); err == nil && fullCard != nil {
+			if len(fullCard.Pics) > 0 {
+				card.Pics = fullCard.Pics
+			}
+			if fullCard.PageInfo != nil {
+				card.PageInfo = fullCard.PageInfo
+			}
+		}
 	}
 	m.DispatchPerfectWeibo(config, *card, cardID)
 	log.Printf("[Weibo] UID %s 使用 weibo.com web API 正常分发新微博: %s", config.UID, cardID)
@@ -1418,6 +1449,17 @@ func (m *WeiboMonitor) fetchLatestSuperPostCardByUID(oid, uid string) (string, *
 			target = *target.MBlog
 			if target.Scheme == "" {
 				target.Scheme = card.Scheme
+			}
+			// Super-topic timeline may put media on the outer card (timeline wrapper)
+			// while mblog only contains text. Copy back if inner is missing them.
+			if len(target.Pics) == 0 && len(card.Pics) > 0 {
+				target.Pics = card.Pics
+			}
+			if target.PageInfo == nil && card.PageInfo != nil {
+				target.PageInfo = card.PageInfo
+			}
+			if target.MixMediaInfo == nil && card.MixMediaInfo != nil {
+				target.MixMediaInfo = card.MixMediaInfo
 			}
 		}
 		authorUID := extractWeiboCardAuthorUID(target)
@@ -1918,6 +1960,16 @@ func filterWeiboCards(cards []WeiboCard) []WeiboCard {
 			actualCard = *card.MBlog
 			if actualCard.Scheme == "" {
 				actualCard.Scheme = card.Scheme
+			}
+			// Preserve outer-card media (pics, video, mix) when inner mblog lacks them.
+			if len(actualCard.Pics) == 0 && len(card.Pics) > 0 {
+				actualCard.Pics = card.Pics
+			}
+			if actualCard.PageInfo == nil && card.PageInfo != nil {
+				actualCard.PageInfo = card.PageInfo
+			}
+			if actualCard.MixMediaInfo == nil && card.MixMediaInfo != nil {
+				actualCard.MixMediaInfo = card.MixMediaInfo
 			}
 		}
 		cardID := extractWeiboCardID(actualCard)

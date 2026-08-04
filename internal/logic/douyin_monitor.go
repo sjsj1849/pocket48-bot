@@ -874,18 +874,20 @@ func truncateDouyinLogText(text string, max int) string {
 }
 
 func inferDouyinQuotedName(event douyinBrowserEvent, senderName, selfUID string) string {
+	quotedUID := strings.TrimSpace(event.QuotedSenderUID)
+	// Self-quote always shows 我 — cached remark/nickname (e.g. our own account
+	// saved in contact cache as 张若昀) must never override this.
+	if quotedUID != "" && (quotedUID == event.SelfUID || quotedUID == selfUID) {
+		return "我"
+	}
 	if name := strings.TrimSpace(event.QuotedName); name != "" {
 		return name
 	}
-	quotedUID := strings.TrimSpace(event.QuotedSenderUID)
 	if quotedUID == "" {
 		return ""
 	}
 	if quotedUID == event.SenderUID {
 		return senderName
-	}
-	if quotedUID == event.SelfUID || quotedUID == selfUID {
-		return "我"
 	}
 	return ""
 }

@@ -891,7 +891,14 @@ func (b *Bot) connectDanmakuForLive(liveID string, nimRoomID int64, room *pocket
 // be resolved to a user id. These are almost always fan/noise traffic and must
 // not keep REST polling warm as a "fallback".
 func (b *Bot) shouldDropUnresolvedRoomRealtime(msg *pocket48.Message) bool {
-	return msg != nil && msg.ExtInfo.User.UserID == 0
+	if msg == nil {
+		return true
+	}
+	// channelRole "3" = 其他小偶像 — keep even when UserID is temporarily unresolved.
+	if msg.ExtInfo.ChannelRole == "3" {
+		return false
+	}
+	return msg.ExtInfo.User.UserID == 0
 }
 
 func (b *Bot) shouldDeferRoomRealtimeToREST(msg *pocket48.Message) bool {
