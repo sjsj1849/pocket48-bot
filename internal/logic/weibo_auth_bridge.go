@@ -673,13 +673,21 @@ func (b *Bot) handleWeiboAuthError(err error) {
 	log.Printf("[Weibo-auth] %v", err)
 	now := time.Now()
 	b.mu.Lock()
-	shouldNotify := b.lastWeiboAuthErrorAt.IsZero() || now.Sub(b.lastWeiboAuthErrorAt) >= time.Hour
-	if shouldNotify {
+	shouldNotify := false
+	if b.lastWeiboAuthErrorAt.IsZero() || now.Sub(b.lastWeiboAuthErrorAt) >= time.Hour {
+		// First error in this window: record time but do NOT notify yet.
+		// Let auto-restart try to recover first.
 		b.lastWeiboAuthErrorAt = now
+		// If we already have a pending recovery check from a previous error
+		// in this window, that check will send the alert if still failing.
+	} else if now.Sub(b.lastWeiboAuthErrorAt) >= 10*time.Minute {
+		// Second error >10 min after the first: the auto-restart didn't fix it.
+		shouldNotify = true
 	}
 	b.mu.Unlock()
+
 	if shouldNotify {
-		b.notifyAdmins(fmt.Sprintf("⚠️ 微博浏览器认证侧卡异常：%v\n自动告警已进入 1 小时冷却；若持续异常，请检查侧卡日志或重启 Bot。", err))
+		b.notifyAdmins(fmt.Sprintf("⚠️ 微博浏览器认证侧卡异常：%v\n自动重启后仍未恢复，请检查侧卡日志。", err))
 	}
 
 	// Auto-restart the sidecar — lighter than restarting the whole bot.
