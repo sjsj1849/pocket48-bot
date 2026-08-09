@@ -164,6 +164,9 @@ function formatDouyinStickerText(text, messageType) {
 }
 
 // Reject tokens that are not human chat (sec_uid, long opaque ids, pure hex, etc.).
+// NOTE: short bare integers (1-6 digits) are NOT rejected here — real users do send
+// plain numbers as chat text (real sample 2026-08-09: text "171441"). Short-digit
+// filtering applies only to QUOTE positions via looksLikeGarbageQuoteToken.
 function looksLikeGarbageChatToken(value) {
   const s = String(value || '').trim();
   if (!s) return true;
@@ -172,16 +175,25 @@ function looksLikeGarbageChatToken(value) {
   if (/^[0-9a-f]{16,}$/i.test(s)) return true;
   if (/^[A-Za-z0-9_-]{40,}$/.test(s) && !/[\u4e00-\u9fff]/.test(s)) return true;
   if (/^\d{10,}$/.test(s)) return true; // bare long numeric ids as "quote"
-  // Short bare integers are almost never real chat quotes — usually chip/reaction ids
-  // (real sample 2026-07-23: quotedText "108" / "7" under type-7 caption frames).
+  return false;
+}
+
+// Quote-position junk: same as chat token, plus short bare integers which are
+// almost never real quoted text — usually chip/reaction ids (real sample
+// 2026-07-23: quotedText "108" / "7" under type-7 caption frames).
+function looksLikeGarbageQuoteToken(value) {
+  const s = String(value || '').trim();
+  if (!s) return true;
+  if (looksLikeGarbageChatToken(s)) return true;
   if (/^\d{1,6}$/.test(s)) return true;
   return false;
 }
 
+
 function sanitizeQuotedText(value) {
   const s = String(value || '').trim();
   if (!s) return '';
-  if (looksLikeGarbageChatToken(s)) return '';
+  if (looksLikeGarbageQuoteToken(s)) return '';
   // Share-card labels are ok; keep compact.
   if (looksLikeDouyinShareCardText(s)) return compactDouyinShareQuote(s) || s;
   return s;
@@ -262,7 +274,7 @@ function replyDetails(content, ext = {}) {
     if (!node || typeof node !== 'object') return empty;
     const quotedName = firstText(node, nameKeys);
     let quotedText = firstText(node, textKeys);
-    if (looksLikeGarbageChatToken(quotedText)) quotedText = '';
+    if (looksLikeGarbageQuoteToken(quotedText)) quotedText = '';
     // Some reply bags put media type only — normalize.
     if (!quotedText && (node.msg_type === 27 || node.messageType === 27 || node.type === 27)) {
       quotedText = '[图片]';
@@ -315,7 +327,7 @@ function replyDetails(content, ext = {}) {
         }
         if (typeof value === 'string' && value.trim() && !value.trim().startsWith('{')) {
           const bare = value.trim();
-          if (!looksLikeGarbageChatToken(bare)) {
+          if (!looksLikeGarbageQuoteToken(bare)) {
             return { ...empty, quotedText: bare };
           }
         }
