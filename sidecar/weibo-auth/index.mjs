@@ -562,6 +562,8 @@ async function startBrowser() {
       // Login/lookup pages are temporary and should not force a high permanent limit.
       '--renderer-process-limit=4',
       '--js-flags=--max-old-space-size=256',
+      '--blink-settings=imagesEnabled=false',
+      '--disk-cache-size=33554432',
     ];
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
       chromiumArgs.push('--no-sandbox');

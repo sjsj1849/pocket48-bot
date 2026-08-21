@@ -1330,7 +1330,9 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 			log.Printf("[NIM-live] gift in room=%d from=%s gift=%s x%d legs+=%d totalLegs=%d score+=%s totalScore=%s source=%s",
 				roomID, g.From, g.GiftName, g.GiftNum, totalLegs, snap.ChickenLegs, formatScoreValue(score), formatScoreValue(snap.AnnualScore), legSource)
 		} else {
-			log.Printf("[NIM-live] gift in room=%d from=%s gift=%s x%d (no leg/score parsed)", roomID, g.From, g.GiftName, g.GiftNum)
+			// Go-side probe: first 8 failures dump raw keys + numeric fields for field discovery (max 20)
+			dumpGoGiftRaw(g, legSource)
+			log.Printf("[NIM-live] gift in room=%d from=%s gift=%s x%d (no leg/score parsed) rawHead=%s", roomID, g.From, g.GiftName, g.GiftNum, truncateGiftRawHead(g.Raw, 600))
 		}
 		return
 	}
@@ -1676,4 +1678,54 @@ func (b *Bot) getRoomOwnerAndChannel(roomID int64) (owner, channel string) {
 		channel = "包间"
 	}
 	return owner, channel
+}
+
+var goGiftDumpCount int
+
+func dumpGoGiftRaw(g *GiftMessage, legSource string) {
+	if goGiftDumpCount >= 20 || g == nil || len(g.Raw) == 0 {
+		return
+	}
+	goGiftDumpCount++
+	dir := "storage/gift-raw-dumps-go"
+	_ = os.MkdirAll(dir, 0755)
+	now := time.Now().Format("20060102-150405.000")
+	name := strings.ReplaceAll(strings.TrimSpace(g.GiftName), "/", "_")
+	if len(name) > 20 {
+		name = name[:20]
+	}
+	file := fmt.Sprintf("%s/go_gift_%s_%s_%d.json", dir, now, name, goGiftDumpCount)
+	// Also log top-level keys for quick grep
+	var payload interface{}
+	keys := ""
+	if err := json.Unmarshal(g.Raw, &payload); err == nil {
+		if m, ok := payload.(map[string]interface{}); ok {
+			ks := make([]string, 0, len(m))
+			for k := range m {
+				ks = append(ks, k)
+			}
+			keys = strings.Join(ks, ",")
+			// giftInfo sub-keys
+			if gi, ok := m["giftInfo"]; ok {
+				if gm, ok := gi.(map[string]interface{}); ok {
+					gks := make([]string, 0, len(gm))
+					for k := range gm {
+						gks = append(gks, k)
+					}
+					keys += " | giftInfo." + strings.Join(gks, ",")
+				}
+			}
+		}
+	}
+	log.Printf("[NIM-live] GIFT-GO-RAW #%d gift=%s keys=%s legSource=%s file=%s", goGiftDumpCount, g.GiftName, keys, legSource, file)
+	_ = os.WriteFile(file, g.Raw, 0644)
+}
+
+func truncateGiftRawHead(raw json.RawMessage, n int) string {
+	s := string(raw)
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }
