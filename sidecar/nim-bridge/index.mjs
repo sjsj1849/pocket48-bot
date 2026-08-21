@@ -198,6 +198,27 @@ function dumpLiveUpdateRaw(binding, custom, raw) {
   }
 }
 
+const GIFT_DUMP_DIR = path.resolve(process.cwd(), 'storage', 'gift-raw-dumps');
+let giftDumpCount = 0;
+const GIFT_DUMP_MAX = 200;
+function dumpGiftRaw(binding, custom, raw) {
+  if (giftDumpCount >= GIFT_DUMP_MAX) return;
+  try {
+    fs.mkdirSync(GIFT_DUMP_DIR, { recursive: true });
+    const roomId = String(binding?.pocketRoomId || binding?.nimRoomId || 'unknown');
+    const gift = custom?.giftInfo || custom?.gift || custom;
+    const giftName = String(gift?.giftName || gift?.name || custom?.giftName || 'unknown').replace(/[^0-9A-Za-z_\u4e00-\u9fa5.-]/g, '_').slice(0, 30);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(GIFT_DUMP_DIR, `gift_room${roomId}_${giftName}_${stamp}_${giftDumpCount}.json`);
+    const payload = { dumpedAt: new Date().toISOString(), pocketRoomId: binding?.pocketRoomId, nimRoomId: binding?.nimRoomId, custom, rawKeys: raw && typeof raw === 'object' ? Object.keys(raw) : [], numericFields: collectPositiveNumberFields(custom) };
+    fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    giftDumpCount++;
+    console.error(`[nim-bridge] GIFT-RAW dump #${giftDumpCount} room=${roomId} file=${file}`);
+  } catch (err) {
+    console.error(`[nim-bridge] GIFT dump failed: ${err?.message || err}`);
+  }
+}
+
 function handleLiveMessages(binding, messages) {
   for (const raw of Array.isArray(messages) ? messages : [messages]) {
     const type = liveMessageType(raw);
@@ -220,8 +241,18 @@ function handleLiveMessages(binding, messages) {
         emit('danmaku', { ...base, data: { type: 'barrage', ...user, text: String(text), time } });
       }
 
-      const gift = custom.giftInfo;
+      const gift = custom.giftInfo || custom.giftInfoList || custom.gift;
+      // --- GIFT dual probe: dump every gift custom to disk (survives log pipeline) ---
+      const hasGiftPayload = !!(custom.giftInfo || custom.giftInfoList || custom.gift || String(messageType).includes('GIFT') || gift);
+      if (hasGiftPayload) {
+        try {
+          const brief = JSON.stringify(custom).slice(0, 1200);
+          console.error(`[nim-bridge] GIFT-RAW keys=${Object.keys(custom).join(',')} giftKeys=${gift ? Object.keys(gift).join(',') : '-'} customHead=${brief}`);
+        } catch {}
+        try { dumpGiftRaw(binding, custom, raw); } catch {}
+      }
       if (gift) {
+
         emit('gift', {
           ...base,
           data: {

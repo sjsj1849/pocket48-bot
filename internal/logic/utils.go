@@ -341,6 +341,8 @@ func extractChickenLegFromRaw(raw json.RawMessage, giftName string, giftNum int6
 		}
 
 		// Prefer explicit chicken-leg fields only (do not treat price/money/score as legs).
+		// NOTE: only *total*-prefixed keys count as a session total here; bare
+		// chickenLeg is a per-unit value handled by the unit scan below.
 		total, totalOK := findNumberByKeys(scope, []string{
 			"totalChickenLeg",
 			"totalChickenLegs",
@@ -369,6 +371,27 @@ func extractChickenLegFromRaw(raw json.RawMessage, giftName string, giftNum int6
 			source := "raw.payload.unitChicken"
 			if idx == 0 {
 				source = "raw.giftInfo.unitChicken"
+			}
+			return unit, total, source
+		}
+	}
+
+	// Fallback (2026-08-21 dual-probe verified): the NIM chatroom gift payload no
+	// longer carries any chickenLeg* field. giftInfo.money is the per-unit 鸡腿
+	// price (直播弹幕=10, 荧光棒=5, 心锁=480, 高级马卡龙=1048, 皇冠=5000), so the
+	// session leg total must be accumulated as money × giftNum.
+	for idx, scope := range scopes {
+		m, ok := scope.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		money := directFloat64ByKeys(m, []string{"money", "giftMoney", "price", "giftPrice"})
+		if money > 0 {
+			unit := int64(money)
+			total := int64(money * float64(num))
+			source := "raw.payload.money"
+			if idx == 0 {
+				source = "raw.giftInfo.money"
 			}
 			return unit, total, source
 		}

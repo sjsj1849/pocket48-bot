@@ -130,9 +130,13 @@ cd ../..
 - 普通观众弹幕和单条礼物**不**实时转发 QQ。
 - 礼物累计分桶（互斥）：
   - **总选记分**：`isScore/is_score=true` 且有 `tpNum` 等 → 只加 `AnnualScore`
-  - **鸡腿**：非记分礼物，且 raw 含明确 `chickenLeg` / `totalChickenLeg` → 只加 `ChickenLegs`
-  - 仅有 `price/money` 等泛金额字段 → 两边都不加（避免「鎏光碟影」等记分礼物误入鸡腿）
-- 日志 `[NIM-live] gift in ... source=score-only|…unitChicken`；**不**实时刷屏。`getLiveList` 从 `userInfo` 解析主播以便发现进行中的直播。
+  - **鸡腿**：非记分礼物，按优先级取值 → 只加 `ChickenLegs`
+    1. raw 含 `totalChickenLeg*`（会话总数，直接累计）
+    2. raw 含 `chickenLeg*`（单价 × 数量）
+    3. **兜底 `giftInfo.money`**：2026-08-21 双端抓包证实，NIM 直播礼物 payload 已不再下发任何 `chickenLeg*` 字段，只有单价 `money`（直播弹幕=10、荧光棒-NII=5、心锁=480、高级马卡龙=1048、皇冠=5000），鸡腿值按 `money × giftNum` 累计（source=`raw.giftInfo.money`）
+  - 记分礼物（`isScore=true`）即使带 `money` 也不会进鸡腿桶；`直播弹幕` 礼物（带 `attachData.text`）按 money=10 计入鸡腿
+- 礼物字段探针（排查用，自动限流）：解析失败时 Node 侧把完整 custom 落盘 `storage/gift-raw-dumps/`（≤200 个/进程），Go 侧落盘 `storage/gift-raw-dumps-go/`（≤20 个/进程）并打 `GIFT-GO-RAW` 日志（含 keys 与 rawHead 前 600 字符）。
+- 日志 `[NIM-live] gift in ... source=score-only|…unitChicken|…money`；**不**实时刷屏。`getLiveList` 从 `userInfo` 解析主播以便发现进行中的直播。
 - 本场累计写入 `storage/live-sessions/<房间ID>.json`（git 忽略），重启后同 `liveId` 会 `resume session` 接着累。
 - 直播结束优先 NIM `CLOSELIVE`，并以直播列表消失作兜底；结束通知格式：
   `【房主|频道】` + 可选行：记分值 / 鸡腿值 / 最高人气 / 直播时长（对应值 >0 才输出）+ 时间戳；**不写**「直播已结束」行。最高人气取 LIVEUPDATE 的 `liveUpdateInfo.online`（或 `onlineNum`）；实测只升不降，是人气/人次不是实时在线。下一场直播会把原始 LIVEUPDATE JSON 落到 `storage/live-liveupdate-dumps/` 以便继续找会波动的并发字段。
