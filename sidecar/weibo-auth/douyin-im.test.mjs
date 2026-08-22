@@ -404,9 +404,9 @@ test('decodes type 27 image messages with url_list', () => {
   const decoded = decodeDouyinIMPush(frame);
   assert.equal(decoded.messageType, 27);
   assert.equal(decoded.text, '[图片]');
+  // p3/p9 are the same object on different CDN hosts — dedup keeps the first only.
   assert.deepEqual(decoded.images, [
     'https://p3-im.byteimg.com/img/example~tplv-obj.jpeg',
-    'https://p9-im.byteimg.com/img/example~tplv-obj.jpeg',
   ]);
 });
 
@@ -454,8 +454,8 @@ test('light interaction sticker with image url_list forwards images', () => {
   assert.deepEqual(decoded.images, ['https://p3-emoticon.byteimg.com/sticker/heart.png']);
 });
 
-test('type 110 empty body maps to pet-feed reminder', () => {
-  assert.equal(formatDouyinType110({}, {}), '[你还没有喂精灵～]');
+test('type 110 empty body maps to neutral card label', () => {
+  assert.equal(formatDouyinType110({}, {}), '[抖音卡片]');
   assert.equal(formatDouyinType110({}, { 'a:video_emoji_rec': '1' }), '[表情]');
   assert.equal(formatDouyinType110({ text: '自定义提示' }, {}), '[自定义提示]');
 });
@@ -482,7 +482,7 @@ test('decode type 110 empty content to pet-feed label', () => {
   ];
   const decoded = decodeDouyinIMPush(frame);
   assert.equal(decoded.messageType, 110);
-  assert.equal(decoded.text, '[你还没有喂精灵～]');
+  assert.equal(decoded.text, '[抖音卡片]');
 });
 
 test('sticker with static+animate only keeps one image and no caption', () => {
