@@ -768,7 +768,9 @@ function isDouyinControlCommand(messageType, content = {}, ext = {}) {
 // Type 110: client-rendered special cards / video-emoji.
 // - 2026-07-17: video_emoji_rec / use_default_emoji → no body text (show [表情])
 // - 2026-07-19 20:56:58 张若昀 private: empty content, UI 「你还没有喂精灵～」, push has zero text/hex
-//   → heuristic label so QQ is readable. If a future 110 carries real text, prefer that.
+// - 2026-08-22 14:41:55 锐锐 product-link card: ALSO empty 110 (len=0 preview="") —
+//   push carries no title/url, so empty 110 cards are indistinguishable from each
+//   other. Use a neutral label instead of guessing a specific client UI string.
 function formatDouyinType110(content = {}, ext = {}) {
   const fromContent =
     (typeof content?.text === 'string' && content.text.trim())
@@ -787,10 +789,10 @@ function formatDouyinType110(content = {}, ext = {}) {
     return '[表情]';
   }
 
-  // Empty body: pet-feed / interactive reminder cards render only on client.
+  // Empty body: client-rendered cards (pet reminders, product links, …).
   const keys = content && typeof content === 'object' ? Object.keys(content) : [];
   if (keys.length === 0) {
-    return '[你还没有喂精灵～]';
+    return '[抖音卡片]';
   }
   return '';
 }
@@ -1608,7 +1610,7 @@ function decodeMessage(raw, fallbackConversationId = '', fallbackConversationTyp
       5: '[表情]',
       17: '[语音]',
       27: '[图片]',
-      110: '[你还没有喂精灵～]',
+      110: '[抖音卡片]',
       50002: '[表情]',
       70002: '[表情]',
     })[messageType] || '[暂不支持的消息]';
