@@ -477,6 +477,8 @@ func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
 			if current.LiveID == "" {
 				current.LiveID = item.LiveID
 			}
+			current.WorksEnabled = current.WorksEnabled || !item.WorksDisabled
+			current.LiveEnabled = current.LiveEnabled || !item.LiveDisabled
 			seen[sec] = current
 		}
 	}

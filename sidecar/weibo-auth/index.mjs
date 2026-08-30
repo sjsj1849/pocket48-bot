@@ -1957,6 +1957,20 @@ async function fetchAwemePostsHTTP(secUserId, cookieHeader) {
   };
 }
 
+async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
+  const lookupPage = await getDouyinLookupPage();
+  const profileResponse = lookupPage.waitForResponse(
+    (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
+    { timeout: 15_000 },
+  ).catch(() => undefined);
+  await lookupPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 });
+  const response = await profileResponse;
+  const body = await response?.json().catch(() => undefined);
+  const profileLive = extractProfileLive(body);
+  const snapshot = await douyinPageSnapshot(lookupPage, secUserId).catch(() => ({}));
+  return { profileLive, snapshot };
+}
+
 async function scanDouyinAccount(account, cookieHeader = '') {
   const secUserId = String(account.secUserId || '').trim();
   if (!secUserId) return;
@@ -1965,27 +1979,35 @@ async function scanDouyinAccount(account, cookieHeader = '') {
 
   try {
     const cookie = cookieHeader || await getDouyinCookieHeader();
+    let liveState = { profileLive: { active: false, liveId: '', nickname: '' }, snapshot: {} };
+    if (account.liveEnabled !== false) {
+      try {
+        liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
+      } catch (error) {
+        emit('douyin_account_error', { secUserId, message: `抖音开播状态探测失败：${error.message}` });
+      }
+    }
+
+    if (account.worksEnabled === false) {
+      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
+      return;
+    }
+
     if (!cookie) {
       emit('douyin_account_error', { secUserId, message: '抖音 Cookie 为空，请先在面板登录' });
-      emit('douyin_account', { secUserId, profileUrl, nickname: account.name || '', liveId: account.liveId || '' });
+      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
 
     const result = await fetchAwemePostsHTTP(secUserId, cookie);
     if (result.posts.length > 0) {
-      // Success path: no browser profile navigation.
-      emitDouyinAccountState(account, secUserId, profileUrl, result.posts, { active: false, liveId: '', nickname: '' }, {});
+      emitDouyinAccountState(account, secUserId, profileUrl, result.posts, liveState.profileLive, liveState.snapshot);
       return;
     }
 
     // Soft failures: empty list with status 0 may mean private/no posts; treat as empty success.
     if (result.status_code === 0) {
-      emit('douyin_account', {
-        secUserId,
-        profileUrl,
-        nickname: account.name || '',
-        liveId: account.liveId || '',
-      });
+      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
 
@@ -2006,8 +2028,8 @@ async function scanDouyinAccount(account, cookieHeader = '') {
     emit('douyin_account', {
       secUserId,
       profileUrl,
-      nickname: account.name || '',
-      liveId: account.liveId || '',
+      nickname: liveState.profileLive.nickname || liveState.snapshot.nickname || account.name || '',
+      liveId: liveState.profileLive.liveId || liveState.snapshot.liveId || account.liveId || '',
     });
   } catch (error) {
     emit('douyin_account_error', { secUserId, message: error.message });
@@ -2066,6 +2088,7 @@ async function scanAllDouyinInner() {
       await scanDouyinAccount(account, cookie);
     }
   } finally {
+    await releaseDouyinLookupPage();
     douyinScanning = false;
   }
 }
