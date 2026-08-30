@@ -129,6 +129,57 @@ func TestDouyinSubscriptionUsesCachedNickname(t *testing.T) {
 	}
 }
 
+func TestDouyinSubscriptionAggregatesAndEditsMultipleGroups(t *testing.T) {
+	s, path := newDouyinAdminTestServer(t, func() error { return nil })
+	sec := "MS4wLjABAAAA_multi-group"
+	seed := `{"DOUYIN_ENABLED":true,"DOUYIN_SUBSCRIPTIONS":{"100":{"` + sec + `":{"sec_user_id":"` + sec + `","name":"多人群主播"}},"200":{"` + sec + `":{"sec_user_id":"` + sec + `","name":"多人群主播"}}}}`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := callDouyinSubscriptions(t, s, http.MethodGet, "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var response struct {
+		Subscriptions []douyinPanelSub `json:"subscriptions"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Subscriptions) != 1 || len(response.Subscriptions[0].GroupIDs) != 2 {
+		t.Fatalf("subscriptions=%#v", response.Subscriptions)
+	}
+
+	edited := callDouyinSubscriptions(t, s, http.MethodPut, `{"oldGroupIds":[100,200],"oldSecUserId":"`+sec+`","groupIds":[200,300],"secUserId":"`+sec+`","atAll":true,"worksEnabled":false,"liveEnabled":true}`)
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	raw, _ := os.ReadFile(path)
+	var config map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &config)
+	subs := loadDouyinSubs(config["DOUYIN_SUBSCRIPTIONS"])
+	if subs["100"] != nil || subs["200"][sec] == nil || subs["300"][sec] == nil {
+		t.Fatalf("unexpected group map=%#v", subs)
+	}
+	if !subs["200"][sec].AtAll || !subs["200"][sec].WorksDisabled || subs["200"][sec].LiveDisabled {
+		t.Fatalf("updated item=%#v", subs["200"][sec])
+	}
+}
+
+func TestDouyinSubscriptionRejectsCreatorIdentityChange(t *testing.T) {
+	s, path := newDouyinAdminTestServer(t, func() error { return nil })
+	oldSec := "MS4wLjABAAAA_original"
+	seed := `{"DOUYIN_SUBSCRIPTIONS":{"100":{"` + oldSec + `":{"sec_user_id":"` + oldSec + `"}}}}`
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response := callDouyinSubscriptions(t, s, http.MethodPut, `{"oldGroupIds":[100],"oldSecUserId":"`+oldSec+`","groupIds":[100],"secUserId":"MS4wLjABAAAA_replacement"}`)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "不能在编辑时修改") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestDouyinStoredSubscriptionEnabledStatus(t *testing.T) {
 	disabled := &douyinStoredSub{SecUserID: "sec", Disabled: true}
 	if got := douyinSubscriptionStatus("/tmp/config.json", disabled); got != "已停用" {

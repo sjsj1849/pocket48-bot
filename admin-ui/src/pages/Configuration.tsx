@@ -7,6 +7,7 @@ import { ErrorState } from '../App'
 type ConfigResponse = { groups: Record<string, ConfigField[]>; groupOrder: string[] }
 type SubItem = {
   groupId: number
+  groupIds?: number[]
   userId?: string
   secUserId?: string
   uid?: string
@@ -174,6 +175,7 @@ type ManagerProps = {
   showName?: boolean
   namePlaceholder?: string
   showMonitorKinds?: boolean
+  lockIdentityOnEdit?: boolean
   defaultGroup?: string
   labelOf: (item: SubItem) => string
   metaOf: (item: SubItem) => string
@@ -195,6 +197,7 @@ function SubscriptionManager({
   showName,
   namePlaceholder,
   showMonitorKinds,
+  lockIdentityOnEdit,
   defaultGroup = '',
   labelOf,
   metaOf,
@@ -285,7 +288,15 @@ function SubscriptionManager({
                 <div className="sub-item editing" key={key}>
                   <div className="sub-edit-grid">
                     <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="QQ 群号" value={editGroup} onChange={(e) => setEditGroup(e.target.value.replace(/\D/g, ''))} />
-                    <input type={roomMode ? 'number' : 'text'} placeholder={targetPlaceholder} value={editTarget} onChange={(e) => setEditTarget(e.target.value)} />
+                    <input
+                      type={roomMode ? 'number' : 'text'}
+                      placeholder={targetPlaceholder}
+                      value={editTarget}
+                      readOnly={lockIdentityOnEdit}
+                      aria-label={lockIdentityOnEdit ? '绑定 ID（不可修改）' : undefined}
+                      title={lockIdentityOnEdit ? '绑定 ID 不可修改；如需更换账号，请删除后重新添加' : undefined}
+                      onChange={(e) => setEditTarget(e.target.value)}
+                    />
                     {showName ? <input type="text" placeholder={namePlaceholder || '昵称'} value={editName} onChange={(e) => setEditName(e.target.value)} /> : null}
                     {showMonitorKinds ? (
                       <div className="monitor-kind-options">
@@ -344,6 +355,166 @@ function SubscriptionManager({
         ) : (
           <p className="muted">暂无订阅。在上方填写后添加；首次扫描通常只建基线、不刷历史。</p>
         )}
+      </div>
+    </div>
+  )
+}
+
+function parseGroupIDs(value: string): number[] {
+  return [...new Set((value.match(/\d+/g) || []).map(Number).filter((id) => id > 0))]
+}
+
+function DouyinSubscriptionManager({
+  items,
+  saving,
+  defaultGroup,
+  onAdd,
+  onEdit,
+  onRemove,
+}: {
+  items: SubItem[]
+  saving: boolean
+  defaultGroup: string
+  onAdd: (groupIds: number[], target: string, atAll: boolean, name: string, worksEnabled: boolean, liveEnabled: boolean) => Promise<void>
+  onEdit: (item: SubItem, groupIds: number[], atAll: boolean, worksEnabled: boolean, liveEnabled: boolean) => Promise<void>
+  onRemove: (item: SubItem) => Promise<void>
+}) {
+  const memoryKey = 'p48-subscription-group:抖音创作者'
+  const [groups, setGroups] = useState(() => {
+    try { return window.localStorage.getItem(memoryKey) || defaultGroup }
+    catch { return defaultGroup }
+  })
+  const [target, setTarget] = useState('')
+  const [name, setName] = useState('')
+  const [atAll, setAtAll] = useState(false)
+  const [worksEnabled, setWorksEnabled] = useState(true)
+  const [liveEnabled, setLiveEnabled] = useState(true)
+  const [editingID, setEditingID] = useState('')
+  const [editGroups, setEditGroups] = useState('')
+  const [editAtAll, setEditAtAll] = useState(false)
+  const [editWorksEnabled, setEditWorksEnabled] = useState(true)
+  const [editLiveEnabled, setEditLiveEnabled] = useState(true)
+
+  useEffect(() => {
+    if (defaultGroup && !groups) setGroups(defaultGroup)
+  }, [defaultGroup, groups])
+
+  function updateGroups(value: string) {
+    setGroups(value)
+    try { window.localStorage.setItem(memoryKey, value) } catch { /* storage can be disabled */ }
+  }
+
+  function startEdit(item: SubItem) {
+    setEditingID(item.secUserId || '')
+    setEditGroups((item.groupIds?.length ? item.groupIds : [item.groupId]).join(', '))
+    setEditAtAll(Boolean(item.atAll))
+    setEditWorksEnabled(item.worksEnabled !== false)
+    setEditLiveEnabled(item.liveEnabled !== false)
+  }
+
+  const addGroupIDs = parseGroupIDs(groups)
+
+  return (
+    <div className="sub-manager douyin-manager">
+      <div className="sub-manager-title">
+        <strong>创作者订阅（作品/开播）</strong>
+        <p>主页链接只在新增时用于解析。添加后以 User ID 绑定，可调整转发群、@全体以及作品/直播监控。</p>
+      </div>
+      <div className="douyin-add">
+        <input
+          type="text"
+          inputMode="numeric"
+          placeholder="目标 QQ 群号，多个用逗号分隔"
+          value={groups}
+          onChange={(event) => updateGroups(event.target.value)}
+        />
+        <input type="text" placeholder="抖音主页链接或 sec_user_id" value={target} onChange={(event) => setTarget(event.target.value)} />
+        <input type="text" placeholder="昵称或备注（可选）" value={name} onChange={(event) => setName(event.target.value)} />
+        <div className="monitor-kind-options">
+          <label><input type="checkbox" checked={worksEnabled} onChange={(event) => setWorksEnabled(event.target.checked)} /> 作品</label>
+          <label><input type="checkbox" checked={liveEnabled} onChange={(event) => setLiveEnabled(event.target.checked)} /> 直播</label>
+          <label><input type="checkbox" checked={atAll} onChange={(event) => setAtAll(event.target.checked)} /> @全体</label>
+        </div>
+        <button
+          className="secondary-button"
+          disabled={saving || addGroupIDs.length === 0 || !target.trim()}
+          onClick={() => void onAdd(addGroupIDs, target, atAll, name, worksEnabled, liveEnabled).then(() => {
+            setTarget('')
+            setName('')
+            setAtAll(false)
+          })}
+        >
+          <Plus size={16} />
+          添加
+        </button>
+      </div>
+      <div className="douyin-list">
+        {items.length ? items.map((item) => {
+          const userID = item.secUserId || ''
+          const groupIDs = item.groupIds?.length ? item.groupIds : [item.groupId]
+          const isEditing = editingID === userID
+          if (isEditing) {
+            const nextGroupIDs = parseGroupIDs(editGroups)
+            return (
+              <article className="douyin-card editing" key={userID}>
+                <div className="douyin-edit-grid">
+                  <label>
+                    <span>绑定 User ID</span>
+                    <input value={userID} readOnly aria-label="绑定 User ID（不可修改）" title="User ID 不可修改；如需更换账号，请删除后重新添加" />
+                  </label>
+                  <label>
+                    <span>转发到 QQ 群（可多个）</span>
+                    <input value={editGroups} inputMode="numeric" onChange={(event) => setEditGroups(event.target.value)} placeholder="多个群号用逗号分隔" />
+                  </label>
+                </div>
+                <div className="douyin-edit-options">
+                  <label><input type="checkbox" checked={editWorksEnabled} onChange={(event) => setEditWorksEnabled(event.target.checked)} /> 作品监控</label>
+                  <label><input type="checkbox" checked={editLiveEnabled} onChange={(event) => setEditLiveEnabled(event.target.checked)} /> 直播监控</label>
+                  <label><input type="checkbox" checked={editAtAll} onChange={(event) => setEditAtAll(event.target.checked)} /> @全体成员</label>
+                </div>
+                <div className="sub-item-actions">
+                  <button
+                    className="secondary-button"
+                    disabled={saving || nextGroupIDs.length === 0}
+                    onClick={() => void onEdit(item, nextGroupIDs, editAtAll, editWorksEnabled, editLiveEnabled).then(() => setEditingID(''))}
+                  >
+                    <Check size={15} /> 保存
+                  </button>
+                  <button className="icon-button" disabled={saving} aria-label="取消编辑" onClick={() => setEditingID('')}>
+                    <X size={16} />
+                  </button>
+                </div>
+              </article>
+            )
+          }
+          return (
+            <article className="douyin-card" key={userID}>
+              <div className="douyin-card-main">
+                <div className="douyin-card-heading">
+                  <strong>{item.name || '昵称解析中…'}</strong>
+                  <div className="subscription-badges">
+                    {item.worksEnabled !== false ? <span>作品</span> : null}
+                    {item.liveEnabled !== false ? <span>直播</span> : null}
+                    {item.atAll ? <span className="attention">@全体</span> : null}
+                    {item.enabled === false ? <span className="off">已停用</span> : null}
+                    {item.worksEnabled === false && item.liveEnabled === false ? <span className="off">监控已关闭</span> : null}
+                  </div>
+                </div>
+                <div className="douyin-identity" title={userID}><span>User ID</span><code>{userID}</code></div>
+                <div className="douyin-groups"><span>转发群</span>{groupIDs.map((id) => <b key={id}>{id}</b>)}</div>
+                {item.status ? <p>{item.status}</p> : null}
+              </div>
+              <div className="sub-item-actions">
+                <button className="icon-button" disabled={saving} aria-label={`编辑 ${item.name || userID}`} onClick={() => startEdit(item)}>
+                  <Pencil size={15} />
+                </button>
+                <button className="icon-button danger" disabled={saving} aria-label={`删除 ${item.name || userID}`} onClick={() => void onRemove(item)}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </article>
+          )
+        }) : <p className="muted">暂无订阅。在上方填写后添加；首次扫描通常只建基线、不刷历史。</p>}
       </div>
     </div>
   )
@@ -918,6 +1089,7 @@ export function Configuration() {
                   items={weibo}
                   saving={subSaving}
                   showName
+                  lockIdentityOnEdit
                   namePlaceholder="昵称（可选，便于识别）"
                   targetPlaceholder="微博 UID（纯数字）"
                   labelOf={(item) => (item.name ? `${item.name}` : `UID ${item.uid}`)}
@@ -939,7 +1111,7 @@ export function Configuration() {
                           oldGroupId: item.groupId,
                           oldUid: item.uid,
                           groupId: Number(groupId),
-                          uid: target.trim(),
+                          uid: item.uid || target.trim(),
                           atAll,
                           name: name?.trim() || undefined,
                         }),
@@ -1018,39 +1190,29 @@ export function Configuration() {
             {active === '抖音' && activePlatformEnabled ? (
               <>
                 <p className="muted compact">创作者订阅与群聊 IM 是两套配置；登录扫码见「浏览器」，细则见「说明」。</p>
-                <SubscriptionManager
-                  title="创作者订阅（作品/开播）"
-                  hint="每位创作者可独立选择作品、直播或两者；昵称会由浏览器自动解析，也可手动填写备注。"
+                <DouyinSubscriptionManager
                   items={douyin}
                   saving={subSaving}
                   defaultGroup={boundGroup}
-                  showName
-                  showMonitorKinds
-                  namePlaceholder="昵称或备注（可选，会自动解析）"
-                  targetPlaceholder="抖音主页链接或 sec_user_id"
-                  labelOf={(item) => item.name || '昵称解析中…'}
-                  metaOf={(item) => `群 ${item.groupId} · ${item.secUserId || ''}${item.profileUrl ? ` · ${item.profileUrl}` : ''}${item.atAll ? ' · @全体' : ''} · ${item.enabled === false ? '已停用' : '已启用'} · ${item.worksEnabled === false ? '作品关' : '作品开'} · ${item.liveEnabled === false ? '直播关' : '直播开'}${item.liveId ? ` · web_rid ${item.liveId}` : ''}${item.status ? ` · ${item.status}` : ''} · 来源 ${item.source || 'config'}`}
-                  targetOf={(item) => item.secUserId || ''}
-                  onAdd={(groupId, target, atAll, name, worksEnabled, liveEnabled) =>
+                  onAdd={(groupIds, target, atAll, name, worksEnabled, liveEnabled) =>
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'POST',
-                        body: JSON.stringify({ groupId: Number(groupId), target: target.trim(), name: name?.trim() || undefined, atAll, enabled: true, worksEnabled, liveEnabled }),
+                        body: JSON.stringify({ groupIds, target: target.trim(), name: name.trim() || undefined, atAll, enabled: true, worksEnabled, liveEnabled }),
                       })
                     })
                   }
-                  onEdit={(item, groupId, target, atAll, name, worksEnabled, liveEnabled) =>
+                  onEdit={(item, groupIds, atAll, worksEnabled, liveEnabled) =>
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'PUT',
                         body: JSON.stringify({
-                          oldGroupId: item.groupId,
+                          oldGroupIds: item.groupIds?.length ? item.groupIds : [item.groupId],
                           oldSecUserId: item.secUserId,
-                          groupId: Number(groupId),
-                          target: target.trim(),
-                          name: name?.trim() || undefined,
+                          groupIds,
+                          secUserId: item.secUserId,
                           atAll,
-                          enabled: item.enabled !== false,
+                          enabled: true,
                           worksEnabled,
                           liveEnabled,
                         }),
@@ -1061,24 +1223,7 @@ export function Configuration() {
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'DELETE',
-                        body: JSON.stringify({ groupId: item.groupId, secUserId: item.secUserId }),
-                      })
-                    })
-                  }
-                  onToggle={(item, enabled) =>
-                    withSub(async () => {
-                      await api('douyin/subscriptions', {
-                        method: 'PUT',
-                        body: JSON.stringify({
-                          oldGroupId: item.groupId,
-                          oldSecUserId: item.secUserId,
-                          groupId: item.groupId,
-                          secUserId: item.secUserId,
-                          atAll: Boolean(item.atAll),
-                          enabled,
-                          worksEnabled: item.worksEnabled !== false,
-                          liveEnabled: item.liveEnabled !== false,
-                        }),
+                        body: JSON.stringify({ groupIds: item.groupIds?.length ? item.groupIds : [item.groupId], secUserId: item.secUserId }),
                       })
                     })
                   }
@@ -1096,6 +1241,7 @@ export function Configuration() {
                   items={xhs}
                   saving={subSaving}
                   targetPlaceholder="xhslink 或个人主页链接"
+                  lockIdentityOnEdit
                   labelOf={(item) => item.name || '待获取昵称'}
                   metaOf={(item) => `群 ${item.groupId} · ${item.userId || ''}${item.atAll ? ' · @全体' : ''}${item.liveActive ? ' · 直播中' : ''}`}
                   targetOf={(item) => item.userId || item.profileUrl || ''}
@@ -1115,7 +1261,7 @@ export function Configuration() {
                           oldGroupId: item.groupId,
                           oldUserId: item.userId,
                           groupId: Number(groupId),
-                          target: target.trim(),
+                          userId: item.userId || target.trim(),
                           atAll,
                         }),
                       })

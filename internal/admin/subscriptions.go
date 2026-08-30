@@ -272,6 +272,10 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		if oldUID == "" {
 			oldUID = body.UID
 		}
+		if body.UID != "" && body.UID != oldUID {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "微博 UID 是账号身份，不能在编辑时修改；请删除后重新添加"})
+			return
+		}
 		oldG := body.OldGroupID
 		// If oldUID is set and oldG is 0, it's legit (group 0 items exist, e.g. from QQ commands without specifying group).
 		// Only use new GroupID as old when oldG wasn't literally sent (both 0 and missing).
@@ -349,20 +353,22 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 // --- 抖音创作者订阅 ---
 
 type douyinPanelSub struct {
-	GroupID      int64  `json:"groupId"`
-	SecUserID    string `json:"secUserId,omitempty"`
-	ProfileURL   string `json:"profileUrl,omitempty"`
-	Target       string `json:"target,omitempty"`
-	Name         string `json:"name,omitempty"`
-	AtAll        bool   `json:"atAll"`
-	LiveID       string `json:"liveId,omitempty"`
-	OldGroupID   int64  `json:"oldGroupId,omitempty"`
-	OldSec       string `json:"oldSecUserId,omitempty"`
-	Enabled      *bool  `json:"enabled,omitempty"`
-	WorksEnabled *bool  `json:"worksEnabled,omitempty"`
-	LiveEnabled  *bool  `json:"liveEnabled,omitempty"`
-	Source       string `json:"source,omitempty"`
-	Status       string `json:"status,omitempty"`
+	GroupID      int64   `json:"groupId"`
+	GroupIDs     []int64 `json:"groupIds,omitempty"`
+	SecUserID    string  `json:"secUserId,omitempty"`
+	ProfileURL   string  `json:"profileUrl,omitempty"`
+	Target       string  `json:"target,omitempty"`
+	Name         string  `json:"name,omitempty"`
+	AtAll        bool    `json:"atAll"`
+	LiveID       string  `json:"liveId,omitempty"`
+	OldGroupID   int64   `json:"oldGroupId,omitempty"`
+	OldGroupIDs  []int64 `json:"oldGroupIds,omitempty"`
+	OldSec       string  `json:"oldSecUserId,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	WorksEnabled *bool   `json:"worksEnabled,omitempty"`
+	LiveEnabled  *bool   `json:"liveEnabled,omitempty"`
+	Source       string  `json:"source,omitempty"`
+	Status       string  `json:"status,omitempty"`
 }
 
 type douyinStoredSub struct {
@@ -406,7 +412,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 	switch r.Method {
 	case http.MethodGet:
 		cachedNames := loadDouyinCachedNames(raw, s.opts.ConfigPath)
-		result := make([]douyinPanelSub, 0)
+		byCreator := make(map[string]*douyinPanelSub)
 		for groupText, group := range subs {
 			gid, _ := strconv.ParseInt(groupText, 10, 64)
 			for key, item := range group {
@@ -421,19 +427,41 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 				if strings.TrimSpace(name) == "" {
 					name = cachedNames[id]
 				}
-				result = append(result, douyinPanelSub{
-					GroupID: gid, SecUserID: id, ProfileURL: item.ProfileURL,
-					Name: name, AtAll: item.AtAll, LiveID: item.LiveID,
-					Enabled: boolPointer(!item.Disabled), WorksEnabled: boolPointer(!item.WorksDisabled), LiveEnabled: boolPointer(!item.LiveDisabled),
-					Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
-				})
+				panel := byCreator[id]
+				if panel == nil {
+					panel = &douyinPanelSub{
+						GroupID: gid, SecUserID: id, ProfileURL: item.ProfileURL,
+						Name: name, AtAll: item.AtAll, LiveID: item.LiveID,
+						Enabled: boolPointer(!item.Disabled), WorksEnabled: boolPointer(!item.WorksDisabled), LiveEnabled: boolPointer(!item.LiveDisabled),
+						Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
+					}
+					byCreator[id] = panel
+				} else {
+					panel.AtAll = panel.AtAll || item.AtAll
+					*panel.Enabled = *panel.Enabled && !item.Disabled
+					*panel.WorksEnabled = *panel.WorksEnabled && !item.WorksDisabled
+					*panel.LiveEnabled = *panel.LiveEnabled && !item.LiveDisabled
+					if panel.Name == "" {
+						panel.Name = name
+					}
+					if panel.LiveID == "" {
+						panel.LiveID = item.LiveID
+					}
+				}
+				panel.GroupIDs = append(panel.GroupIDs, gid)
 			}
 		}
+		result := make([]douyinPanelSub, 0, len(byCreator))
+		for _, panel := range byCreator {
+			sort.Slice(panel.GroupIDs, func(i, j int) bool { return panel.GroupIDs[i] < panel.GroupIDs[j] })
+			panel.GroupID = panel.GroupIDs[0]
+			result = append(result, *panel)
+		}
 		sort.Slice(result, func(i, j int) bool {
-			if result[i].GroupID == result[j].GroupID {
+			if result[i].Name == result[j].Name {
 				return result[i].SecUserID < result[j].SecUserID
 			}
-			return result[i].GroupID < result[j].GroupID
+			return result[i].Name < result[j].Name
 		})
 		writeJSON(w, http.StatusOK, map[string]any{"subscriptions": result})
 	case http.MethodPost:
@@ -449,7 +477,8 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		if resolveInput == "" {
 			resolveInput = strings.TrimSpace(body.Target)
 		}
-		if body.GroupID <= 0 || resolveInput == "" {
+		groupIDs := normalizeDouyinGroupIDs(body.GroupIDs, body.GroupID)
+		if len(groupIDs) == 0 || resolveInput == "" {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写 QQ 群号，以及抖音主页链接或 sec_user_id"})
 			return
 		}
@@ -462,32 +491,34 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusBadRequest, apiError{Error: msg})
 			return
 		}
-		gk := strconv.FormatInt(body.GroupID, 10)
-		if subs[gk] == nil {
-			subs[gk] = map[string]*douyinStoredSub{}
+		for _, groupID := range groupIDs {
+			gk := strconv.FormatInt(groupID, 10)
+			if subs[gk] == nil {
+				subs[gk] = map[string]*douyinStoredSub{}
+			}
+			item := subs[gk][sec]
+			if item == nil {
+				item = &douyinStoredSub{SecUserID: sec}
+			}
+			item.SecUserID = sec
+			item.ProfileURL = profile
+			item.AtAll = body.AtAll
+			item.Auto = false
+			if body.Enabled != nil {
+				item.Disabled = !*body.Enabled
+			}
+			if body.WorksEnabled != nil {
+				item.WorksDisabled = !*body.WorksEnabled
+			}
+			if body.LiveEnabled != nil {
+				item.LiveDisabled = !*body.LiveEnabled
+			}
+			if n := strings.TrimSpace(body.Name); n != "" {
+				item.Name = n
+				item.NameManual = true
+			}
+			subs[gk][sec] = item
 		}
-		item := subs[gk][sec]
-		if item == nil {
-			item = &douyinStoredSub{SecUserID: sec}
-		}
-		item.SecUserID = sec
-		item.ProfileURL = profile
-		item.AtAll = body.AtAll
-		item.Auto = false
-		if body.Enabled != nil {
-			item.Disabled = !*body.Enabled
-		}
-		if body.WorksEnabled != nil {
-			item.WorksDisabled = !*body.WorksEnabled
-		}
-		if body.LiveEnabled != nil {
-			item.LiveDisabled = !*body.LiveEnabled
-		}
-		if n := strings.TrimSpace(body.Name); n != "" {
-			item.Name = n
-			item.NameManual = true
-		}
-		subs[gk][sec] = item
 		if saveErr := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); saveErr != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: saveErr.Error()})
 			return
@@ -503,85 +534,60 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		if oldSec == "" {
 			oldSec = strings.TrimSpace(body.SecUserID)
 		}
-		oldG := body.OldGroupID
-		if oldG <= 0 {
-			oldG = body.GroupID
+		groupIDs := normalizeDouyinGroupIDs(body.GroupIDs, body.GroupID)
+		oldGroupIDs := normalizeDouyinGroupIDs(body.OldGroupIDs, body.OldGroupID)
+		if len(oldGroupIDs) == 0 {
+			oldGroupIDs = douyinGroupsForCreator(subs, oldSec)
 		}
-		if body.GroupID <= 0 || oldSec == "" || oldG <= 0 {
+		if len(groupIDs) == 0 || oldSec == "" || len(oldGroupIDs) == 0 {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 sec_user_id"})
 			return
 		}
-		// resolve new sec if target provided, else keep old
-		newSec := oldSec
-		newProfile := ""
-		resolveInput := strings.TrimSpace(body.Target)
-		if resolveInput == "" {
-			resolveInput = strings.TrimSpace(body.ProfileURL)
+		if candidate := strings.TrimSpace(body.SecUserID); candidate != "" && candidate != oldSec {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "User ID 是创作者身份，不能在编辑时修改；请删除后重新添加"})
+			return
 		}
-		if resolveInput == "" {
-			resolveInput = strings.TrimSpace(body.SecUserID)
-		}
-		if resolveInput != "" && resolveInput != oldSec {
-			sec, profile, err := logic.ResolveDouyinTarget(r.Context(), resolveInput)
-			if err != nil || sec == "" {
-				msg := "无法解析抖音目标"
-				if err != nil {
-					msg = err.Error()
-				}
-				writeJSON(w, http.StatusBadRequest, apiError{Error: msg})
-				return
-			}
-			newSec = sec
-			newProfile = profile
-		}
-		ogk := strconv.FormatInt(oldG, 10)
 		var preserved *douyinStoredSub
-		if g := subs[ogk]; g != nil {
-			if old := g[oldSec]; old != nil {
-				cp := *old
-				preserved = &cp
+		for _, oldGroupID := range oldGroupIDs {
+			ogk := strconv.FormatInt(oldGroupID, 10)
+			if g := subs[ogk]; g != nil {
+				if old := g[oldSec]; old != nil && preserved == nil {
+					cp := *old
+					preserved = &cp
+				}
+				delete(g, oldSec)
+				if len(g) == 0 {
+					delete(subs, ogk)
+				}
 			}
-			delete(g, oldSec)
-			if len(g) == 0 {
-				delete(subs, ogk)
+		}
+		if preserved == nil {
+			writeJSON(w, http.StatusNotFound, apiError{Error: "未找到要编辑的抖音创作者订阅"})
+			return
+		}
+		for _, groupID := range groupIDs {
+			ngk := strconv.FormatInt(groupID, 10)
+			if subs[ngk] == nil {
+				subs[ngk] = map[string]*douyinStoredSub{}
 			}
+			item := *preserved
+			item.SecUserID = oldSec
+			item.AtAll = body.AtAll
+			if body.Enabled != nil {
+				item.Disabled = !*body.Enabled
+			}
+			if body.WorksEnabled != nil {
+				item.WorksDisabled = !*body.WorksEnabled
+			}
+			if body.LiveEnabled != nil {
+				item.LiveDisabled = !*body.LiveEnabled
+			}
+			if n := strings.TrimSpace(body.Name); n != "" {
+				item.Name = n
+				item.NameManual = true
+			}
+			subs[ngk][oldSec] = &item
 		}
-		ngk := strconv.FormatInt(body.GroupID, 10)
-		if subs[ngk] == nil {
-			subs[ngk] = map[string]*douyinStoredSub{}
-		}
-		item := &douyinStoredSub{SecUserID: newSec}
-		if existing := subs[ngk][newSec]; existing != nil {
-			*item = *existing
-			item.SecUserID = newSec
-		} else if preserved != nil && newSec == oldSec {
-			*item = *preserved
-			item.SecUserID = newSec
-		} else if preserved != nil {
-			// Changing creators must not carry the old creator's live ID or
-			// work cursor into the new subscription.
-			item.Disabled = preserved.Disabled
-			item.WorksDisabled = preserved.WorksDisabled
-			item.LiveDisabled = preserved.LiveDisabled
-		}
-		if newProfile != "" {
-			item.ProfileURL = newProfile
-		}
-		item.AtAll = body.AtAll
-		if body.Enabled != nil {
-			item.Disabled = !*body.Enabled
-		}
-		if body.WorksEnabled != nil {
-			item.WorksDisabled = !*body.WorksEnabled
-		}
-		if body.LiveEnabled != nil {
-			item.LiveDisabled = !*body.LiveEnabled
-		}
-		if n := strings.TrimSpace(body.Name); n != "" {
-			item.Name = n
-			item.NameManual = true
-		}
-		subs[ngk][newSec] = item
 		if err := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
@@ -593,11 +599,18 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		gk := strconv.FormatInt(body.GroupID, 10)
-		if group := subs[gk]; group != nil {
-			delete(group, strings.TrimSpace(body.SecUserID))
-			if len(group) == 0 {
-				delete(subs, gk)
+		sec := strings.TrimSpace(body.SecUserID)
+		groupIDs := normalizeDouyinGroupIDs(body.GroupIDs, body.GroupID)
+		if len(groupIDs) == 0 {
+			groupIDs = douyinGroupsForCreator(subs, sec)
+		}
+		for _, groupID := range groupIDs {
+			gk := strconv.FormatInt(groupID, 10)
+			if group := subs[gk]; group != nil {
+				delete(group, sec)
+				if len(group) == 0 {
+					delete(subs, gk)
+				}
 			}
 		}
 		if err := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
@@ -608,6 +621,39 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func normalizeDouyinGroupIDs(groupIDs []int64, fallback int64) []int64 {
+	seen := make(map[int64]struct{}, len(groupIDs)+1)
+	result := make([]int64, 0, len(groupIDs)+1)
+	for _, groupID := range groupIDs {
+		if groupID <= 0 {
+			continue
+		}
+		if _, exists := seen[groupID]; exists {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		result = append(result, groupID)
+	}
+	if len(result) == 0 && fallback > 0 {
+		result = append(result, fallback)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func douyinGroupsForCreator(subs map[string]map[string]*douyinStoredSub, secUserID string) []int64 {
+	result := make([]int64, 0)
+	for groupText, group := range subs {
+		if group[secUserID] == nil {
+			continue
+		}
+		if groupID, err := strconv.ParseInt(groupText, 10, 64); err == nil && groupID > 0 {
+			result = append(result, groupID)
+		}
+	}
+	return normalizeDouyinGroupIDs(result, 0)
 }
 
 func loadDouyinCachedNames(raw map[string]json.RawMessage, configPath string) map[string]string {

@@ -60,8 +60,8 @@ var configFields = map[string]configField{
 	"NIM_ENABLED":                    {"NIM_ENABLED", "口袋48", "NIM 实时消息（IM）", "通过 NIM SDK 获取实时消息，比轮询快", kindBoolean, false, false, nil},
 	"NIM_ROOM_MESSAGE_ENABLED":       {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到 QQ", kindBoolean, false, false, nil},
 	"NIM_ROOM_MESSAGE_POLL_FALLBACK": {"NIM_ROOM_MESSAGE_POLL_FALLBACK", "口袋48", "NIM 轮询兜底", "NIM 连接异常时自动切换至轮询模式", kindBoolean, false, false, nil},
-	"NIM_LIVE_DANMAKU_ENABLED":       {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发直播弹幕与进出事件", kindBoolean, false, false, nil},
-	"NIM_VIEWER_EVENT_ENABLED":       {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "NIM 进出事件", "粉丝进入/离开直播间事件", kindBoolean, false, false, nil},
+	"NIM_LIVE_DANMAKU_ENABLED":       {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发口袋48直播间弹幕", kindBoolean, false, false, nil},
+	"NIM_VIEWER_EVENT_ENABLED":       {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "成员串门提醒", "仅转发已识别成员进入/离开其他成员直播间，并在可计算时附观看时长；普通粉丝会被过滤", kindBoolean, false, false, nil},
 	// 微博
 	"WEIBO_BROWSER_AUTH_ENABLED":    {"WEIBO_BROWSER_AUTH_ENABLED", "微博", "启用浏览器侧卡登录", "开启后用面板「浏览器」页扫码，自动维护微博/抖音/小红书登录态（Cookie）。推荐；比手贴 Cookie 稳", kindBoolean, false, false, nil},
 	"WEIBO_BROWSER_REFRESH_MINUTES": {"WEIBO_BROWSER_REFRESH_MINUTES", "微博", "Cookie 刷新周期", "自动刷新间隔（分钟，最低 5）", kindInteger, false, false, nil},

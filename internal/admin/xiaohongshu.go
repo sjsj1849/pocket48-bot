@@ -16,9 +16,9 @@ var xiaohongshuPanelProfilePattern = regexp.MustCompile(`(?i)/user/profile/([a-z
 var xiaohongshuPanelUserIDPattern = regexp.MustCompile(`^[a-zA-Z0-9]{16,64}$`)
 
 type xiaohongshuPanelSubscription struct {
-	GroupID         int64  `json:"groupId,omitempty"`
-	UserID          string `json:"userId"`
-	ProfileURL      string `json:"profileUrl,omitempty"`
+	GroupID    int64  `json:"groupId,omitempty"`
+	UserID     string `json:"userId"`
+	ProfileURL string `json:"profileUrl,omitempty"`
 	// Target is the raw panel input: internal user_id, full profile URL, or xhslink short URL.
 	Target          string `json:"target,omitempty"`
 	Name            string `json:"name,omitempty"`
@@ -166,22 +166,13 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 user_id"})
 			return
 		}
-		newUser := oldUser
-		newProfile := ""
-		resolveInput := strings.TrimSpace(body.Target)
-		if resolveInput == "" {
-			resolveInput = strings.TrimSpace(body.ProfileURL)
+		if candidate := strings.TrimSpace(body.UserID); candidate != "" && candidate != oldUser {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "User ID 是创作者身份，不能在编辑时修改；请删除后重新添加"})
+			return
 		}
-		if resolveInput == "" {
-			resolveInput = strings.TrimSpace(body.UserID)
-		}
-		if resolveInput != "" && resolveInput != oldUser {
-			uid, profile, err := logic.ResolveXiaohongshuTarget(r.Context(), resolveInput)
-			if err == nil && xiaohongshuPanelUserIDPattern.MatchString(uid) {
-				newUser, newProfile = uid, profile
-			} else if match := xiaohongshuPanelProfilePattern.FindStringSubmatch(resolveInput); len(match) == 2 {
-				newUser, newProfile = match[1], resolveInput
-			}
+		if strings.TrimSpace(body.Target) != "" || strings.TrimSpace(body.ProfileURL) != "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "主页链接只用于新增订阅，不能在编辑时更换绑定账号"})
+			return
 		}
 		ogk := strconv.FormatInt(oldG, 10)
 		var preserved *xiaohongshuStoredSubscription
@@ -199,19 +190,16 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 		if subs[ngk] == nil {
 			subs[ngk] = make(map[string]*xiaohongshuStoredSubscription)
 		}
-		item := &xiaohongshuStoredSubscription{UserID: newUser}
+		item := &xiaohongshuStoredSubscription{UserID: oldUser}
 		if preserved != nil {
 			*item = *preserved
-			item.UserID = newUser
-		}
-		if newProfile != "" {
-			item.ProfileURL = newProfile
+			item.UserID = oldUser
 		}
 		item.AtAll = body.AtAll
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		}
-		subs[ngk][newUser] = item
+		subs[ngk][oldUser] = item
 		if err := s.writeConfigAndReloadBot(map[string]any{"XIAOHONGSHU_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
