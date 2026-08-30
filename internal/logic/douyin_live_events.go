@@ -101,6 +101,9 @@ func douyinString(value interface{}) string {
 	case json.Number:
 		return v.String()
 	default:
+		if number := numberAsInt64(value); number > 0 {
+			return strconv.FormatInt(number, 10)
+		}
 		return ""
 	}
 }

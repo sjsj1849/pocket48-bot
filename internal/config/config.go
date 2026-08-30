@@ -111,12 +111,15 @@ type DouyinConfig struct {
 	SecUserID     string `json:"sec_user_id"`
 	ProfileURL    string `json:"profile_url,omitempty"`
 	Name          string `json:"name,omitempty"`
+	NameManual    bool   `json:"name_manual,omitempty"`
 	AtAll         bool   `json:"at_all"`
 	LastAwemeID   string `json:"last_aweme_id,omitempty"`
 	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
 	LiveID        string `json:"live_id,omitempty"`
 	Auto          bool   `json:"auto,omitempty"`
 	Disabled      bool   `json:"disabled,omitempty"`
+	WorksDisabled bool   `json:"works_disabled,omitempty"`
+	LiveDisabled  bool   `json:"live_disabled,omitempty"`
 }
 
 // XiaohongshuConfig stores a creator subscription and its per-group cursor.

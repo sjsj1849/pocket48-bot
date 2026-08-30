@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,36 @@ func TestExtractDouyinOnline(t *testing.T) {
 	}
 }
 
+func TestDouyinStatsUseOnlyExplicitPaths(t *testing.T) {
+	body := map[string]interface{}{
+		"payload": map[string]interface{}{
+			"onlineUserCount": float64(50),
+			"audienceCount":   float64(100),
+			"unrelated": map[string]interface{}{
+				"userCount":     float64(9999),
+				"audienceCount": float64(8888),
+			},
+		},
+	}
+	if got := extractDouyinCurrentOnline(body); got != 50 {
+		t.Fatalf("current online=%d", got)
+	}
+	if got := extractDouyinTotalAudience(body); got != 100 {
+		t.Fatalf("total audience=%d", got)
+	}
+	onlyUnrelated := map[string]interface{}{"payload": map[string]interface{}{"unrelated": map[string]interface{}{"userCount": float64(9999)}}}
+	if got := extractDouyinCurrentOnline(onlyUnrelated); got != 0 {
+		t.Fatalf("recursive unrelated userCount was accepted: %d", got)
+	}
+}
+
+func TestExtractDouyinRoomIDUsesExplicitPaths(t *testing.T) {
+	body := map[string]interface{}{"payload": map[string]interface{}{"room": map[string]interface{}{"id": "real-room-id"}}}
+	if got := extractDouyinRoomID(body); got != "real-room-id" {
+		t.Fatalf("room id=%q", got)
+	}
+}
+
 func newDouyinLiveTestMonitor(t *testing.T) *DouyinMonitor {
 	t.Helper()
 	return &DouyinMonitor{
@@ -52,28 +83,57 @@ func newDouyinLiveTestMonitor(t *testing.T) *DouyinMonitor {
 		liveCancels:     make(map[string]context.CancelFunc),
 		livePersistedAt: make(map[string]time.Time),
 		liveSessionDir:  t.TempDir(),
+		enqueueGroup:    func(int64, interface{}) bool { return true },
+	}
+}
+
+func addDouyinLiveTestTargets(m *DouyinMonitor, liveID string, groups ...int64) {
+	for _, groupID := range groups {
+		if m.cfg.DouyinSubscriptions[groupID] == nil {
+			m.cfg.DouyinSubscriptions[groupID] = make(map[string]*config.DouyinConfig)
+		}
+		m.cfg.DouyinSubscriptions[groupID]["creator"] = &config.DouyinConfig{SecUserID: "creator", Name: "主播", LiveID: liveID, AtAll: groupID%2 == 0}
 	}
 }
 
 func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
-	m.liveOnline("room-1", "主播", "标题")
+	addDouyinLiveTestTargets(m, "room-1", 100)
+	sends := 0
+	var queuedMessages []interface{}
+	m.enqueueGroup = func(_ int64, message interface{}) bool {
+		sends++
+		queuedMessages = append(queuedMessages, message)
+		return true
+	}
+	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	first := m.liveStates["room-1"].DetectedStartedAt
-	m.liveOnline("room-1", "主播", "重复")
+	m.liveOnline("room-1", "actual-room-1", "主播", "重复")
 	if !m.liveStates["room-1"].DetectedStartedAt.Equal(first) || !m.liveStates["room-1"].StartNotificationSent {
 		t.Fatal("duplicate ROOM_ONLINE reset the session")
 	}
-	m.liveEnded("room-1", "", "")
+	if sends != 1 {
+		t.Fatalf("duplicate ROOM_ONLINE sends=%d", sends)
+	}
+	segments, ok := queuedMessages[0].([]interface{})
+	if !ok || len(segments) < 2 || segments[0].(napcat.MessageSegment).Type != "at" {
+		t.Fatalf("AtAll message=%#v", queuedMessages[0])
+	}
+	m.liveEnded("room-1", "actual-room-1", "", "")
 	updated := m.liveStates["room-1"].LastUpdatedAt
-	m.liveEnded("room-1", "", "")
+	m.liveEnded("room-1", "actual-room-1", "", "")
 	if !m.liveStates["room-1"].LastUpdatedAt.Equal(updated) || !m.liveStates["room-1"].EndNotificationSent {
 		t.Fatal("duplicate ROOM_ENDED changed the completed session")
+	}
+	if sends != 2 {
+		t.Fatalf("duplicate ROOM_ENDED sends=%d", sends)
 	}
 }
 
 func TestDouyinOnlineAndAudienceSemantics(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
-	m.liveOnline("room-1", "主播", "标题")
+	addDouyinLiveTestTargets(m, "room-1", 100)
+	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	m.handleLiveMessage("room-1", []byte(`{"method":"WebcastRoomStatsMessage","payload":{"onlineUserCount":50,"audienceCount":100,"total":999999}}`))
 	m.handleLiveMessage("room-1", []byte(`{"method":"WebcastRoomStatsMessage","payload":{"onlineUserCount":20,"audienceCount":80}}`))
 	state := m.liveStates["room-1"]
@@ -105,7 +165,7 @@ func giftBody(msgID string, repeat int64, repeatEnd bool, diamond interface{}) m
 
 func TestDouyinGiftComboDedupAndMissingPrice(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
-	m.liveOnline("room-1", "主播", "标题")
+	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	m.applyDouyinGift("room-1", giftBody("m1", 1, false, float64(10)))
 	m.applyDouyinGift("room-1", giftBody("m2", 3, false, float64(10)))
 	m.applyDouyinGift("room-1", giftBody("m2", 3, false, float64(10)))
@@ -125,7 +185,7 @@ func TestDouyinGiftComboDedupAndMissingPrice(t *testing.T) {
 
 func TestDouyinOrdinaryGiftUsesDiamondCount(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
-	m.liveOnline("room-1", "主播", "标题")
+	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	body := map[string]interface{}{
 		"gift":   map[string]interface{}{"id": "gift-1", "diamondCount": float64(25)},
 		"common": map[string]interface{}{"msgId": "ordinary-1"},
@@ -139,11 +199,13 @@ func TestDouyinOrdinaryGiftUsesDiamondCount(t *testing.T) {
 
 func TestDouyinLiveStatePersistsAndSuppressesRestartDuplicates(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
-	m.liveOnline("room-restore", "主播", "标题")
+	addDouyinLiveTestTargets(m, "room-restore", 100)
+	m.liveOnline("room-restore", "actual-room-restore", "主播", "标题")
 	m.liveStates["room-restore"].PeakOnline = 77
 	m.applyDouyinGift("room-restore", giftBody("persisted-message", 2, false, float64(10)))
 	m.persistLiveState("room-restore", true)
 	restored := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(restored, "room-restore", 100)
 	restored.liveSessionDir = m.liveSessionDir
 	restored.loadLiveStatesFromDisk()
 	state := restored.liveStates["room-restore"]
@@ -151,18 +213,130 @@ func TestDouyinLiveStatePersistsAndSuppressesRestartDuplicates(t *testing.T) {
 		t.Fatalf("restored state=%#v", state)
 	}
 	started := state.DetectedStartedAt
-	restored.liveOnline("room-restore", "主播", "重复")
+	restored.liveOnline("room-restore", "actual-room-restore", "主播", "重复")
 	if !state.DetectedStartedAt.Equal(started) {
 		t.Fatal("restart caused duplicate online transition")
 	}
-	restored.liveEnded("room-restore", "", "")
+	restored.liveEnded("room-restore", "actual-room-restore", "", "")
 	completed := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(completed, "room-restore", 100)
 	completed.liveSessionDir = m.liveSessionDir
 	completed.loadLiveStatesFromDisk()
 	endedAt := completed.liveStates["room-restore"].LastUpdatedAt
-	completed.liveEnded("room-restore", "", "")
+	completed.liveEnded("room-restore", "actual-room-restore", "", "")
 	if !completed.liveStates["room-restore"].LastUpdatedAt.Equal(endedAt) {
 		t.Fatal("restart caused duplicate end transition")
+	}
+}
+
+func TestDouyinSameLiveIDCreatesNextSession(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(m, "reused-live", 100)
+	sends := 0
+	m.enqueueGroup = func(int64, interface{}) bool { sends++; return true }
+	m.liveOnline("reused-live", "room-a", "主播", "第一场")
+	first := m.liveStates["reused-live"]
+	firstSessionID := first.SessionID
+	first.PeakOnline = 88
+	first.EstimatedSoundWave = 100
+	first.ProcessedGiftMessageIDs = []string{"old-message"}
+	m.liveEnded("reused-live", "room-a", "", "")
+	m.liveOnline("reused-live", "room-b", "主播", "第二场")
+	second := m.liveStates["reused-live"]
+	if second.SessionID == firstSessionID || second.RoomID != "room-b" {
+		t.Fatalf("next session not created: first=%s second=%#v", firstSessionID, second)
+	}
+	if second.PeakOnline != 0 || second.EstimatedSoundWave != 0 || len(second.ProcessedGiftMessageIDs) != 0 {
+		t.Fatalf("next session inherited previous statistics: %#v", second)
+	}
+	if sends != 3 { // first start, first end, second start
+		t.Fatalf("notification sends=%d", sends)
+	}
+	entries, err := os.ReadDir(m.liveSessionDir)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("session history entries=%d err=%v", len(entries), err)
+	}
+}
+
+func TestDouyinChangedRealRoomIDClosesMissedSession(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(m, "stable-live", 100)
+	sends := 0
+	m.enqueueGroup = func(int64, interface{}) bool { sends++; return true }
+	m.liveOnline("stable-live", "room-a", "主播", "第一场")
+	firstSessionID := m.liveStates["stable-live"].SessionID
+	// No ROOM_ENDED: a different upstream room ID still defines a new session.
+	m.liveOnline("stable-live", "room-b", "主播", "第二场")
+	state := m.liveStates["stable-live"]
+	if state.SessionID == firstSessionID || state.RoomID != "room-b" || sends != 3 {
+		t.Fatalf("room boundary state=%#v sends=%d", state, sends)
+	}
+}
+
+func TestDouyinPendingNotificationRetriesAfterRestart(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(m, "pending-live", 100, 200)
+	m.enqueueGroup = func(int64, interface{}) bool { return false }
+	m.liveOnline("pending-live", "room-a", "主播", "标题")
+	if state := m.liveStates["pending-live"]; !state.StartNotificationPending || state.StartNotificationSent {
+		t.Fatalf("pending state not persisted: %#v", state)
+	}
+
+	restored := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(restored, "pending-live", 100, 200)
+	restored.liveSessionDir = m.liveSessionDir
+	restored.loadLiveStatesFromDisk()
+	sends := map[int64]int{}
+	restored.enqueueGroup = func(groupID int64, _ interface{}) bool { sends[groupID]++; return true }
+	restored.retryPendingLiveNotifications()
+	state := restored.liveStates["pending-live"]
+	if sends[100] != 1 || sends[200] != 1 || state.StartNotificationPending || !state.StartNotificationSent {
+		t.Fatalf("retry sends=%#v state=%#v", sends, state)
+	}
+}
+
+func TestDouyinPartialMultiGroupQueueResumesOnlyMissingGroup(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(m, "partial-live", 100, 200)
+	m.enqueueGroup = func(groupID int64, _ interface{}) bool { return groupID == 100 }
+	m.liveOnline("partial-live", "room-a", "主播", "标题")
+	state := m.liveStates["partial-live"]
+	if !state.StartNotificationQueued["100|creator"] || state.StartNotificationQueued["200|creator"] || !state.StartNotificationPending {
+		t.Fatalf("partial queue state=%#v", state)
+	}
+
+	restored := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(restored, "partial-live", 100, 200)
+	restored.liveSessionDir = m.liveSessionDir
+	restored.loadLiveStatesFromDisk()
+	sends := map[int64]int{}
+	restored.enqueueGroup = func(groupID int64, _ interface{}) bool { sends[groupID]++; return true }
+	restored.retryPendingLiveNotifications()
+	if sends[100] != 0 || sends[200] != 1 || !restored.liveStates["partial-live"].StartNotificationSent {
+		t.Fatalf("resume sends=%#v state=%#v", sends, restored.liveStates["partial-live"])
+	}
+}
+
+func TestDouyinPendingEndNotificationRetriesAfterRestart(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(m, "pending-end", 100)
+	m.liveOnline("pending-end", "room-a", "主播", "标题")
+	m.enqueueGroup = func(int64, interface{}) bool { return false }
+	m.liveEnded("pending-end", "room-a", "", "")
+	if state := m.liveStates["pending-end"]; !state.EndNotificationPending || state.EndNotificationSent {
+		t.Fatalf("end pending state=%#v", state)
+	}
+
+	restored := newDouyinLiveTestMonitor(t)
+	addDouyinLiveTestTargets(restored, "pending-end", 100)
+	restored.liveSessionDir = m.liveSessionDir
+	restored.loadLiveStatesFromDisk()
+	sends := 0
+	restored.enqueueGroup = func(int64, interface{}) bool { sends++; return true }
+	restored.retryPendingLiveNotifications()
+	state := restored.liveStates["pending-end"]
+	if sends != 1 || state.EndNotificationPending || !state.EndNotificationSent {
+		t.Fatalf("end retry sends=%d state=%#v", sends, state)
 	}
 }
 
@@ -185,6 +359,43 @@ func TestDisabledDouyinSubscriptionDoesNotCreateAccountTask(t *testing.T) {
 	accounts := m.accountsLocked()
 	if len(accounts) != 1 || accounts[0].SecUserID != "enabled" {
 		t.Fatalf("accounts=%#v", accounts)
+	}
+}
+
+func TestDouyinWorksAndLiveTogglesRouteIndependently(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	m.cfg.DouyinSubscriptions = map[int64]map[string]*config.DouyinConfig{
+		1: {
+			"works": {SecUserID: "works", LiveID: "works-live", LiveDisabled: true},
+			"live":  {SecUserID: "live", LiveID: "live-only", WorksDisabled: true},
+			"off":   {SecUserID: "off", LiveID: "off-live", WorksDisabled: true, LiveDisabled: true},
+		},
+	}
+	accounts := m.accountsLocked()
+	if len(accounts) != 2 {
+		t.Fatalf("browser accounts=%#v", accounts)
+	}
+	if bridgeAccounts := douyinAccountsFromConfig(m.cfg); len(bridgeAccounts) != 2 {
+		t.Fatalf("bridge accounts=%#v", bridgeAccounts)
+	}
+	desired := m.desiredLiveIDsLocked()
+	if len(desired) != 1 || !desired["live-only"] {
+		t.Fatalf("desired live IDs=%#v", desired)
+	}
+	m.handlePosts(douyinBrowserEvent{SecUserID: "live", Posts: []douyinPost{{ID: "post", CreateTime: time.Now().Unix()}}})
+	if got := m.cfg.DouyinSubscriptions[1]["live"].LastAwemeTime; got != 0 {
+		t.Fatalf("works-disabled subscription advanced cursor: %d", got)
+	}
+}
+
+func TestDouyinManualNicknameIsNotOverwritten(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	m.cfg.DouyinSubscriptions = map[int64]map[string]*config.DouyinConfig{
+		1: {"creator": {SecUserID: "creator", Name: "面板昵称", NameManual: true}},
+	}
+	m.handleAccount(douyinBrowserEvent{SecUserID: "creator", Nickname: "平台昵称"})
+	if got := m.cfg.DouyinSubscriptions[1]["creator"].Name; got != "面板昵称" {
+		t.Fatalf("manual nickname overwritten: %q", got)
 	}
 }
 
@@ -211,7 +422,7 @@ func TestDouyinLiveTargetsPreserveGroupsAndAtAll(t *testing.T) {
 func TestDouyinSoundWaveDisabledSkipsGiftState(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
 	m.cfg.DouyinLiveSoundWaveEnabled = false
-	m.liveOnline("room-1", "主播", "标题")
+	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	raw := []byte(`{"method":"WebcastGiftMessage","gift":{"id":"gift","diamondCount":10},"common":{"msgId":"m1"},"user":{"id":"u1"}}`)
 	m.handleLiveMessage("room-1", raw)
 	state := m.liveStates["room-1"]

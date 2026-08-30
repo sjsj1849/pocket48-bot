@@ -37,16 +37,17 @@ type Options struct {
 }
 
 type Server struct {
-	opts       Options
-	password   []byte
-	httpServer *http.Server
-	sessionsMu sync.Mutex
-	sessions   map[string]session
-	loginMu    sync.Mutex
-	login      map[string]*loginAttempt
-	vncMu      sync.Mutex
-	vncCmd     *exec.Cmd
-	vncDisplay string
+	opts         Options
+	password     []byte
+	httpServer   *http.Server
+	sessionsMu   sync.Mutex
+	sessions     map[string]session
+	loginMu      sync.Mutex
+	login        map[string]*loginAttempt
+	vncMu        sync.Mutex
+	vncCmd       *exec.Cmd
+	vncDisplay   string
+	reloadSignal func() error // test hook; nil uses systemd MainPID signaling
 }
 
 type session struct {
