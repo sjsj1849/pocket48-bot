@@ -196,6 +196,12 @@ cd ../..
 
 直播实时链路使用独立的 [jwwsjlm/douyinLive](https://github.com/jwwsjlm/douyinLive) 本地 WebSocket 服务。可以把它作为 systemd/Docker 服务独立启动，也可以通过 `DOUYIN_LIVE_SIDECAR_CMD` 让 Bot 作为子进程启动；Bot 不直接链接其 Go 1.26 依赖。
 
+Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布包：
+
+```bash
+./scripts/install_douyin_live_sidecar.sh
+```
+
 ```json
 {
   "DOUYIN_ENABLED": true,
@@ -204,7 +210,7 @@ cd ../..
   "BROWSER_HEADLESS": true,
   "DOUYIN_POLL_SECONDS": 60,
   "DOUYIN_LIVE_WS_URL": "ws://127.0.0.1:1088/ws",
-  "DOUYIN_LIVE_SIDECAR_CMD": "",
+  "DOUYIN_LIVE_SIDECAR_CMD": "./storage/bin/douyinLive --config ./deploy/douyin-live.yaml",
   "DOUYIN_LIVE_SUMMARY_ENABLED": true,
   "DOUYIN_LIVE_SOUND_WAVE_ENABLED": true,
   "DOUYIN_LIVE_RAW_STATS_DEBUG": false,

@@ -25,10 +25,12 @@ import (
 )
 
 type douyinAccountCommand struct {
-	SecUserID  string `json:"secUserId"`
-	ProfileURL string `json:"profileUrl,omitempty"`
-	Name       string `json:"name,omitempty"`
-	LiveID     string `json:"liveId,omitempty"`
+	SecUserID    string `json:"secUserId"`
+	ProfileURL   string `json:"profileUrl,omitempty"`
+	Name         string `json:"name,omitempty"`
+	LiveID       string `json:"liveId,omitempty"`
+	WorksEnabled bool   `json:"worksEnabled"`
+	LiveEnabled  bool   `json:"liveEnabled"`
 }
 
 type douyinPost struct {
@@ -118,6 +120,7 @@ type DouyinMonitor struct {
 	wg              sync.WaitGroup
 	liveCmd         *exec.Cmd
 	liveCancels     map[string]context.CancelFunc
+	liveConnected   map[string]bool
 	liveStates      map[string]*douyinLiveState
 	livePersistedAt map[string]time.Time
 	liveSessionDir  string
@@ -168,6 +171,7 @@ func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins fu
 		napcat:          client,
 		notifyAdmins:    notifyAdmins,
 		liveCancels:     make(map[string]context.CancelFunc),
+		liveConnected:   make(map[string]bool),
 		liveStates:      make(map[string]*douyinLiveState),
 		livePersistedAt: make(map[string]time.Time),
 		liveSessionDir:  douyinLiveSessionStoreDir,
@@ -242,6 +246,8 @@ func (m *DouyinMonitor) accountsLocked() []douyinAccountCommand {
 			if current.LiveID == "" {
 				current.LiveID = item.LiveID
 			}
+			current.WorksEnabled = current.WorksEnabled || !item.WorksDisabled
+			current.LiveEnabled = current.LiveEnabled || !item.LiveDisabled
 			seen[sec] = current
 		}
 	}
@@ -400,7 +406,13 @@ func (m *DouyinMonitor) Status() (bool, int, int, bool) {
 	defer m.mu.Unlock()
 	accounts := m.accountsLocked()
 	ready := m.browser != nil && m.browser.IsStarted()
-	return ready, len(accounts), len(m.liveCancels), m.imConnected
+	connected := 0
+	for _, ok := range m.liveConnected {
+		if ok {
+			connected++
+		}
+	}
+	return ready, len(accounts), connected, m.imConnected
 }
 
 func (m *DouyinMonitor) Snapshot(groupID int64) []config.DouyinConfig {
@@ -1559,6 +1571,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 	defer func() {
 		m.mu.Lock()
 		delete(m.liveCancels, liveID)
+		delete(m.liveConnected, liveID)
 		m.mu.Unlock()
 	}()
 	backoff := time.Second
@@ -1571,6 +1584,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 		base := strings.TrimRight(strings.TrimSpace(m.cfg.DouyinLiveWSURL), "/")
 		conn, _, err := websocket.DefaultDialer.Dial(base+"/"+url.PathEscape(liveID), nil)
 		if err != nil {
+			m.setLiveConnection(liveID, false)
 			select {
 			case <-ctx.Done():
 				return
@@ -1582,6 +1596,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 			continue
 		}
 		backoff = time.Second
+		m.setLiveConnection(liveID, true)
 		cancelRead := make(chan struct{})
 		go func() {
 			select {
@@ -1595,6 +1610,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 			if err != nil {
 				_ = conn.Close()
 				close(cancelRead)
+				m.setLiveConnection(liveID, false)
 				break
 			}
 			m.handleLiveMessage(liveID, raw)
@@ -1606,6 +1622,20 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 			default:
 			}
 		}
+	}
+}
+
+func (m *DouyinMonitor) setLiveConnection(liveID string, connected bool) {
+	m.mu.Lock()
+	previous := m.liveConnected[liveID]
+	m.liveConnected[liveID] = connected
+	m.mu.Unlock()
+	if previous != connected {
+		status := "reconnecting"
+		if connected {
+			status = "connected"
+		}
+		log.Printf("[Douyin-live-health] status=%s live_id=%s", status, liveID)
 	}
 }
 

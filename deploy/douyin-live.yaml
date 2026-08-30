@@ -1,0 +1,20 @@
+port: "1088"
+websocket:
+  path: "/ws"
+  allowed_origins: []
+unknown: false
+log:
+  level: "info"
+sign:
+  provider: "local"
+api:
+  key: ""
+  allowed_domains:
+    - "douyin.com"
+monitor:
+  poll_interval: "15s"
+  notify_interval: "30s"
+cookie:
+  use_stored: false
+  douyin: ""
+  rooms: {}

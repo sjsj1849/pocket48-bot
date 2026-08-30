@@ -375,7 +375,17 @@ func TestDouyinWorksAndLiveTogglesRouteIndependently(t *testing.T) {
 	if len(accounts) != 2 {
 		t.Fatalf("browser accounts=%#v", accounts)
 	}
-	if bridgeAccounts := douyinAccountsFromConfig(m.cfg); len(bridgeAccounts) != 2 {
+	accountFlags := make(map[string]douyinAccountCommand, len(accounts))
+	for _, account := range accounts {
+		accountFlags[account.SecUserID] = account
+	}
+	if !accountFlags["works"].WorksEnabled || accountFlags["works"].LiveEnabled {
+		t.Fatalf("works-only flags=%#v", accountFlags["works"])
+	}
+	if accountFlags["live"].WorksEnabled || !accountFlags["live"].LiveEnabled {
+		t.Fatalf("live-only flags=%#v", accountFlags["live"])
+	}
+	if bridgeAccounts := douyinAccountsFromConfig(m.cfg); len(bridgeAccounts) != 2 || !bridgeAccounts[1].WorksEnabled && !bridgeAccounts[1].LiveEnabled {
 		t.Fatalf("bridge accounts=%#v", bridgeAccounts)
 	}
 	desired := m.desiredLiveIDsLocked()
