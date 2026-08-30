@@ -15,6 +15,7 @@ type SubItem = {
   profileUrl?: string
   name?: string
   atAll?: boolean
+  lastId?: string
   lastNoteId?: string
   liveActive?: boolean
   liveId?: string
@@ -373,6 +374,133 @@ function SubscriptionManager({
 
 function parseGroupIDs(value: string): number[] {
   return [...new Set((value.match(/\d+/g) || []).map(Number).filter((id) => id > 0))]
+}
+
+function WeiboSubscriptionManager({
+  items,
+  saving,
+  defaultGroup,
+  onAdd,
+  onEdit,
+  onRemove,
+}: {
+  items: SubItem[]
+  saving: boolean
+  defaultGroup: string
+  onAdd: (groupId: string, uid: string, name: string, atAll: boolean) => Promise<void>
+  onEdit: (item: SubItem, groupId: string, name: string, atAll: boolean) => Promise<void>
+  onRemove: (item: SubItem) => Promise<void>
+}) {
+  const memoryKey = 'p48-subscription-group:微博动态'
+  const [groupID, setGroupID] = useState(() => {
+    try { return window.localStorage.getItem(memoryKey) || defaultGroup }
+    catch { return defaultGroup }
+  })
+  const [uid, setUID] = useState('')
+  const [name, setName] = useState('')
+  const [atAll, setAtAll] = useState(false)
+  const [editingKey, setEditingKey] = useState('')
+  const [editGroup, setEditGroup] = useState('')
+  const [editName, setEditName] = useState('')
+  const [editAtAll, setEditAtAll] = useState(false)
+
+  useEffect(() => {
+    if (defaultGroup && !groupID) setGroupID(defaultGroup)
+  }, [defaultGroup, groupID])
+
+  function updateGroup(value: string) {
+    setGroupID(value)
+    try { window.localStorage.setItem(memoryKey, value) } catch { /* storage can be disabled */ }
+  }
+
+  function startEdit(item: SubItem) {
+    setEditingKey(`${item.groupId}:${item.uid || ''}`)
+    setEditGroup(String(item.groupId || ''))
+    setEditName(item.name || '')
+    setEditAtAll(Boolean(item.atAll))
+  }
+
+  return (
+    <div className="sub-manager weibo-dynamic-manager">
+      <div className="sub-manager-title">
+        <strong>微博动态订阅</strong>
+        <p>监控账号发博并转发到 QQ 群。UID 添加后固定，可调整目标群、昵称和 @全体。</p>
+      </div>
+      <div className="douyin-add weibo-dynamic-add">
+        <input type="text" inputMode="numeric" placeholder="目标 QQ 群号" value={groupID} onChange={(event) => updateGroup(event.target.value.replace(/\D/g, ''))} />
+        <input type="text" inputMode="numeric" placeholder="微博 UID（纯数字）" value={uid} onChange={(event) => setUID(event.target.value.replace(/\D/g, ''))} />
+        <input type="text" placeholder="昵称（可选，便于识别）" value={name} onChange={(event) => setName(event.target.value)} />
+        <div className="monitor-kind-options">
+          <label><input type="checkbox" checked={atAll} onChange={(event) => setAtAll(event.target.checked)} /> @全体成员</label>
+        </div>
+        <button
+          className="secondary-button"
+          disabled={saving || !groupID || !uid}
+          onClick={() => void onAdd(groupID, uid, name, atAll).then(() => {
+            setUID('')
+            setName('')
+            setAtAll(false)
+          })}
+        >
+          <Plus size={16} /> 添加
+        </button>
+      </div>
+      <div className="douyin-list weibo-dynamic-list">
+        {items.length ? items.map((item) => {
+          const itemUID = item.uid || ''
+          const key = `${item.groupId}:${itemUID}`
+          if (editingKey === key) {
+            return (
+              <article className="douyin-card weibo-dynamic-card editing" key={key}>
+                <div className="weibo-dynamic-edit-grid">
+                  <label>
+                    <span>绑定微博 UID</span>
+                    <input value={itemUID} readOnly aria-label="绑定微博 UID（不可修改）" />
+                  </label>
+                  <label>
+                    <span>转发到 QQ 群</span>
+                    <input type="text" inputMode="numeric" value={editGroup} onChange={(event) => setEditGroup(event.target.value.replace(/\D/g, ''))} />
+                  </label>
+                  <label>
+                    <span>显示昵称</span>
+                    <input value={editName} onChange={(event) => setEditName(event.target.value)} placeholder="昵称（可选）" />
+                  </label>
+                </div>
+                <div className="douyin-edit-options">
+                  <label><input type="checkbox" checked={editAtAll} onChange={(event) => setEditAtAll(event.target.checked)} /> @全体成员</label>
+                </div>
+                <div className="sub-item-actions">
+                  <button className="secondary-button" disabled={saving || !editGroup} onClick={() => void onEdit(item, editGroup, editName, editAtAll).then(() => setEditingKey(''))}>
+                    <Check size={15} /> 保存
+                  </button>
+                  <button className="icon-button" disabled={saving} aria-label="取消编辑" onClick={() => setEditingKey('')}><X size={16} /></button>
+                </div>
+              </article>
+            )
+          }
+          return (
+            <article className="douyin-card weibo-dynamic-card" key={key}>
+              <div className="douyin-card-main">
+                <div className="douyin-card-heading">
+                  <strong>{item.name || `UID ${itemUID}`}</strong>
+                  <div className="subscription-badges">
+                    {item.atAll ? <span className="attention">@全体</span> : null}
+                  </div>
+                </div>
+                <div className="douyin-identity" title={itemUID}><span>微博 UID</span><code>{itemUID}</code></div>
+                <div className="douyin-groups"><span>转发群</span><b>{item.groupId}</b></div>
+                {item.lastId ? <p>已建立动态监控基线</p> : null}
+              </div>
+              <div className="sub-item-actions">
+                <button className="icon-button" disabled={saving} aria-label={`编辑 ${item.name || itemUID}`} onClick={() => startEdit(item)}><Pencil size={15} /></button>
+                <button className="icon-button danger" disabled={saving} aria-label={`删除 ${item.name || itemUID}`} onClick={() => void onRemove(item)}><Trash2 size={16} /></button>
+              </div>
+            </article>
+          )
+        }) : <p className="muted">暂无微博动态订阅。在上方填写 UID 后添加。</p>}
+      </div>
+    </div>
+  )
 }
 
 function DouyinSubscriptionManager({
@@ -996,28 +1124,19 @@ export function Configuration() {
             {active === '微博' ? (
               <>
                 <p className="muted compact">Cookie 是登录态不是密码；UID/OID 与日报说明见「说明」页。浏览器扫码在左侧「浏览器」。</p>
-                <SubscriptionManager
-                  title="微博动态 UID 订阅"
+                <WeiboSubscriptionManager
                   defaultGroup={boundGroup}
-                  hint="监控用户发博并转发到 QQ 群。群 0 多为历史私信误加，请用铅笔改到绑定群。昵称优先展示，UID 在副标题。"
                   items={weibo}
                   saving={subSaving}
-                  showName
-                  lockIdentityOnEdit
-                  namePlaceholder="昵称（可选，便于识别）"
-                  targetPlaceholder="微博 UID（纯数字）"
-                  labelOf={(item) => (item.name ? `${item.name}` : `UID ${item.uid}`)}
-                  metaOf={(item) => `群 ${item.groupId}${item.name ? ` · UID ${item.uid}` : ''}${item.atAll ? ' · @全体' : ''}`}
-                  targetOf={(item) => item.uid || ''}
-                  onAdd={(groupId, target, atAll, name) =>
+                  onAdd={(groupId, uid, name, atAll) =>
                     withSub(async () => {
                       await api('weibo/subscriptions', {
                         method: 'POST',
-                        body: JSON.stringify({ groupId: Number(groupId), uid: target.trim(), atAll, name: name?.trim() || undefined }),
+                        body: JSON.stringify({ groupId: Number(groupId), uid: uid.trim(), atAll, name: name.trim() || undefined }),
                       })
                     })
                   }
-                  onEdit={(item, groupId, target, atAll, name) =>
+                  onEdit={(item, groupId, name, atAll) =>
                     withSub(async () => {
                       await api('weibo/subscriptions', {
                         method: 'PUT',
@@ -1025,9 +1144,9 @@ export function Configuration() {
                           oldGroupId: item.groupId,
                           oldUid: item.uid,
                           groupId: Number(groupId),
-                          uid: item.uid || target.trim(),
+                          uid: item.uid,
                           atAll,
-                          name: name?.trim() || undefined,
+                          name: name.trim() || undefined,
                         }),
                       })
                     })

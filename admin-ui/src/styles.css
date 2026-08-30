@@ -44,6 +44,12 @@
 .douyin-edit-options { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
 .douyin-edit-options label { display: inline-flex; align-items: center; gap: 5px; color: #59616c; font-size: 12px; }
 .douyin-card.editing > .sub-item-actions { justify-content: flex-end; }
+.weibo-dynamic-edit-grid { display: grid; grid-template-columns: minmax(210px,.9fr) minmax(180px,.7fr) minmax(180px,.8fr); gap: 10px; }
+.weibo-dynamic-edit-grid label { min-width: 0; display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 650; }
+.weibo-dynamic-edit-grid input { width: 100%; min-width: 0; height: 38px; padding: 0 10px; border: 1px solid #d9dde2; border-radius: 5px; color: var(--ink); background: #fbfcfd; outline: none; }
+.weibo-dynamic-edit-grid input:focus { border-color: #8eafd5; box-shadow: 0 0 0 3px rgba(53,103,168,.1); background: #fff; }
+.weibo-dynamic-edit-grid input[readonly] { color: #737b86; border-color: #e2e5e9; background: #f1f3f5; cursor: not-allowed; }
+.weibo-dynamic-card .douyin-card-main > p { white-space: normal; }
 .super-topic-add { display: grid; grid-template-columns: minmax(230px,1fr) minmax(180px,.8fr) minmax(180px,.8fr) auto; gap: 9px; align-items: center; }
 .super-topic-add input, .super-topic-edit-grid input { width: 100%; min-width: 0; height: 38px; padding: 0 10px; border: 1px solid #d9dde2; border-radius: 5px; color: var(--ink); background: #fbfcfd; outline: none; }
 .super-topic-add input:focus, .super-topic-edit-grid input:focus { border-color: #8eafd5; box-shadow: 0 0 0 3px rgba(53,103,168,.1); background: #fff; }
@@ -110,7 +116,7 @@
 .sub-add.super-count-add { grid-template-columns: minmax(150px,.9fr) minmax(120px,.7fr) minmax(160px,1fr) auto; }
 
 @media (max-width: 760px) {
-  .sub-add.with-name, .sub-edit-grid, .sub-add.super-count-add, .douyin-add, .douyin-edit-grid, .super-topic-add, .super-topic-edit-grid { grid-template-columns: 1fr; }
+  .sub-add.with-name, .sub-edit-grid, .sub-add.super-count-add, .douyin-add, .douyin-edit-grid, .weibo-dynamic-edit-grid, .super-topic-add, .super-topic-edit-grid { grid-template-columns: 1fr; }
   .douyin-add > * { grid-column: auto !important; grid-row: auto !important; }
   .super-topic-add > * { grid-column: auto !important; grid-row: auto !important; }
   .douyin-list { grid-template-columns: 1fr; }
