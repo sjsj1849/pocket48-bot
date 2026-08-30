@@ -16,11 +16,11 @@ import (
 // --- 超话日报 topics (WEIBO_SUPER_COUNT_TOPICS + GROUPS) ---
 
 type weiboSuperCountTopicPanel struct {
-	OID         string `json:"oid"`
-	Name        string `json:"name,omitempty"`
-	GroupKey    string `json:"groupKey,omitempty"`    // internal key e.g. xjjmen
-	GroupName   string `json:"groupName,omitempty"`   // display name e.g. X姐姐们
-	ReportSign  int    `json:"reportSign,omitempty"`
+	OID        string `json:"oid"`
+	Name       string `json:"name,omitempty"`
+	GroupKey   string `json:"groupKey,omitempty"`  // internal key e.g. xjjmen
+	GroupName  string `json:"groupName,omitempty"` // display name e.g. X姐姐们
+	ReportSign int    `json:"reportSign,omitempty"`
 }
 
 type weiboSuperCountTopicStored struct {
@@ -390,6 +390,272 @@ func (s *Server) handleWeiboSuperSignTopics(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "超话签到项已删除"})
+
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+// --- Unified super-topic management (sign-in + daily report) ---
+
+type weiboUnifiedSuperTopicPanel struct {
+	OID            string `json:"oid"`
+	OldOID         string `json:"oldOid,omitempty"`
+	Name           string `json:"name,omitempty"`
+	SignEnabled    bool   `json:"signEnabled"`
+	ReportEnabled  bool   `json:"reportEnabled"`
+	GroupKey       string `json:"groupKey,omitempty"`
+	GroupName      string `json:"groupName,omitempty"`
+	ReportSign     int    `json:"reportSign,omitempty"`
+	LastSignDate   string `json:"lastSignDate,omitempty"`
+	LastSignStatus string `json:"lastSignStatus,omitempty"`
+	LastSignRank   int    `json:"lastSignRank,omitempty"`
+}
+
+func loadSuperSignSubscriptions(raw map[string]json.RawMessage) map[string]map[string]*weiboSuperSignTopicStored {
+	subs := map[string]map[string]*weiboSuperSignTopicStored{}
+	if encoded := raw["WEIBO_SUPER_TOPICS"]; len(encoded) > 0 {
+		if err := json.Unmarshal(encoded, &subs); err != nil {
+			var asInt map[int64]map[string]*weiboSuperSignTopicStored
+			if err2 := json.Unmarshal(encoded, &asInt); err2 == nil {
+				for gid, group := range asInt {
+					subs[strconv.FormatInt(gid, 10)] = group
+				}
+			}
+		}
+	}
+	if subs["0"] == nil {
+		subs["0"] = map[string]*weiboSuperSignTopicStored{}
+	}
+	return subs
+}
+
+func removeSuperSignTopic(subs map[string]map[string]*weiboSuperSignTopicStored, oid string) *weiboSuperSignTopicStored {
+	var preserved *weiboSuperSignTopicStored
+	for groupKey, group := range subs {
+		for key, item := range group {
+			candidate := key
+			if item != nil && strings.TrimSpace(item.OID) != "" {
+				candidate = item.OID
+			}
+			if normalizeSuperOID(candidate) != oid {
+				continue
+			}
+			if item != nil && preserved == nil {
+				copy := *item
+				preserved = &copy
+			}
+			delete(group, key)
+		}
+		if len(group) == 0 && groupKey != "0" {
+			delete(subs, groupKey)
+		}
+	}
+	return preserved
+}
+
+func removeSuperCountTopic(topics map[string]*weiboSuperCountTopicStored, oid string) *weiboSuperCountTopicStored {
+	var preserved *weiboSuperCountTopicStored
+	for key, item := range topics {
+		candidate := key
+		if item != nil && strings.TrimSpace(item.OID) != "" {
+			candidate = item.OID
+		}
+		if normalizeSuperOID(candidate) != oid {
+			continue
+		}
+		if item != nil && preserved == nil {
+			copy := *item
+			preserved = &copy
+		}
+		delete(topics, key)
+	}
+	return preserved
+}
+
+func (s *Server) handleWeiboUnifiedSuperTopics(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]json.RawMessage
+	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	signSubs := loadSuperSignSubscriptions(raw)
+	countTopics := map[string]*weiboSuperCountTopicStored{}
+	if encoded := raw["WEIBO_SUPER_COUNT_TOPICS"]; len(encoded) > 0 {
+		_ = json.Unmarshal(encoded, &countTopics)
+	}
+	groups := loadCountGroups(raw)
+
+	switch r.Method {
+	case http.MethodGet:
+		byOID := map[string]*weiboUnifiedSuperTopicPanel{}
+		for _, group := range signSubs {
+			for key, item := range group {
+				if item == nil {
+					continue
+				}
+				oid := item.OID
+				if oid == "" {
+					oid = key
+				}
+				oid = normalizeSuperOID(oid)
+				if oid == "" {
+					continue
+				}
+				panel := byOID[oid]
+				if panel == nil {
+					panel = &weiboUnifiedSuperTopicPanel{OID: oid}
+					byOID[oid] = panel
+				}
+				panel.SignEnabled = true
+				if panel.Name == "" {
+					panel.Name = item.Name
+				}
+				panel.LastSignDate = item.LastSignDate
+				panel.LastSignStatus = item.LastSignStatus
+				panel.LastSignRank = item.LastSignRank
+			}
+		}
+		for key, item := range countTopics {
+			if item == nil {
+				continue
+			}
+			oid := item.OID
+			if oid == "" {
+				oid = key
+			}
+			oid = normalizeSuperOID(oid)
+			if oid == "" {
+				continue
+			}
+			panel := byOID[oid]
+			if panel == nil {
+				panel = &weiboUnifiedSuperTopicPanel{OID: oid}
+				byOID[oid] = panel
+			}
+			panel.ReportEnabled = true
+			if panel.Name == "" {
+				panel.Name = item.Name
+			}
+			panel.GroupKey, panel.GroupName = resolveCountGroupDisplay(groups, item.GroupName)
+			panel.ReportSign = item.ReportSign
+		}
+		result := make([]weiboUnifiedSuperTopicPanel, 0, len(byOID))
+		for _, item := range byOID {
+			result = append(result, *item)
+		}
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].GroupName == result[j].GroupName {
+				if result[i].Name == result[j].Name {
+					return result[i].OID < result[j].OID
+				}
+				return result[i].Name < result[j].Name
+			}
+			return result[i].GroupName < result[j].GroupName
+		})
+		groupList := make([]map[string]string, 0, len(groups))
+		for key, item := range groups {
+			name := key
+			if item != nil && strings.TrimSpace(item.Name) != "" {
+				name = item.Name
+			}
+			groupList = append(groupList, map[string]string{"key": key, "name": name})
+		}
+		sort.Slice(groupList, func(i, j int) bool { return groupList[i]["name"] < groupList[j]["name"] })
+		writeJSON(w, http.StatusOK, map[string]any{"topics": result, "groups": groupList})
+
+	case http.MethodPost, http.MethodPut:
+		var body weiboUnifiedSuperTopicPanel
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		oid := normalizeSuperOID(body.OID)
+		if oid == "" || !oidPattern.MatchString(oid) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）"})
+			return
+		}
+		if r.Method == http.MethodPut {
+			oldOID := normalizeSuperOID(body.OldOID)
+			if oldOID == "" {
+				oldOID = oid
+			}
+			if oldOID != oid {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: "超话 OID 是身份标识，不能在编辑时修改；请删除后重新添加"})
+				return
+			}
+		}
+		if !body.SignEnabled && !body.ReportEnabled {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "自动签到和超话日报至少启用一项"})
+			return
+		}
+		preservedSign := removeSuperSignTopic(signSubs, oid)
+		preservedCount := removeSuperCountTopic(countTopics, oid)
+		name := strings.TrimSpace(body.Name)
+		if name == "" && preservedSign != nil {
+			name = preservedSign.Name
+		}
+		if name == "" && preservedCount != nil {
+			name = preservedCount.Name
+		}
+		if body.SignEnabled {
+			item := &weiboSuperSignTopicStored{OID: oid}
+			if preservedSign != nil {
+				*item = *preservedSign
+			}
+			item.OID = oid
+			item.Name = name
+			signSubs["0"][oid] = item
+		}
+		if body.ReportEnabled {
+			item := &weiboSuperCountTopicStored{OID: oid}
+			if preservedCount != nil {
+				*item = *preservedCount
+			}
+			item.OID = oid
+			item.Name = name
+			groupInput := strings.TrimSpace(body.GroupName)
+			if groupInput == "" {
+				groupInput = strings.TrimSpace(body.GroupKey)
+			}
+			if groupInput != "" {
+				var groupKey string
+				groups, groupKey = resolveGroupKeyForWrite(groups, groupInput)
+				item.GroupName = groupKey
+			}
+			countTopics[oid] = item
+		}
+		if err := s.writeConfigAndReloadBot(map[string]any{
+			"WEIBO_SUPER_TOPICS":       signSubs,
+			"WEIBO_SUPER_COUNT_TOPICS": countTopics,
+			"WEIBO_SUPER_COUNT_GROUPS": groups,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "超话订阅已更新并热重载", "oid": oid})
+
+	case http.MethodDelete:
+		var body weiboUnifiedSuperTopicPanel
+		if err := decodeJSON(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+			return
+		}
+		oid := normalizeSuperOID(body.OID)
+		if oid == "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写超话 OID"})
+			return
+		}
+		removeSuperSignTopic(signSubs, oid)
+		removeSuperCountTopic(countTopics, oid)
+		if err := s.writeConfigAndReloadBot(map[string]any{
+			"WEIBO_SUPER_TOPICS":       signSubs,
+			"WEIBO_SUPER_COUNT_TOPICS": countTopics,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "超话订阅已删除并热重载"})
 
 	default:
 		methodNotAllowed(w)

@@ -239,6 +239,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleWeiboSuperCountTopics(w, r)
 	case "/api/weibo/super-sign/topics":
 		s.handleWeiboSuperSignTopics(w, r)
+	case "/api/weibo/super-topics":
+		s.handleWeiboUnifiedSuperTopics(w, r)
 	case "/api/service/restart":
 		s.handleRestart(w, r)
 	case "/api/browser/status":

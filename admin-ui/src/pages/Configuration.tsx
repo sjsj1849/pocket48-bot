@@ -25,7 +25,18 @@ type SubItem = {
   liveEnabled?: boolean
 }
 type SubResponse = { subscriptions: SubItem[] }
-type SuperTopic = { oid: string; name?: string; groupKey?: string; groupName?: string; reportSign?: number; lastSignDate?: string; lastSignStatus?: string; lastSignRank?: number }
+type SuperTopic = {
+  oid: string
+  name?: string
+  signEnabled?: boolean
+  reportEnabled?: boolean
+  groupKey?: string
+  groupName?: string
+  reportSign?: number
+  lastSignDate?: string
+  lastSignStatus?: string
+  lastSignRank?: number
+}
 type SuperGroup = { key: string; name: string }
 type SuperResponse = { topics: SuperTopic[]; groups?: SuperGroup[] }
 type PocketSearchHit = {
@@ -618,237 +629,143 @@ function PocketSearchPanel({
   )
 }
 
-function SuperSignManager({
-  items,
-  saving,
-  onAdd,
-  onRemove,
-  onEdit,
-}: {
-  items: SuperTopic[]
-  saving: boolean
-  onAdd: (oid: string, name: string) => Promise<void>
-  onRemove: (item: SuperTopic) => Promise<void>
-  onEdit: (item: SuperTopic, oid: string, name: string) => Promise<void>
-}) {
-  const [oid, setOid] = useState('')
-  const [name, setName] = useState('')
-  const [editing, setEditing] = useState<SuperTopic | null>(null)
-  const [eOid, setEOid] = useState('')
-  const [eName, setEName] = useState('')
-
-  return (
-    <div className="sub-manager">
-      <div className="sub-manager-title">
-        <strong>超话签到列表（自动签到）</strong>
-        <p>对应 WEIBO_SUPER_TOPICS。与下方「日报列表」不是同一份数据：这里只决定每天自动签哪些超话。</p>
-      </div>
-      <p className="muted compact">OID 从超话 URL 的 containerid 复制。与日报列表独立。详见「说明」。</p>
-      <div className="sub-add with-name">
-        <input type="text" placeholder="超话 OID（100808…）" value={oid} onChange={(e) => setOid(e.target.value)} />
-        <input type="text" placeholder="显示名（可选）" value={name} onChange={(e) => setName(e.target.value)} />
-        <span />
-        <button
-          className="secondary-button"
-          disabled={saving || !oid.trim()}
-          onClick={() =>
-            void onAdd(oid, name).then(() => {
-              setOid('')
-              setName('')
-            })
-          }
-        >
-          <Plus size={16} />
-          添加
-        </button>
-      </div>
-      <div className="sub-list">
-        {items.length ? (
-          items.map((item) => {
-            if (editing && editing.oid === item.oid) {
-              return (
-                <div className="sub-item editing" key={item.oid}>
-                  <div className="sub-edit-grid two">
-                    <input value={eOid} onChange={(e) => setEOid(e.target.value)} placeholder="OID" />
-                    <input value={eName} onChange={(e) => setEName(e.target.value)} placeholder="名称" />
-                  </div>
-                  <div className="sub-item-actions">
-                    <button className="secondary-button" disabled={saving} onClick={() => void onEdit(item, eOid, eName).then(() => setEditing(null))}>
-                      <Check size={15} />
-                      保存
-                    </button>
-                    <button className="icon-button" onClick={() => setEditing(null)}>
-                      <X size={16} />
-                    </button>
-                  </div>
-                </div>
-              )
-            }
-            return (
-              <div className="sub-item" key={item.oid}>
-                <div>
-                  <strong>{item.name || item.oid}</strong>
-                  <small>
-                    {item.oid}
-                    {item.lastSignDate ? ` · 最近 ${item.lastSignDate}` : ''}
-                    {item.lastSignStatus ? ` · ${item.lastSignStatus}` : ''}
-                  </small>
-                </div>
-                <div className="sub-item-actions">
-                  <button
-                    className="icon-button"
-                    disabled={saving}
-                    aria-label="编辑"
-                    onClick={() => {
-                      setEditing(item)
-                      setEOid(item.oid)
-                      setEName(item.name || '')
-                    }}
-                  >
-                    <Pencil size={15} />
-                  </button>
-                  <button className="icon-button" disabled={saving} aria-label="删除" onClick={() => void onRemove(item)}>
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              </div>
-            )
-          })
-        ) : (
-          <p className="muted">暂无签到超话。开启上方「超话自动签到」后在此添加。</p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function SuperCountManager({
+function WeiboSuperTopicManager({
   items,
   groups,
   saving,
-  onAdd,
+  onSave,
   onRemove,
-  onEdit,
 }: {
   items: SuperTopic[]
   groups: SuperGroup[]
   saving: boolean
-  onAdd: (oid: string, name: string, groupName: string) => Promise<void>
+  onSave: (item: SuperTopic | null, oid: string, name: string, signEnabled: boolean, reportEnabled: boolean, groupName: string) => Promise<void>
   onRemove: (item: SuperTopic) => Promise<void>
-  onEdit: (item: SuperTopic, oid: string, name: string, groupName: string) => Promise<void>
 }) {
   const [oid, setOid] = useState('')
   const [name, setName] = useState('')
+  const [signEnabled, setSignEnabled] = useState(true)
+  const [reportEnabled, setReportEnabled] = useState(true)
   const [groupName, setGroupName] = useState('')
-  const [editing, setEditing] = useState<SuperTopic | null>(null)
-  const [eOid, setEOid] = useState('')
-  const [eName, setEName] = useState('')
-  const [eGroup, setEGroup] = useState('')
+  const [editingOID, setEditingOID] = useState('')
+  const [editName, setEditName] = useState('')
+  const [editSignEnabled, setEditSignEnabled] = useState(false)
+  const [editReportEnabled, setEditReportEnabled] = useState(false)
+  const [editGroupName, setEditGroupName] = useState('')
+
+  function startEdit(item: SuperTopic) {
+    setEditingOID(item.oid)
+    setEditName(item.name || '')
+    setEditSignEnabled(Boolean(item.signEnabled))
+    setEditReportEnabled(Boolean(item.reportEnabled))
+    setEditGroupName(item.groupName || '')
+  }
 
   return (
-    <div className="sub-manager">
+    <div className="sub-manager super-topic-manager">
       <div className="sub-manager-title">
-        <strong>超话日报列表</strong>
-        <p>按分组统计与推送（与上方签到列表独立）。发送渠道在上方「日报发送渠道」。</p>
+        <strong>超话订阅（签到/日报）</strong>
+        <p>每个超话可选择自动签到、超话日报或两者。日报分组只影响日报统计与推送。</p>
       </div>
-      {groups.length ? (
-        <p className="muted compact">已有分组：{groups.map((g) => g.name).join('、')}</p>
-      ) : null}
-      <div className="sub-add with-name">
+      <div className="super-topic-add">
         <input type="text" placeholder="超话 OID（100808…）" value={oid} onChange={(e) => setOid(e.target.value)} />
         <input type="text" placeholder="显示名（可选）" value={name} onChange={(e) => setName(e.target.value)} />
-        <input
-          type="text"
-          className="group-input"
-          placeholder="分组显示名（如 X姐姐们）"
-          value={groupName}
-          onChange={(e) => setGroupName(e.target.value)}
-          list="super-count-groups"
-        />
-        <datalist id="super-count-groups">
-          {groups.map((g) => (
-            <option key={g.key} value={g.name} />
-          ))}
-        </datalist>
+        {reportEnabled ? (
+          <input
+            type="text"
+            placeholder="日报分组（可选，可新建）"
+            value={groupName}
+            onChange={(event) => setGroupName(event.target.value)}
+            list="weibo-super-groups"
+          />
+        ) : <span className="super-topic-group-placeholder">日报关闭，不需要分组</span>}
+        <div className="monitor-kind-options">
+          <label><input type="checkbox" checked={signEnabled} onChange={(event) => setSignEnabled(event.target.checked)} /> 自动签到</label>
+          <label><input type="checkbox" checked={reportEnabled} onChange={(event) => setReportEnabled(event.target.checked)} /> 超话日报</label>
+        </div>
         <button
           className="secondary-button"
-          disabled={saving || !oid.trim()}
-          onClick={() =>
-            void onAdd(oid, name, groupName).then(() => {
-              setOid('')
-              setName('')
-              setGroupName('')
-            })
-          }
+          disabled={saving || !oid.trim() || (!signEnabled && !reportEnabled)}
+          onClick={() => void onSave(null, oid, name, signEnabled, reportEnabled, groupName).then(() => {
+            setOid('')
+            setName('')
+            setGroupName('')
+          })}
         >
           <Plus size={16} />
           添加
         </button>
       </div>
-      <div className="sub-list">
-        {items.length ? (
-          items.map((item) => {
-            if (editing && editing.oid === item.oid) {
-              return (
-                <div className="sub-item editing" key={item.oid}>
-                  <div className="sub-edit-grid">
-                    <input value={eOid} onChange={(e) => setEOid(e.target.value)} placeholder="OID" />
-                    <input value={eName} onChange={(e) => setEName(e.target.value)} placeholder="名称" />
-                    <input
-                      value={eGroup}
-                      onChange={(e) => setEGroup(e.target.value)}
-                      placeholder="分组显示名"
-                      list="super-count-groups"
-                      className="group-input"
-                    />
-                  </div>
-                  <div className="sub-item-actions">
-                    <button className="secondary-button" disabled={saving} onClick={() => void onEdit(item, eOid, eName, eGroup).then(() => setEditing(null))}>
-                      <Check size={15} />
-                      保存
-                    </button>
-                    <button className="icon-button" onClick={() => setEditing(null)}>
-                      <X size={16} />
-                    </button>
-                  </div>
-                </div>
-              )
-            }
+      <datalist id="weibo-super-groups">
+        {groups.map((group) => <option key={group.key} value={group.name} />)}
+      </datalist>
+      <div className="douyin-list super-topic-list">
+        {items.length ? items.map((item) => {
+          const isEditing = editingOID === item.oid
+          if (isEditing) {
             return (
-              <div className="sub-item" key={item.oid}>
-                <div>
-                  <strong>{item.name || item.oid}</strong>
-                  <small>
-                    {item.groupName ? `分组 ${item.groupName}` : '未分组'}
-                    {item.groupKey && item.groupKey !== item.groupName ? `（${item.groupKey}）` : ''}
-                    {` · ${item.oid}`}
-                    {item.reportSign ? ` · report_sign=${item.reportSign}` : ''}
-                  </small>
+              <article className="douyin-card super-topic-card editing" key={item.oid}>
+                <div className="super-topic-edit-grid">
+                  <label>
+                    <span>绑定超话 OID</span>
+                    <input value={item.oid} readOnly aria-label="绑定超话 OID（不可修改）" />
+                  </label>
+                  <label>
+                    <span>显示名称</span>
+                    <input value={editName} onChange={(event) => setEditName(event.target.value)} placeholder="显示名（可选）" />
+                  </label>
+                  {editReportEnabled ? (
+                    <label>
+                      <span>日报分组</span>
+                      <input value={editGroupName} onChange={(event) => setEditGroupName(event.target.value)} placeholder="可选择或新建分组" list="weibo-super-groups" />
+                    </label>
+                  ) : null}
+                </div>
+                <div className="douyin-edit-options">
+                  <label><input type="checkbox" checked={editSignEnabled} onChange={(event) => setEditSignEnabled(event.target.checked)} /> 自动签到</label>
+                  <label><input type="checkbox" checked={editReportEnabled} onChange={(event) => setEditReportEnabled(event.target.checked)} /> 超话日报</label>
+                  {!editSignEnabled && !editReportEnabled ? <small>至少保留一项；如需完全移除请使用删除。</small> : null}
                 </div>
                 <div className="sub-item-actions">
                   <button
-                    className="icon-button"
-                    disabled={saving}
-                    aria-label="编辑"
-                    onClick={() => {
-                      setEditing(item)
-                      setEOid(item.oid)
-                      setEName(item.name || '')
-                      setEGroup(item.groupName || '')
-                    }}
+                    className="secondary-button"
+                    disabled={saving || (!editSignEnabled && !editReportEnabled)}
+                    onClick={() => void onSave(item, item.oid, editName, editSignEnabled, editReportEnabled, editGroupName).then(() => setEditingOID(''))}
                   >
-                    <Pencil size={15} />
+                    <Check size={15} /> 保存
                   </button>
-                  <button className="icon-button" disabled={saving} aria-label="删除" onClick={() => void onRemove(item)}>
-                    <Trash2 size={16} />
-                  </button>
+                  <button className="icon-button" disabled={saving} aria-label="取消编辑" onClick={() => setEditingOID('')}><X size={16} /></button>
                 </div>
-              </div>
+              </article>
             )
-          })
-        ) : (
-          <p className="muted">暂无日报超话。开启上方「超话日报」后在此添加。</p>
-        )}
+          }
+          const details = [
+            item.lastSignDate ? `最近签到 ${item.lastSignDate}` : '',
+            item.lastSignStatus || '',
+            item.lastSignRank ? `签到排名 ${item.lastSignRank}` : '',
+            item.reportSign ? `日报人数 ${item.reportSign}` : '',
+          ].filter(Boolean).join(' · ')
+          return (
+            <article className="douyin-card super-topic-card" key={item.oid}>
+              <div className="douyin-card-main">
+                <div className="douyin-card-heading">
+                  <strong>{item.name || item.oid}</strong>
+                  <div className="subscription-badges">
+                    {item.signEnabled ? <span>自动签到</span> : null}
+                    {item.reportEnabled ? <span>超话日报</span> : null}
+                    {item.reportEnabled ? <span className="attention">{item.groupName || '未分组'}</span> : null}
+                  </div>
+                </div>
+                <div className="douyin-identity" title={item.oid}><span>超话 OID</span><code>{item.oid}</code></div>
+                {details ? <p>{details}</p> : null}
+              </div>
+              <div className="sub-item-actions">
+                <button className="icon-button" disabled={saving} aria-label={`编辑 ${item.name || item.oid}`} onClick={() => startEdit(item)}><Pencil size={15} /></button>
+                <button className="icon-button danger" disabled={saving} aria-label={`删除 ${item.name || item.oid}`} onClick={() => void onRemove(item)}><Trash2 size={16} /></button>
+              </div>
+            </article>
+          )
+        }) : <p className="muted">暂无超话订阅。在上方填写 OID 并选择自动签到、超话日报或两者。</p>}
       </div>
     </div>
   )
@@ -867,19 +784,17 @@ export function Configuration() {
   const [weibo, setWeibo] = useState<SubItem[]>([])
   const [rooms, setRooms] = useState<SubItem[]>([])
   const [superTopics, setSuperTopics] = useState<SuperTopic[]>([])
-  const [signTopics, setSignTopics] = useState<SuperTopic[]>([])
   const [superGroups, setSuperGroups] = useState<SuperGroup[]>([])
 
   const load = useCallback(async () => {
     try {
-      const [response, xhsR, dyR, wbR, roomR, superR, signR] = await Promise.all([
+      const [response, xhsR, dyR, wbR, roomR, superR] = await Promise.all([
         api<ConfigResponse>('config'),
         api<SubResponse>('xiaohongshu/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('douyin/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('weibo/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('pocket/rooms').catch(() => ({ subscriptions: [] as SubItem[] })),
-        api<SuperResponse>('weibo/super-count/topics').catch(() => ({ topics: [] as SuperTopic[], groups: [] as SuperGroup[] })),
-        api<SuperResponse>('weibo/super-sign/topics').catch(() => ({ topics: [] as SuperTopic[] })),
+        api<SuperResponse>('weibo/super-topics').catch(() => ({ topics: [] as SuperTopic[], groups: [] as SuperGroup[] })),
       ])
       const next: Record<string, unknown> = {}
       Object.values(response.groups)
@@ -895,7 +810,6 @@ export function Configuration() {
       setRooms(roomR.subscriptions || [])
       setSuperTopics(superR.topics || [])
       setSuperGroups(superR.groups || [])
-      setSignTopics(signR.topics || [])
       setActive((current) => current || response.groupOrder[0])
       setError(null)
     } catch (reason) {
@@ -1127,57 +1041,28 @@ export function Configuration() {
                     })
                   }
                 />
-                <SuperSignManager
-                  items={signTopics}
-                  saving={subSaving}
-                  onAdd={(oid, name) =>
-                    withSub(async () => {
-                      await api('weibo/super-sign/topics', {
-                        method: 'POST',
-                        body: JSON.stringify({ oid: oid.trim(), name: name.trim() || undefined }),
-                      })
-                    })
-                  }
-                  onEdit={(_item, oid, name) =>
-                    withSub(async () => {
-                      await api('weibo/super-sign/topics', {
-                        method: 'PUT',
-                        body: JSON.stringify({ oid: oid.trim(), name: name.trim() || undefined }),
-                      })
-                    })
-                  }
-                  onRemove={(item) =>
-                    withSub(async () => {
-                      await api('weibo/super-sign/topics', {
-                        method: 'DELETE',
-                        body: JSON.stringify({ oid: item.oid }),
-                      })
-                    })
-                  }
-                />
-                <SuperCountManager
+                <WeiboSuperTopicManager
                   items={superTopics}
                   groups={superGroups}
                   saving={subSaving}
-                  onAdd={(oid, name, groupName) =>
+                  onSave={(item, oid, name, signEnabled, reportEnabled, groupName) =>
                     withSub(async () => {
-                      await api('weibo/super-count/topics', {
-                        method: 'POST',
-                        body: JSON.stringify({ oid: oid.trim(), name: name.trim() || undefined, groupName: groupName.trim() || undefined }),
-                      })
-                    })
-                  }
-                  onEdit={(_item, oid, name, groupName) =>
-                    withSub(async () => {
-                      await api('weibo/super-count/topics', {
-                        method: 'PUT',
-                        body: JSON.stringify({ oid: oid.trim(), name: name.trim() || undefined, groupName: groupName.trim() || undefined }),
+                      await api('weibo/super-topics', {
+                        method: item ? 'PUT' : 'POST',
+                        body: JSON.stringify({
+                          oldOid: item?.oid,
+                          oid: oid.trim(),
+                          name: name.trim() || undefined,
+                          signEnabled,
+                          reportEnabled,
+                          groupName: reportEnabled ? groupName.trim() || undefined : undefined,
+                        }),
                       })
                     })
                   }
                   onRemove={(item) =>
                     withSub(async () => {
-                      await api('weibo/super-count/topics', {
+                      await api('weibo/super-topics', {
                         method: 'DELETE',
                         body: JSON.stringify({ oid: item.oid }),
                       })
