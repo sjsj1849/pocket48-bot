@@ -67,8 +67,8 @@ var configFields = map[string]configField{
 	"WEIBO_BROWSER_REFRESH_MINUTES": {"WEIBO_BROWSER_REFRESH_MINUTES", "微博", "Cookie 刷新周期", "自动刷新间隔（分钟，最低 5）", kindInteger, false, false, nil},
 	"WEIBO_COOKIE":                  {"WEIBO_COOKIE", "微博", "weibo.com 登录态（Cookie）", "不是微博密码。浏览器登录后自动写入的一长串会话凭证；也可从已登录的 weibo.com 开发者工具复制。留空保持现有值", kindSecret, false, false, nil},
 	"WEIBO_MWEIBO_COOKIE":           {"WEIBO_MWEIBO_COOKIE", "微博", "m.weibo.cn 登录态（Cookie）", "不是密码。手机站会话凭证，用于部分接口/日报；开启浏览器登录后通常会自动同步。留空保持现有值", kindSecret, false, false, nil},
-	"WEIBO_SUPER_AUTO_ENABLED":      {"WEIBO_SUPER_AUTO_ENABLED", "微博", "超话自动签到", "开关：每日对「签到列表」里的超话自动签到（数据与日报列表独立）", kindBoolean, false, false, nil},
-	"WEIBO_SUPER_COUNT_ENABLED":     {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "开关：每日统计「日报列表」签到人数并邮件/QQ 推送（数据与签到列表独立）", kindBoolean, false, false, nil},
+	"WEIBO_SUPER_AUTO_ENABLED":      {"WEIBO_SUPER_AUTO_ENABLED", "微博", "超话自动签到", "全局开关：每日对统一「超话订阅」中已勾选自动签到的超话执行签到", kindBoolean, false, false, nil},
+	"WEIBO_SUPER_COUNT_ENABLED":     {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "全局开关：每日统计统一「超话订阅」中已勾选日报的超话，并按分组推送", kindBoolean, false, false, nil},
 	"WEIBO_SUPER_COUNT_DELIVERY":    {"WEIBO_SUPER_COUNT_DELIVERY", "微博", "日报发送渠道", "email=仅邮件（默认），qq=仅QQ，both=邮件+QQ", kindString, false, false, nil},
 	"WEIBO_SUPER_COUNT_QQ":          {"WEIBO_SUPER_COUNT_QQ", "微博", "日报额外 QQ 号", "仅渠道含 QQ 时生效。留空则只发给管理员；多个用逗号/空格/换行分隔", kindString, false, false, nil},
 	// 抖音
