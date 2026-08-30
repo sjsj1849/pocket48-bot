@@ -214,7 +214,6 @@ func truncateForLog(s string, max int) string {
 	return string(runes[:max]) + "…"
 }
 
-
 func mailConfigFrom(cfg *config.Config) mailsend.Config {
 	if cfg == nil {
 		return mailsend.Config{}
@@ -876,10 +875,6 @@ func (b *Bot) getCachedRoomInfo(roomID int64) (*pocket48.RoomInfo, error) {
 	return info, nil
 }
 
-
-
-
-
 // reloadSubscriptions re-reads config.json and hot-applies fields that do not need a process restart.
 // Subscription maps, report delivery, email/SMTP, poll intervals, and similar switches update here.
 // NapCat URL/token, platform master switches, NIM/browser sidecar lifecycle still need full restart.
@@ -928,6 +923,10 @@ func (b *Bot) reloadSubscriptions() {
 
 	// Douyin / 小红书 poll + IM routing (not master enable)
 	b.cfg.DouyinPollSeconds = cfg.DouyinPollSeconds
+	b.cfg.DouyinLiveSummaryEnabled = cfg.DouyinLiveSummaryEnabled
+	b.cfg.DouyinLiveSoundWaveEnabled = cfg.DouyinLiveSoundWaveEnabled
+	b.cfg.DouyinLiveRawStatsDebug = cfg.DouyinLiveRawStatsDebug
+	b.cfg.DouyinLiveRawGiftDebug = cfg.DouyinLiveRawGiftDebug
 	b.cfg.DouyinIMEnabled = cfg.DouyinIMEnabled
 	b.cfg.DouyinIMPrivateEnabled = cfg.DouyinIMPrivateEnabled
 	b.cfg.DouyinIMGroupName = cfg.DouyinIMGroupName
@@ -950,6 +949,11 @@ func (b *Bot) reloadSubscriptions() {
 		}
 		if strings.TrimSpace(cfg.WeiboMWeiboCookie) != "" {
 			b.weiboMonitor.SetMWeiboCookie(cfg.WeiboMWeiboCookie)
+		}
+	}
+	if b.douyinMonitor != nil {
+		if err := b.douyinMonitor.Sync(); err != nil {
+			b.LogInfo("抖音订阅热重载同步失败: %v", err)
 		}
 	}
 

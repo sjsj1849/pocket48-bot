@@ -7,41 +7,41 @@ import (
 )
 
 type Config struct {
-	NapCatWSURL                       string                                             `json:"NAPCAT_WS_URL"`
-	NapCatAccessToken                 string                                             `json:"NAPCAT_ACCESS_TOKEN"`
-	PocketUsername                    string                                             `json:"POCKET_USERNAME"`
-	PocketPassword                    string                                             `json:"POCKET_PASSWORD"`
-	PocketToken                       string                                             `json:"POCKET_TOKEN"`
-	NIMToken                          string                                             `json:"NIM_TOKEN"`
-	AdminQQ                           []int64                                            `json:"ADMIN_QQ"` // Changed to array of int64
-	SuperAdmin                        int64                                              `json:"SUPER_ADMIN"`
-	BoundGroupID                      int64                                              `json:"BOUND_GROUP_ID"`
-	CommandPrefix                     string                                             `json:"COMMAND_PREFIX"`
-	GroupSubscriptions                map[string][]int64                                 `json:"GROUP_SUBSCRIPTIONS"`  // GroupID (string) -> List of RoomIDs
-	InitialFetchWindow                int64                                              `json:"INITIAL_FETCH_WINDOW"` // Minutes
-	LiveMonitoring                    bool                                               `json:"LIVE_MONITORING"`
-	LiveSpecific                      map[string]bool                                    `json:"LIVE_SPECIFIC"`         // RoomID (string) -> bool
-	GiftSpecific                      map[string]bool                                    `json:"GIFT_SPECIFIC"`         // RoomID (string) -> bool
-	AnnualScoreSpecific               map[string]bool                                    `json:"ANNUAL_SCORE_SPECIFIC"` // RoomID (string) -> bool
-	NIMEnabled                        bool                                               `json:"NIM_ENABLED"`
-	NIMSidecarCmd                     string                                             `json:"NIM_SIDECAR_CMD"`
-	NIMAccount                        string                                             `json:"NIM_ACCOUNT"`
-	NIMRoomMessageEnabled             bool                                               `json:"NIM_ROOM_MESSAGE_ENABLED"`
-	NIMRoomMessagePollFallback        bool                                               `json:"NIM_ROOM_MESSAGE_POLL_FALLBACK"`
-	NIMLiveDanmakuEnabled             bool                                               `json:"NIM_LIVE_DANMAKU_ENABLED"`
-	NIMViewerEventEnabled             bool                                               `json:"NIM_VIEWER_EVENT_ENABLED"`
-	PollingInterval                   int                                                `json:"POLLING_INTERVAL"`                     // Seconds
-	LastStartupTime                   int64                                              `json:"LAST_STARTUP_TIME"`                    // Unix Timestamp
-	WeiboSubscriptions                map[int64]map[string]*WeiboConfig                  `json:"WEIBO_SUBSCRIPTIONS"`                  // GroupID -> UID -> WeiboConfig
-	WeiboSuperPostSubscriptions       map[int64]map[string]*WeiboSuperPostConfig         `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"`        // GroupID -> key(uid|oid) -> config
-	WeiboSuperTopics                  map[int64]map[string]*WeiboSuperTopic              `json:"WEIBO_SUPER_TOPICS"`                   // GroupID -> OID -> Topic
-	WeiboSuperAutoEnabled             bool                                               `json:"WEIBO_SUPER_AUTO_ENABLED"`             // Daily auto super-topic sign-in
-	WeiboSuperLastRunDate             string                                             `json:"WEIBO_SUPER_LAST_RUN_DATE"`            // YYYY-MM-DD
-	WeiboSuperCountEnabled            bool                                               `json:"WEIBO_SUPER_COUNT_ENABLED"`            // Enable weibo super count feature
-	WeiboSuperCountTopics             map[string]*WeiboSuperCountTopic                   `json:"WEIBO_SUPER_COUNT_TOPICS"`             // OID -> Topic for count feature
-	WeiboSuperCountGroups             map[string]*WeiboSuperCountGroupInfo               `json:"WEIBO_SUPER_COUNT_GROUPS"`             // group_id -> group info
+	NapCatWSURL                 string                                     `json:"NAPCAT_WS_URL"`
+	NapCatAccessToken           string                                     `json:"NAPCAT_ACCESS_TOKEN"`
+	PocketUsername              string                                     `json:"POCKET_USERNAME"`
+	PocketPassword              string                                     `json:"POCKET_PASSWORD"`
+	PocketToken                 string                                     `json:"POCKET_TOKEN"`
+	NIMToken                    string                                     `json:"NIM_TOKEN"`
+	AdminQQ                     []int64                                    `json:"ADMIN_QQ"` // Changed to array of int64
+	SuperAdmin                  int64                                      `json:"SUPER_ADMIN"`
+	BoundGroupID                int64                                      `json:"BOUND_GROUP_ID"`
+	CommandPrefix               string                                     `json:"COMMAND_PREFIX"`
+	GroupSubscriptions          map[string][]int64                         `json:"GROUP_SUBSCRIPTIONS"`  // GroupID (string) -> List of RoomIDs
+	InitialFetchWindow          int64                                      `json:"INITIAL_FETCH_WINDOW"` // Minutes
+	LiveMonitoring              bool                                       `json:"LIVE_MONITORING"`
+	LiveSpecific                map[string]bool                            `json:"LIVE_SPECIFIC"`         // RoomID (string) -> bool
+	GiftSpecific                map[string]bool                            `json:"GIFT_SPECIFIC"`         // RoomID (string) -> bool
+	AnnualScoreSpecific         map[string]bool                            `json:"ANNUAL_SCORE_SPECIFIC"` // RoomID (string) -> bool
+	NIMEnabled                  bool                                       `json:"NIM_ENABLED"`
+	NIMSidecarCmd               string                                     `json:"NIM_SIDECAR_CMD"`
+	NIMAccount                  string                                     `json:"NIM_ACCOUNT"`
+	NIMRoomMessageEnabled       bool                                       `json:"NIM_ROOM_MESSAGE_ENABLED"`
+	NIMRoomMessagePollFallback  bool                                       `json:"NIM_ROOM_MESSAGE_POLL_FALLBACK"`
+	NIMLiveDanmakuEnabled       bool                                       `json:"NIM_LIVE_DANMAKU_ENABLED"`
+	NIMViewerEventEnabled       bool                                       `json:"NIM_VIEWER_EVENT_ENABLED"`
+	PollingInterval             int                                        `json:"POLLING_INTERVAL"`              // Seconds
+	LastStartupTime             int64                                      `json:"LAST_STARTUP_TIME"`             // Unix Timestamp
+	WeiboSubscriptions          map[int64]map[string]*WeiboConfig          `json:"WEIBO_SUBSCRIPTIONS"`           // GroupID -> UID -> WeiboConfig
+	WeiboSuperPostSubscriptions map[int64]map[string]*WeiboSuperPostConfig `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"` // GroupID -> key(uid|oid) -> config
+	WeiboSuperTopics            map[int64]map[string]*WeiboSuperTopic      `json:"WEIBO_SUPER_TOPICS"`            // GroupID -> OID -> Topic
+	WeiboSuperAutoEnabled       bool                                       `json:"WEIBO_SUPER_AUTO_ENABLED"`      // Daily auto super-topic sign-in
+	WeiboSuperLastRunDate       string                                     `json:"WEIBO_SUPER_LAST_RUN_DATE"`     // YYYY-MM-DD
+	WeiboSuperCountEnabled      bool                                       `json:"WEIBO_SUPER_COUNT_ENABLED"`     // Enable weibo super count feature
+	WeiboSuperCountTopics       map[string]*WeiboSuperCountTopic           `json:"WEIBO_SUPER_COUNT_TOPICS"`      // OID -> Topic for count feature
+	WeiboSuperCountGroups       map[string]*WeiboSuperCountGroupInfo       `json:"WEIBO_SUPER_COUNT_GROUPS"`      // group_id -> group info
 	// WeiboSuperCountDelivery: email | qq | both (default both when empty)
-	WeiboSuperCountDelivery           string                                             `json:"WEIBO_SUPER_COUNT_DELIVERY,omitempty"`
+	WeiboSuperCountDelivery string `json:"WEIBO_SUPER_COUNT_DELIVERY,omitempty"`
 	// WeiboSuperCountQQ: extra QQ numbers (private) for daily report when delivery includes qq
 	WeiboSuperCountQQ                 string                                             `json:"WEIBO_SUPER_COUNT_QQ,omitempty"`
 	WeiboSuperCountLastPushDate       string                                             `json:"WEIBO_SUPER_COUNT_LAST_PUSH_DATE"`     // YYYY-MM-DD (Asia/Shanghai)
@@ -64,33 +64,37 @@ type Config struct {
 	// BrowserProxyServer: optional Chromium proxy for the shared weibo-auth browser
 	// (Playwright proxy.server). Example: http://127.0.0.1:17890
 	// Used to bypass datacenter IP bans (e.g. Xiaohongshu 300012 / HTTP 461).
-	BrowserProxyServer string `json:"BROWSER_PROXY_SERVER,omitempty"`
-	DouyinEnabled      bool   `json:"DOUYIN_ENABLED"`
-	DouyinPollSeconds                 int                                                `json:"DOUYIN_POLL_SECONDS"`
-	DouyinLiveWSURL                   string                                             `json:"DOUYIN_LIVE_WS_URL"`
-	DouyinLiveSidecarCmd              string                                             `json:"DOUYIN_LIVE_SIDECAR_CMD"`
-	DouyinSubscriptions               map[int64]map[string]*DouyinConfig                 `json:"DOUYIN_SUBSCRIPTIONS"`
-	DouyinIMEnabled                   bool                                               `json:"DOUYIN_IM_ENABLED"`
-	DouyinIMPrivateEnabled            bool                                               `json:"DOUYIN_IM_PRIVATE_ENABLED"`
-	DouyinIMGroupName                 string                                             `json:"DOUYIN_IM_GROUP_NAME"`
-	DouyinIMGroupNumber               string                                             `json:"DOUYIN_IM_GROUP_NUMBER"`
-	XiaohongshuEnabled                bool                                               `json:"XIAOHONGSHU_ENABLED"`
-	XiaohongshuPollSeconds            int                                                `json:"XIAOHONGSHU_POLL_SECONDS"`
-	XiaohongshuSubscriptions          map[int64]map[string]*XiaohongshuConfig            `json:"XIAOHONGSHU_SUBSCRIPTIONS"`
-	AlertEmailEnabled                 bool                                               `json:"ALERT_EMAIL_ENABLED"`
-	AlertEmailTo                      string                                             `json:"ALERT_EMAIL_TO"`
-	AlertEmailFrom                    string                                             `json:"ALERT_EMAIL_FROM"`
-	AlertEmailCooldownMinutes         int                                                `json:"ALERT_EMAIL_COOLDOWN_MINUTES"`
-	AlertEmailSMTPHost              string                                             `json:"ALERT_EMAIL_SMTP_HOST"`
-	AlertEmailSMTPPort              int                                                `json:"ALERT_EMAIL_SMTP_PORT"`
-	AlertEmailSMTPUser              string                                             `json:"ALERT_EMAIL_SMTP_USER"`
-	AlertEmailSMTPPassword          string                                             `json:"ALERT_EMAIL_SMTP_PASSWORD"`
-	AdminPanelURL                   string                                             `json:"ADMIN_PANEL_URL"`
-	MediaDelivery                   string                                             `json:"MEDIA_DELIVERY"` // local | remote
-	DisableGroupCommands              bool                                               `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
-	WelcomeConfigs                    map[int64]*WelcomeConfig                           `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
-	WeidianOrders                     map[int64]*WeidianOrderConfig                      `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
-	filePath                          string
+	BrowserProxyServer         string                                  `json:"BROWSER_PROXY_SERVER,omitempty"`
+	DouyinEnabled              bool                                    `json:"DOUYIN_ENABLED"`
+	DouyinPollSeconds          int                                     `json:"DOUYIN_POLL_SECONDS"`
+	DouyinLiveWSURL            string                                  `json:"DOUYIN_LIVE_WS_URL"`
+	DouyinLiveSidecarCmd       string                                  `json:"DOUYIN_LIVE_SIDECAR_CMD"`
+	DouyinLiveSummaryEnabled   bool                                    `json:"DOUYIN_LIVE_SUMMARY_ENABLED"`
+	DouyinLiveSoundWaveEnabled bool                                    `json:"DOUYIN_LIVE_SOUND_WAVE_ENABLED"`
+	DouyinLiveRawStatsDebug    bool                                    `json:"DOUYIN_LIVE_RAW_STATS_DEBUG"`
+	DouyinLiveRawGiftDebug     bool                                    `json:"DOUYIN_LIVE_RAW_GIFT_DEBUG"`
+	DouyinSubscriptions        map[int64]map[string]*DouyinConfig      `json:"DOUYIN_SUBSCRIPTIONS"`
+	DouyinIMEnabled            bool                                    `json:"DOUYIN_IM_ENABLED"`
+	DouyinIMPrivateEnabled     bool                                    `json:"DOUYIN_IM_PRIVATE_ENABLED"`
+	DouyinIMGroupName          string                                  `json:"DOUYIN_IM_GROUP_NAME"`
+	DouyinIMGroupNumber        string                                  `json:"DOUYIN_IM_GROUP_NUMBER"`
+	XiaohongshuEnabled         bool                                    `json:"XIAOHONGSHU_ENABLED"`
+	XiaohongshuPollSeconds     int                                     `json:"XIAOHONGSHU_POLL_SECONDS"`
+	XiaohongshuSubscriptions   map[int64]map[string]*XiaohongshuConfig `json:"XIAOHONGSHU_SUBSCRIPTIONS"`
+	AlertEmailEnabled          bool                                    `json:"ALERT_EMAIL_ENABLED"`
+	AlertEmailTo               string                                  `json:"ALERT_EMAIL_TO"`
+	AlertEmailFrom             string                                  `json:"ALERT_EMAIL_FROM"`
+	AlertEmailCooldownMinutes  int                                     `json:"ALERT_EMAIL_COOLDOWN_MINUTES"`
+	AlertEmailSMTPHost         string                                  `json:"ALERT_EMAIL_SMTP_HOST"`
+	AlertEmailSMTPPort         int                                     `json:"ALERT_EMAIL_SMTP_PORT"`
+	AlertEmailSMTPUser         string                                  `json:"ALERT_EMAIL_SMTP_USER"`
+	AlertEmailSMTPPassword     string                                  `json:"ALERT_EMAIL_SMTP_PASSWORD"`
+	AdminPanelURL              string                                  `json:"ADMIN_PANEL_URL"`
+	MediaDelivery              string                                  `json:"MEDIA_DELIVERY"`         // local | remote
+	DisableGroupCommands       bool                                    `json:"DISABLE_GROUP_COMMANDS"` // Disable command handling in groups
+	WelcomeConfigs             map[int64]*WelcomeConfig                `json:"WELCOME_CONFIGS"`        // GroupID -> WelcomeConfig
+	WeidianOrders              map[int64]*WeidianOrderConfig           `json:"WEIDIAN_ORDERS"`         // GroupID -> WeidianOrderConfig
+	filePath                   string
 }
 
 type WeiboConfig struct {
@@ -112,6 +116,7 @@ type DouyinConfig struct {
 	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
 	LiveID        string `json:"live_id,omitempty"`
 	Auto          bool   `json:"auto,omitempty"`
+	Disabled      bool   `json:"disabled,omitempty"`
 }
 
 // XiaohongshuConfig stores a creator subscription and its per-group cursor.
@@ -272,6 +277,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.DouyinLiveWSURL) == "" {
 		cfg.DouyinLiveWSURL = "ws://127.0.0.1:1088/ws"
+	}
+	if _, ok := raw["DOUYIN_LIVE_SUMMARY_ENABLED"]; !ok {
+		cfg.DouyinLiveSummaryEnabled = true
+	}
+	if _, ok := raw["DOUYIN_LIVE_SOUND_WAVE_ENABLED"]; !ok {
+		cfg.DouyinLiveSoundWaveEnabled = true
 	}
 	if cfg.DouyinSubscriptions == nil {
 		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)

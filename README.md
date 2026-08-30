@@ -205,6 +205,10 @@ cd ../..
   "DOUYIN_POLL_SECONDS": 60,
   "DOUYIN_LIVE_WS_URL": "ws://127.0.0.1:1088/ws",
   "DOUYIN_LIVE_SIDECAR_CMD": "",
+  "DOUYIN_LIVE_SUMMARY_ENABLED": true,
+  "DOUYIN_LIVE_SOUND_WAVE_ENABLED": true,
+  "DOUYIN_LIVE_RAW_STATS_DEBUG": false,
+  "DOUYIN_LIVE_RAW_GIFT_DEBUG": false,
   "DOUYIN_IM_ENABLED": true,
   "DOUYIN_IM_PRIVATE_ENABLED": true,
   "DOUYIN_IM_GROUP_NAME": "目标群显示名",
@@ -220,7 +224,11 @@ cd ../..
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
 - 抖音**作品**扫描优先 Cookie+HTTP，不依赖常驻创作者主页标签；`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存。抖音 **IM** 仍需长驻 IM 页。
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
-- 需要监控的账号通过 `DOUYIN_SUBSCRIPTIONS` 或 `bot douyin add` 手动维护。
+- 需要监控的账号统一保存在 `DOUYIN_SUBSCRIPTIONS`。可通过管理面板「配置 → 抖音 → 创作者订阅」添加、编辑、启停、删除，也可使用 `bot douyin add/del`；两者读写同一模型，多 QQ 群订阅和各自的 `AtAll` 设置会分别保留。
+- 直播场次写入 `storage/douyin-live-sessions/`，Bot 重启和 WebSocket 重连会恢复在线场次并抑制重复开播/下播通知。统计事件最多约每 10 秒落盘一次，开播和下播立即原子保存，最近保留 50 场或 14 天。
+- 下播汇总中的时长是 Bot 的「监测时长」。最高在线只读取 `onlineUserForAnchor`、`onlineUserCount`、`userCount`；累计场观只读取 `audienceCount`、`totalUserCount`，没有可靠字段时整行省略。
+- 礼物估算只读取完整礼物消息的 `gift.diamondCount`，按连击累计数量增量计算并用 `common.msgId`/`logId` 去重。这是监测到的钻石值估算，不是官方收入；上游漏消息时会偏低。
+- 原始统计/礼物调试开关默认关闭。开启后样本分别保存到 `storage/douyin-live-stat-dumps/`、`storage/douyin-live-gift-dumps/`，敏感字段和 URL 查询参数会被脱敏。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
 - 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群；QQ 文案标题为 `【昵称|抖音】`（不再写「抖音私信」）。
 - IM WebSocket 长时间断开时：先告警，约 2 分钟重启浏览器侧车，约 5 分钟退出进程由 systemd 拉起 Bot，约 8 分钟仍未恢复再告警（有冷却，避免刷屏）。
@@ -447,6 +455,10 @@ bot code <验证码>          # 输入验证码完成登录
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
 | `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |
 | `DOUYIN_LIVE_SIDECAR_CMD` | 可选的 douyinLive 启动命令 | `""` |
+| `DOUYIN_LIVE_SUMMARY_ENABLED` | 下播通知附加本场监测汇总 | `true` |
+| `DOUYIN_LIVE_SOUND_WAVE_ENABLED` | 按 `gift.diamondCount` 监测礼物音浪估算 | `true` |
+| `DOUYIN_LIVE_RAW_STATS_DEBUG` | 保存脱敏直播统计样本 | `false` |
+| `DOUYIN_LIVE_RAW_GIFT_DEBUG` | 保存脱敏礼物消息样本 | `false` |
 | `DOUYIN_IM_ENABLED` | 启用抖音群聊/私聊只读实时连接 | `false` |
 | `DOUYIN_IM_PRIVATE_ENABLED` | 将收到的抖音私信仅转发给 Bot 管理员 | `false` |
 | `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |
