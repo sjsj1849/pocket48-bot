@@ -80,23 +80,31 @@ type douyinBrowserEvent struct {
 }
 
 type douyinLiveState struct {
-	LiveID                  string           `json:"live_id"`
-	RoomID                  string           `json:"room_id"`
-	Name                    string           `json:"name,omitempty"`
-	Title                   string           `json:"title,omitempty"`
-	DetectedStartedAt       time.Time        `json:"detected_started_at"`
-	LastUpdatedAt           time.Time        `json:"last_updated_at"`
-	Online                  bool             `json:"online"`
-	CurrentOnline           int64            `json:"current_online,omitempty"`
-	PeakOnline              int64            `json:"peak_online,omitempty"`
-	TotalAudience           int64            `json:"total_audience,omitempty"`
-	EstimatedSoundWave      int64            `json:"estimated_sound_wave,omitempty"`
-	SoundWaveAvailable      bool             `json:"sound_wave_available,omitempty"`
-	GiftEventCount          int64            `json:"gift_event_count,omitempty"`
-	ProcessedGiftMessageIDs []string         `json:"processed_gift_message_ids,omitempty"`
-	ComboGiftCounts         map[string]int64 `json:"combo_gift_counts,omitempty"`
-	StartNotificationSent   bool             `json:"start_notification_sent"`
-	EndNotificationSent     bool             `json:"end_notification_sent"`
+	SessionID                string           `json:"session_id"`
+	LiveID                   string           `json:"live_id"`
+	RoomID                   string           `json:"room_id"`
+	Name                     string           `json:"name,omitempty"`
+	Title                    string           `json:"title,omitempty"`
+	DetectedStartedAt        time.Time        `json:"detected_started_at"`
+	DetectedEndedAt          time.Time        `json:"detected_ended_at,omitempty"`
+	LastUpdatedAt            time.Time        `json:"last_updated_at"`
+	Online                   bool             `json:"online"`
+	CurrentOnline            int64            `json:"current_online,omitempty"`
+	PeakOnline               int64            `json:"peak_online,omitempty"`
+	TotalAudience            int64            `json:"total_audience,omitempty"`
+	EstimatedSoundWave       int64            `json:"estimated_sound_wave,omitempty"`
+	SoundWaveAvailable       bool             `json:"sound_wave_available,omitempty"`
+	GiftEventCount           int64            `json:"gift_event_count,omitempty"`
+	ProcessedGiftMessageIDs  []string         `json:"processed_gift_message_ids,omitempty"`
+	ComboGiftCounts          map[string]int64 `json:"combo_gift_counts,omitempty"`
+	StartNotificationPending bool             `json:"start_notification_pending,omitempty"`
+	EndNotificationPending   bool             `json:"end_notification_pending,omitempty"`
+	StartNotificationQueued  map[string]bool  `json:"start_notification_queued,omitempty"`
+	EndNotificationQueued    map[string]bool  `json:"end_notification_queued,omitempty"`
+	// Sent fields are retained as aggregate/backward-compatible markers. New
+	// sessions set them only after every current target is queued.
+	StartNotificationSent bool `json:"start_notification_sent"`
+	EndNotificationSent   bool `json:"end_notification_sent"`
 }
 
 type DouyinMonitor struct {
@@ -113,6 +121,8 @@ type DouyinMonitor struct {
 	liveStates      map[string]*douyinLiveState
 	livePersistedAt map[string]time.Time
 	liveSessionDir  string
+	livePersistMu   sync.Mutex
+	enqueueGroup    func(int64, interface{}) bool
 	browser         *WeiboAuthBridge
 	imConversations map[string]douyinIMTarget // conversationID -> target
 	imSelfUID       string
@@ -211,7 +221,7 @@ func (m *DouyinMonitor) accountsLocked() []douyinAccountCommand {
 	seen := make(map[string]douyinAccountCommand)
 	for _, group := range m.cfg.DouyinSubscriptions {
 		for key, item := range group {
-			if item == nil || item.Disabled {
+			if item == nil || item.Disabled || item.WorksDisabled && item.LiveDisabled {
 				continue
 			}
 			sec := strings.TrimSpace(item.SecUserID)
@@ -243,6 +253,18 @@ func (m *DouyinMonitor) accountsLocked() []douyinAccountCommand {
 	return result
 }
 
+func (m *DouyinMonitor) desiredLiveIDsLocked() map[string]bool {
+	result := make(map[string]bool)
+	for _, group := range m.cfg.DouyinSubscriptions {
+		for _, item := range group {
+			if item != nil && !item.Disabled && !item.LiveDisabled && strings.TrimSpace(item.LiveID) != "" {
+				result[item.LiveID] = true
+			}
+		}
+	}
+	return result
+}
+
 func (m *DouyinMonitor) Start() error {
 	m.mu.Lock()
 	if m.started {
@@ -257,13 +279,12 @@ func (m *DouyinMonitor) Start() error {
 		log.Printf("[Douyin-live] sidecar start failed, will still try configured WebSocket: %v", err)
 	}
 	m.mu.Lock()
-	accounts := m.accountsLocked()
+	desiredLive := m.desiredLiveIDsLocked()
 	m.mu.Unlock()
-	for _, account := range accounts {
-		if account.LiveID != "" {
-			m.ensureLive(account.LiveID)
-		}
+	for liveID := range desiredLive {
+		m.ensureLive(liveID)
 	}
+	m.retryPendingLiveNotifications()
 	return nil
 }
 
@@ -304,15 +325,9 @@ func (m *DouyinMonitor) startOptionalLiveProcess() error {
 
 func (m *DouyinMonitor) Sync() error {
 	m.mu.Lock()
-	accounts := m.accountsLocked()
 	started := m.started
 	browser := m.browser
-	desiredLive := make(map[string]bool)
-	for _, account := range accounts {
-		if account.LiveID != "" {
-			desiredLive[account.LiveID] = true
-		}
-	}
+	desiredLive := m.desiredLiveIDsLocked()
 	for liveID, cancel := range m.liveCancels {
 		if !desiredLive[liveID] {
 			cancel()
@@ -325,11 +340,10 @@ func (m *DouyinMonitor) Sync() error {
 			return err
 		}
 	}
-	for _, account := range accounts {
-		if account.LiveID != "" {
-			m.ensureLive(account.LiveID)
-		}
+	for liveID := range desiredLive {
+		m.ensureLive(liveID)
 	}
+	m.retryPendingLiveNotifications()
 	if browser == nil {
 		return fmt.Errorf("shared browser bridge is not configured")
 	}
@@ -1312,10 +1326,10 @@ func (m *DouyinMonitor) handleAccount(event douyinBrowserEvent) {
 		if item == nil {
 			continue
 		}
-		if !item.Disabled {
+		if !item.Disabled && !item.LiveDisabled {
 			enabled = true
 		}
-		if event.Nickname != "" && item.Name != event.Nickname {
+		if event.Nickname != "" && !item.NameManual && item.Name != event.Nickname {
 			item.Name = event.Nickname
 			changed = true
 		}
@@ -1392,7 +1406,7 @@ func (m *DouyinMonitor) handlePosts(event douyinBrowserEvent) {
 	m.mu.Lock()
 	for groupID, group := range m.cfg.DouyinSubscriptions {
 		item := group[sec]
-		if item == nil || item.Disabled {
+		if item == nil || item.Disabled || item.WorksDisabled {
 			continue
 		}
 		if event.Nickname != "" {
@@ -1604,11 +1618,12 @@ func (m *DouyinMonitor) handleLiveMessage(liveID string, raw []byte) {
 		code, _ := body["code"].(string)
 		name, _ := body["live_name"].(string)
 		title, _ := body["title"].(string)
+		roomID := extractDouyinRoomID(body)
 		switch code {
 		case "ROOM_ONLINE":
-			m.liveOnline(liveID, name, title)
+			m.liveOnline(liveID, roomID, name, title)
 		case "ROOM_ENDED":
-			m.liveEnded(liveID, name, title)
+			m.liveEnded(liveID, roomID, name, title)
 		}
 		return
 	}
@@ -1623,6 +1638,9 @@ func (m *DouyinMonitor) handleLiveMessage(liveID string, raw []byte) {
 		m.mu.Lock()
 		state := m.liveStates[liveID]
 		if state != nil && state.Online {
+			if state.RoomID == "" {
+				state.RoomID = extractDouyinRoomID(body)
+			}
 			if current > 0 {
 				state.CurrentOnline = current
 				if current > state.PeakOnline {
@@ -1676,9 +1694,24 @@ func numberAsInt64(value interface{}) int64 {
 	}
 }
 
-func extractDouyinExplicitNumber(value interface{}, fields ...string) int64 {
-	for _, field := range fields {
-		if result := numberAsInt64(findDouyinValue(value, field)); result > 0 {
+func douyinValueAtPath(value interface{}, path ...string) interface{} {
+	current := value
+	for _, part := range path {
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		current = mapValueFold(object, part)
+		if current == nil {
+			return nil
+		}
+	}
+	return current
+}
+
+func extractDouyinNumberAtPaths(value interface{}, paths ...[]string) int64 {
+	for _, path := range paths {
+		if result := numberAsInt64(douyinValueAtPath(value, path...)); result > 0 {
 			return result
 		}
 	}
@@ -1688,69 +1721,147 @@ func extractDouyinExplicitNumber(value interface{}, fields ...string) int64 {
 // extractDouyinCurrentOnline only accepts fields confirmed to represent the
 // number currently in the room. In particular, a generic "total" is ignored.
 func extractDouyinCurrentOnline(value interface{}) int64 {
-	return extractDouyinExplicitNumber(value, "onlineUserForAnchor", "onlineUserCount", "userCount")
+	return extractDouyinNumberAtPaths(value,
+		[]string{"payload", "onlineUserForAnchor"}, []string{"payload", "onlineUserCount"}, []string{"payload", "userCount"},
+		[]string{"data", "onlineUserForAnchor"}, []string{"data", "onlineUserCount"}, []string{"data", "userCount"},
+		[]string{"payload", "room", "onlineUserForAnchor"}, []string{"payload", "room", "onlineUserCount"}, []string{"payload", "room", "userCount"},
+		[]string{"onlineUserForAnchor"}, []string{"onlineUserCount"}, []string{"userCount"},
+	)
 }
 
 // extractDouyinTotalAudience only accepts explicit cumulative audience fields.
 func extractDouyinTotalAudience(value interface{}) int64 {
-	return extractDouyinExplicitNumber(value, "audienceCount", "totalUserCount")
+	return extractDouyinNumberAtPaths(value,
+		[]string{"payload", "audienceCount"}, []string{"payload", "totalUserCount"},
+		[]string{"data", "audienceCount"}, []string{"data", "totalUserCount"},
+		[]string{"payload", "room", "audienceCount"}, []string{"payload", "room", "totalUserCount"},
+		[]string{"audienceCount"}, []string{"totalUserCount"},
+	)
+}
+
+func extractDouyinRoomID(value interface{}) string {
+	paths := [][]string{
+		{"room_id"}, {"roomId"}, {"roomID"},
+		{"payload", "room_id"}, {"payload", "roomId"}, {"payload", "roomID"}, {"payload", "room", "id"},
+		{"data", "room_id"}, {"data", "roomId"}, {"data", "roomID"}, {"data", "room", "id"},
+	}
+	for _, path := range paths {
+		if result := douyinString(douyinValueAtPath(value, path...)); result != "" && result != "0" {
+			return result
+		}
+	}
+	return ""
 }
 
 // Kept for source compatibility with older tests/extensions.
 func extractDouyinOnline(value interface{}) int64 { return extractDouyinCurrentOnline(value) }
 
-func (m *DouyinMonitor) liveOnline(liveID, name, title string) {
+func newDouyinLiveState(liveID, roomID, name, title string, now time.Time) *douyinLiveState {
+	sessionBase := safeDouyinLiveFilename(liveID)
+	if roomID != "" {
+		sessionBase += "-" + safeDouyinLiveFilename(roomID)
+	}
+	return &douyinLiveState{
+		SessionID:                fmt.Sprintf("%s-%d", sessionBase, now.UnixNano()),
+		LiveID:                   liveID,
+		RoomID:                   roomID,
+		Name:                     name,
+		Title:                    title,
+		DetectedStartedAt:        now,
+		LastUpdatedAt:            now,
+		Online:                   true,
+		ComboGiftCounts:          make(map[string]int64),
+		StartNotificationPending: true,
+		StartNotificationQueued:  make(map[string]bool),
+		EndNotificationQueued:    make(map[string]bool),
+	}
+}
+
+func (m *DouyinMonitor) liveOnline(liveID, roomID, name, title string) {
+	m.mu.Lock()
+	state := m.liveStates[liveID]
+	if state != nil && state.Online {
+		if roomID != "" && state.RoomID != "" && roomID != state.RoomID {
+			previousRoomID := state.RoomID
+			m.mu.Unlock()
+			// A changed real room ID is an authoritative session boundary even
+			// if the upstream omitted ROOM_ENDED during reconnect.
+			m.liveEnded(liveID, previousRoomID, "", "")
+			m.liveOnline(liveID, roomID, name, title)
+			return
+		}
+		if state.RoomID == "" {
+			state.RoomID = roomID
+		}
+		if state.Name == "" {
+			state.Name = name
+		}
+		if state.Title == "" {
+			state.Title = title
+		}
+		m.mu.Unlock()
+		// A repeated ROOM_ONLINE is also the recovery trigger for a pending
+		// notification after restart. Already queued groups are skipped.
+		m.queueLiveNotification(liveID, true)
+		return
+	}
+	m.mu.Unlock()
+
+	// If the previous end notification was pending, give it one last enqueue
+	// attempt before replacing the current pointer with the next session.
+	if state != nil && state.EndNotificationPending {
+		m.queueLiveNotification(liveID, false)
+	}
+
 	now := time.Now()
+	m.mu.Lock()
+	state = newDouyinLiveState(liveID, roomID, name, title, now)
+	m.liveStates[liveID] = state
+	m.mu.Unlock()
+	// Persist pending before enqueue. A crash here retries after restart; a
+	// crash after enqueue but before the queued marker can duplicate, not lose.
+	m.persistLiveState(liveID, true)
+	m.queueLiveNotification(liveID, true)
+}
+
+func (m *DouyinMonitor) liveEnded(liveID, roomID, name, title string) {
 	m.mu.Lock()
 	state := m.liveStates[liveID]
 	if state == nil {
-		state = &douyinLiveState{LiveID: liveID, RoomID: liveID, ComboGiftCounts: make(map[string]int64)}
-		m.liveStates[liveID] = state
-	}
-	if state.LiveID == "" {
-		state.LiveID = liveID
-		state.RoomID = liveID
-	}
-	if state.ComboGiftCounts == nil {
-		state.ComboGiftCounts = make(map[string]int64)
-	}
-	if state.Online || state.StartNotificationSent || state.EndNotificationSent {
 		m.mu.Unlock()
 		return
 	}
-	state.Online = true
-	state.DetectedStartedAt = now
-	state.LastUpdatedAt = now
-	state.Name = name
-	state.Title = title
-	state.StartNotificationSent = true
-	m.mu.Unlock()
-	m.persistLiveState(liveID, true)
-	m.broadcastLive(liveID, true, name, title, 0, 0)
-}
-
-func (m *DouyinMonitor) liveEnded(liveID, name, title string) {
-	m.mu.Lock()
-	state := m.liveStates[liveID]
-	if state == nil || !state.Online || state.EndNotificationSent {
+	if !state.Online {
+		pending := state.EndNotificationPending
+		m.mu.Unlock()
+		if pending {
+			m.queueLiveNotification(liveID, false)
+		}
+		return
+	}
+	if roomID != "" && state.RoomID != "" && roomID != state.RoomID {
 		m.mu.Unlock()
 		return
 	}
-	duration := time.Since(state.DetectedStartedAt)
-	peak := state.PeakOnline
-	if name == "" {
-		name = state.Name
+	now := time.Now()
+	if state.RoomID == "" {
+		state.RoomID = roomID
 	}
-	if title == "" {
-		title = state.Title
+	if name != "" {
+		state.Name = name
+	}
+	if title != "" {
+		state.Title = title
 	}
 	state.Online = false
-	state.LastUpdatedAt = time.Now()
-	state.EndNotificationSent = true
+	state.DetectedEndedAt = now
+	state.LastUpdatedAt = now
+	state.EndNotificationPending = true
+	state.EndNotificationSent = false
 	state.ComboGiftCounts = make(map[string]int64)
 	m.mu.Unlock()
 	m.persistLiveState(liveID, true)
-	m.broadcastLive(liveID, false, name, title, duration, peak)
+	m.queueLiveNotification(liveID, false)
 	m.pruneDouyinLiveHistory(50)
 }
 
@@ -1764,58 +1875,196 @@ func (m *DouyinMonitor) liveTargets(liveID string) []douyinLiveTarget {
 	m.mu.Lock()
 	for groupID, group := range m.cfg.DouyinSubscriptions {
 		for _, item := range group {
-			if item != nil && !item.Disabled && item.LiveID == liveID {
+			if item != nil && !item.Disabled && !item.LiveDisabled && item.LiveID == liveID {
 				targets = append(targets, douyinLiveTarget{groupID: groupID, cfg: *item})
 			}
 		}
 	}
 	m.mu.Unlock()
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].groupID == targets[j].groupID {
+			return targets[i].cfg.SecUserID < targets[j].cfg.SecUserID
+		}
+		return targets[i].groupID < targets[j].groupID
+	})
 	return targets
 }
 
-func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, title string, duration time.Duration, peak int64) {
+func douyinLiveTargetKey(target douyinLiveTarget) string {
+	return strconv.FormatInt(target.groupID, 10) + "|" + target.cfg.SecUserID
+}
+
+func notificationAlreadyQueued(state *douyinLiveState, online bool, key string) bool {
+	queued := state.EndNotificationQueued
+	legacySent := state.EndNotificationSent
+	if online {
+		queued = state.StartNotificationQueued
+		legacySent = state.StartNotificationSent
+	}
+	if queued[key] {
+		return true
+	}
+	// Old c2110ac files only have the aggregate marker. Preserve their
+	// duplicate suppression during migration.
+	return legacySent && len(queued) == 0
+}
+
+func allDouyinTargetsQueued(state *douyinLiveState, online bool, targets []douyinLiveTarget) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		if !notificationAlreadyQueued(state, online, douyinLiveTargetKey(target)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *DouyinMonitor) tryEnqueueGroupMessage(groupID int64, message interface{}) (queued bool) {
+	defer func() {
+		if recover() != nil {
+			queued = false
+		}
+	}()
+	if m.enqueueGroup != nil {
+		return m.enqueueGroup(groupID, message)
+	}
+	if m.napcat == nil {
+		return false
+	}
+	m.napcat.SendGroupMessage(groupID, message)
+	return true
+}
+
+func (m *DouyinMonitor) formatLiveNotification(target douyinLiveTarget, state douyinLiveState, online bool) []interface{} {
+	titleNick := resolveDouyinWorksTitleNick(state.Name, target.cfg.Name)
+	if titleNick == "" {
+		titleNick = target.cfg.SecUserID
+	}
+	bodyLabel := resolveDouyinWorksBodyLabel(m.cfg, target.cfg.SecUserID, state.Name, target.cfg.Name)
+	var text string
+	if online {
+		text = fmt.Sprintf("【%s|抖音直播】", titleNick)
+		if bodyLabel != "" && bodyLabel != titleNick {
+			text += "\n" + bodyLabel
+		}
+		text += "\n已开播"
+		if state.Title != "" {
+			text += "\n直播标题：" + state.Title
+		}
+		text += "\nhttps://live.douyin.com/" + state.LiveID
+	} else {
+		text = fmt.Sprintf("【%s|抖音直播】", titleNick)
+		if bodyLabel != "" && bodyLabel != titleNick {
+			text += "\n" + bodyLabel
+		}
+		text += "\n直播已结束"
+		if m.cfg.DouyinLiveSummaryEnabled {
+			endedAt := state.DetectedEndedAt
+			if endedAt.IsZero() {
+				endedAt = state.LastUpdatedAt
+			}
+			duration := endedAt.Sub(state.DetectedStartedAt)
+			text = appendDouyinLiveSummary(text, duration, state.PeakOnline, state.TotalAudience, state.EstimatedSoundWave, m.cfg.DouyinLiveSoundWaveEnabled && state.SoundWaveAvailable)
+		}
+	}
+	segments := make([]interface{}, 0, 2)
+	if target.cfg.AtAll {
+		segments = append(segments, napcat.AtSegment("all"))
+	}
+	return append(segments, napcat.TextSegment(text))
+}
+
+func (m *DouyinMonitor) queueLiveNotification(liveID string, online bool) {
 	targets := m.liveTargets(liveID)
 	for _, target := range targets {
-		titleNick := resolveDouyinWorksTitleNick(eventName, target.cfg.Name)
-		if titleNick == "" {
-			titleNick = target.cfg.SecUserID
+		key := douyinLiveTargetKey(target)
+		m.mu.Lock()
+		state := m.liveStates[liveID]
+		if state == nil || notificationAlreadyQueued(state, online, key) {
+			m.mu.Unlock()
+			continue
 		}
-		bodyLabel := resolveDouyinWorksBodyLabel(m.cfg, target.cfg.SecUserID, eventName, target.cfg.Name)
-		var text string
+		sessionID := state.SessionID
+		snapshot := *state
+		m.mu.Unlock()
+
+		segments := m.formatLiveNotification(target, snapshot, online)
+		if !m.tryEnqueueGroupMessage(target.groupID, segments) {
+			continue
+		}
+
+		m.mu.Lock()
+		state = m.liveStates[liveID]
+		if state == nil || state.SessionID != sessionID {
+			m.mu.Unlock()
+			continue
+		}
 		if online {
-			text = fmt.Sprintf("【%s|抖音直播】", titleNick)
-			if bodyLabel != "" && bodyLabel != titleNick {
-				text += "\n" + bodyLabel
+			if state.StartNotificationQueued == nil {
+				state.StartNotificationQueued = make(map[string]bool)
 			}
-			text += "\n已开播"
-			if title != "" {
-				text += "\n直播标题：" + title
-			}
-			text += "\nhttps://live.douyin.com/" + liveID
+			state.StartNotificationQueued[key] = true
+			state.StartNotificationSent = allDouyinTargetsQueued(state, true, targets)
+			state.StartNotificationPending = !state.StartNotificationSent
 		} else {
-			text = fmt.Sprintf("【%s|抖音直播】", titleNick)
-			if bodyLabel != "" && bodyLabel != titleNick {
-				text += "\n" + bodyLabel
+			if state.EndNotificationQueued == nil {
+				state.EndNotificationQueued = make(map[string]bool)
 			}
-			text += "\n直播已结束"
-			if m.cfg.DouyinLiveSummaryEnabled {
-				m.mu.Lock()
-				state := m.liveStates[liveID]
-				var total, sound int64
-				var soundAvailable bool
-				if state != nil {
-					total, sound, soundAvailable = state.TotalAudience, state.EstimatedSoundWave, state.SoundWaveAvailable
-				}
-				m.mu.Unlock()
-				text = appendDouyinLiveSummary(text, duration, peak, total, sound, m.cfg.DouyinLiveSoundWaveEnabled && soundAvailable)
-			}
+			state.EndNotificationQueued[key] = true
+			state.EndNotificationSent = allDouyinTargetsQueued(state, false, targets)
+			state.EndNotificationPending = !state.EndNotificationSent
 		}
-		segments := make([]interface{}, 0, 2)
-		if target.cfg.AtAll {
-			segments = append(segments, napcat.AtSegment("all"))
+		m.mu.Unlock()
+		// Persist after each group so a partial multi-group enqueue resumes at
+		// the first unqueued target after restart.
+		m.persistLiveState(liveID, true)
+	}
+	// Recompute after subscription edits too: removing an unqueued target must
+	// not leave the session permanently pending.
+	m.mu.Lock()
+	state := m.liveStates[liveID]
+	changed := false
+	if state != nil && allDouyinTargetsQueued(state, online, targets) {
+		if online && (!state.StartNotificationSent || state.StartNotificationPending) {
+			state.StartNotificationSent = true
+			state.StartNotificationPending = false
+			changed = true
 		}
-		segments = append(segments, napcat.TextSegment(text))
-		m.napcat.SendGroupMessage(target.groupID, segments)
+		if !online && (!state.EndNotificationSent || state.EndNotificationPending) {
+			state.EndNotificationSent = true
+			state.EndNotificationPending = false
+			changed = true
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.persistLiveState(liveID, true)
+	}
+}
+
+func (m *DouyinMonitor) retryPendingLiveNotifications() {
+	type pendingNotification struct {
+		liveID string
+		online bool
+	}
+	m.mu.Lock()
+	pending := make([]pendingNotification, 0)
+	for liveID, state := range m.liveStates {
+		if state == nil {
+			continue
+		}
+		if state.Online && state.StartNotificationPending {
+			pending = append(pending, pendingNotification{liveID: liveID, online: true})
+		}
+		if !state.Online && state.EndNotificationPending {
+			pending = append(pending, pendingNotification{liveID: liveID, online: false})
+		}
+	}
+	m.mu.Unlock()
+	for _, item := range pending {
+		m.queueLiveNotification(item.liveID, item.online)
 	}
 }
 

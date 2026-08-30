@@ -314,23 +314,30 @@ func (s *Server) writeConfigAndReloadBot(values map[string]any) error {
 	if err := s.writeConfigNoRestart(values); err != nil {
 		return err
 	}
+	if s.reloadSignal != nil {
+		if err := s.reloadSignal(); err != nil {
+			return fmt.Errorf("配置已保存，但通知 Bot 热重载失败，请重试或手动重启: %w", err)
+		}
+		return nil
+	}
 	// CRITICAL: only signal the MAIN pocket48-bot process.
 	// `systemctl kill -s HUP` defaults to the whole cgroup and also HUP's chrome/node,
 	// which closes the Playwright browserContext (2026-07-20 outage: browser closed → XHS fail alerts).
-	_, err := runCommand(5*time.Second, "systemctl", "kill", "-s", "HUP", "--kill-whom=main", botService)
-	if err != nil {
+	_, primaryErr := runCommand(5*time.Second, "systemctl", "kill", "-s", "HUP", "--kill-whom=main", botService)
+	if primaryErr != nil {
 		// Fallback: kill only MainPID if systemd version lacks --kill-whom
-		if out, err2 := runCommand(5*time.Second, "systemctl", "show", "-p", "MainPID", "--value", botService); err2 == nil {
+		if out, showErr := runCommand(5*time.Second, "systemctl", "show", "-p", "MainPID", "--value", botService); showErr == nil {
 			pid := strings.TrimSpace(out)
 			if pid != "" && pid != "0" {
-				if _, err3 := runCommand(5*time.Second, "kill", "-s", "HUP", pid); err3 != nil {
-					log.Printf("signal bot for reload: %v / fallback %v (non-fatal)", err, err3)
+				if _, fallbackErr := runCommand(5*time.Second, "kill", "-s", "HUP", pid); fallbackErr != nil {
+					return fmt.Errorf("配置已保存，但通知 Bot 热重载失败，请重试或手动重启: systemd=%v, fallback=%v", primaryErr, fallbackErr)
 				}
+				return nil
 			} else {
-				log.Printf("signal bot for reload: %v (non-fatal, no MainPID)", err)
+				return fmt.Errorf("配置已保存，但通知 Bot 热重载失败，请重试或手动重启: %v (MainPID unavailable)", primaryErr)
 			}
 		} else {
-			log.Printf("signal bot for reload: %v (non-fatal)", err)
+			return fmt.Errorf("配置已保存，但通知 Bot 热重载失败，请重试或手动重启: systemd=%v, MainPID lookup=%v", primaryErr, showErr)
 		}
 	}
 	return nil

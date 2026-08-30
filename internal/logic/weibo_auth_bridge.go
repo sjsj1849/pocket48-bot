@@ -456,7 +456,7 @@ func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
 	seen := make(map[string]douyinAccountCommand)
 	for _, group := range cfg.DouyinSubscriptions {
 		for key, item := range group {
-			if item == nil {
+			if item == nil || item.Disabled || item.WorksDisabled && item.LiveDisabled {
 				continue
 			}
 			sec := strings.TrimSpace(item.SecUserID)

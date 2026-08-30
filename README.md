@@ -224,8 +224,9 @@ cd ../..
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
 - 抖音**作品**扫描优先 Cookie+HTTP，不依赖常驻创作者主页标签；`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存。抖音 **IM** 仍需长驻 IM 页。
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
-- 需要监控的账号统一保存在 `DOUYIN_SUBSCRIPTIONS`。可通过管理面板「配置 → 抖音 → 创作者订阅」添加、编辑、启停、删除，也可使用 `bot douyin add/del`；两者读写同一模型，多 QQ 群订阅和各自的 `AtAll` 设置会分别保留。
-- 直播场次写入 `storage/douyin-live-sessions/`，Bot 重启和 WebSocket 重连会恢复在线场次并抑制重复开播/下播通知。统计事件最多约每 10 秒落盘一次，开播和下播立即原子保存，最近保留 50 场或 14 天。
+- 需要监控的账号统一保存在 `DOUYIN_SUBSCRIPTIONS`。可通过管理面板「配置 → 抖音 → 创作者订阅」添加、编辑、启停、删除，也可使用 `bot douyin add/del`；两者读写同一模型。每个订阅可分别开启作品或直播监控，多 QQ 群订阅和各自的 `AtAll` 设置会分别保留。面板会记住最近使用的目标群号；昵称由浏览器解析，也可填写备注。
+- 每场直播使用独立 SessionID 写入 `storage/douyin-live-sessions/`，不会把可复用的主页 `LiveID/web_rid` 当成永久场次 ID。上游提供真实 RoomID 时一并记录；没有 RoomID 时，以“下播后再次开播”创建新 Session。Bot 重启和 WebSocket 重连会恢复在线场次。统计事件最多约每 10 秒落盘一次，开播和下播立即原子保存，最近保留 50 场或 14 天。
+- 通知按群保存 `pending → queued` 状态：先持久化 pending，进入 NapCat 发送队列后才逐群标记 queued。崩溃窗口采用 at-least-once 语义，极端情况下可能重复，但不会因提前标记而永久漏发。
 - 下播汇总中的时长是 Bot 的「监测时长」。最高在线只读取 `onlineUserForAnchor`、`onlineUserCount`、`userCount`；累计场观只读取 `audienceCount`、`totalUserCount`，没有可靠字段时整行省略。
 - 礼物估算只读取完整礼物消息的 `gift.diamondCount`，按连击累计数量增量计算并用 `common.msgId`/`logId` 去重。这是监测到的钻石值估算，不是官方收入；上游漏消息时会偏低。
 - 原始统计/礼物调试开关默认关闭。开启后样本分别保存到 `storage/douyin-live-stat-dumps/`、`storage/douyin-live-gift-dumps/`，敏感字段和 URL 查询参数会被脱敏。

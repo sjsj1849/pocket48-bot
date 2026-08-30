@@ -26,8 +26,8 @@ func safeDouyinLiveFilename(liveID string) string {
 	return b.String()
 }
 
-func (m *DouyinMonitor) liveStatePath(liveID string) string {
-	return filepath.Join(m.liveSessionDir, safeDouyinLiveFilename(liveID)+".json")
+func (m *DouyinMonitor) liveStatePath(sessionID string) string {
+	return filepath.Join(m.liveSessionDir, safeDouyinLiveFilename(sessionID)+".json")
 }
 
 func (m *DouyinMonitor) loadLiveStatesFromDisk() {
@@ -53,8 +53,19 @@ func (m *DouyinMonitor) loadLiveStatesFromDisk() {
 		if json.Unmarshal(raw, &state) != nil || strings.TrimSpace(state.LiveID) == "" {
 			continue
 		}
+		if state.SessionID == "" {
+			// Migration from c2110ac, where the filename/live ID represented
+			// both the creator room and the session.
+			state.SessionID = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		}
 		if state.ComboGiftCounts == nil {
 			state.ComboGiftCounts = make(map[string]int64)
+		}
+		if state.StartNotificationQueued == nil {
+			state.StartNotificationQueued = make(map[string]bool)
+		}
+		if state.EndNotificationQueued == nil {
+			state.EndNotificationQueued = make(map[string]bool)
 		}
 		// Keep recent completed sessions for duplicate ROOM_ENDED suppression.
 		if !state.Online && !state.LastUpdatedAt.IsZero() && now.Sub(state.LastUpdatedAt) > 14*24*time.Hour {
@@ -62,8 +73,11 @@ func (m *DouyinMonitor) loadLiveStatesFromDisk() {
 			continue
 		}
 		cp := state
-		m.liveStates[state.LiveID] = &cp
-		m.livePersistedAt[state.LiveID] = now
+		current := m.liveStates[state.LiveID]
+		if current == nil || state.LastUpdatedAt.After(current.LastUpdatedAt) {
+			m.liveStates[state.LiveID] = &cp
+		}
+		m.livePersistedAt[state.SessionID] = now
 		loaded++
 	}
 	if loaded > 0 {
@@ -73,10 +87,12 @@ func (m *DouyinMonitor) loadLiveStatesFromDisk() {
 }
 
 func (m *DouyinMonitor) persistLiveState(liveID string, force bool) {
+	m.livePersistMu.Lock()
+	defer m.livePersistMu.Unlock()
 	now := time.Now()
 	m.mu.Lock()
 	state := m.liveStates[liveID]
-	if state == nil || (!force && now.Sub(m.livePersistedAt[liveID]) < douyinLivePersistInterval) {
+	if state == nil || state.SessionID == "" || (!force && now.Sub(m.livePersistedAt[state.SessionID]) < douyinLivePersistInterval) {
 		m.mu.Unlock()
 		return
 	}
@@ -86,7 +102,15 @@ func (m *DouyinMonitor) persistLiveState(liveID string, force bool) {
 	for key, count := range state.ComboGiftCounts {
 		cp.ComboGiftCounts[key] = count
 	}
-	m.livePersistedAt[liveID] = now
+	cp.StartNotificationQueued = make(map[string]bool, len(state.StartNotificationQueued))
+	for key, queued := range state.StartNotificationQueued {
+		cp.StartNotificationQueued[key] = queued
+	}
+	cp.EndNotificationQueued = make(map[string]bool, len(state.EndNotificationQueued))
+	for key, queued := range state.EndNotificationQueued {
+		cp.EndNotificationQueued[key] = queued
+	}
+	m.livePersistedAt[state.SessionID] = now
 	m.mu.Unlock()
 
 	if err := os.MkdirAll(m.liveSessionDir, 0o755); err != nil {
@@ -111,7 +135,7 @@ func (m *DouyinMonitor) persistLiveState(liveID string, force bool) {
 		err = closeErr
 	}
 	if err == nil {
-		err = os.Rename(tmpPath, m.liveStatePath(liveID))
+		err = os.Rename(tmpPath, m.liveStatePath(cp.SessionID))
 	}
 	if err != nil {
 		log.Printf("[Douyin-live] persist session %s: %v", safeDouyinLiveFilename(liveID), err)

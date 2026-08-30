@@ -349,30 +349,35 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 // --- 抖音创作者订阅 ---
 
 type douyinPanelSub struct {
-	GroupID    int64  `json:"groupId"`
-	SecUserID  string `json:"secUserId,omitempty"`
-	ProfileURL string `json:"profileUrl,omitempty"`
-	Target     string `json:"target,omitempty"`
-	Name       string `json:"name,omitempty"`
-	AtAll      bool   `json:"atAll"`
-	LiveID     string `json:"liveId,omitempty"`
-	OldGroupID int64  `json:"oldGroupId,omitempty"`
-	OldSec     string `json:"oldSecUserId,omitempty"`
-	Enabled    *bool  `json:"enabled,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Status     string `json:"status,omitempty"`
+	GroupID      int64  `json:"groupId"`
+	SecUserID    string `json:"secUserId,omitempty"`
+	ProfileURL   string `json:"profileUrl,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Name         string `json:"name,omitempty"`
+	AtAll        bool   `json:"atAll"`
+	LiveID       string `json:"liveId,omitempty"`
+	OldGroupID   int64  `json:"oldGroupId,omitempty"`
+	OldSec       string `json:"oldSecUserId,omitempty"`
+	Enabled      *bool  `json:"enabled,omitempty"`
+	WorksEnabled *bool  `json:"worksEnabled,omitempty"`
+	LiveEnabled  *bool  `json:"liveEnabled,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Status       string `json:"status,omitempty"`
 }
 
 type douyinStoredSub struct {
 	SecUserID     string `json:"sec_user_id"`
 	ProfileURL    string `json:"profile_url,omitempty"`
 	Name          string `json:"name,omitempty"`
+	NameManual    bool   `json:"name_manual,omitempty"`
 	AtAll         bool   `json:"at_all"`
 	LastAwemeID   string `json:"last_aweme_id,omitempty"`
 	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
 	LiveID        string `json:"live_id,omitempty"`
 	Auto          bool   `json:"auto,omitempty"`
 	Disabled      bool   `json:"disabled,omitempty"`
+	WorksDisabled bool   `json:"works_disabled,omitempty"`
+	LiveDisabled  bool   `json:"live_disabled,omitempty"`
 }
 
 func loadDouyinSubs(encoded json.RawMessage) map[string]map[string]*douyinStoredSub {
@@ -400,6 +405,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 	subs := loadDouyinSubs(raw["DOUYIN_SUBSCRIPTIONS"])
 	switch r.Method {
 	case http.MethodGet:
+		cachedNames := loadDouyinCachedNames(raw, s.opts.ConfigPath)
 		result := make([]douyinPanelSub, 0)
 		for groupText, group := range subs {
 			gid, _ := strconv.ParseInt(groupText, 10, 64)
@@ -411,10 +417,15 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 				if id == "" {
 					id = key
 				}
+				name := item.Name
+				if strings.TrimSpace(name) == "" {
+					name = cachedNames[id]
+				}
 				result = append(result, douyinPanelSub{
 					GroupID: gid, SecUserID: id, ProfileURL: item.ProfileURL,
-					Name: item.Name, AtAll: item.AtAll, LiveID: item.LiveID,
-					Enabled: boolPointer(!item.Disabled), Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
+					Name: name, AtAll: item.AtAll, LiveID: item.LiveID,
+					Enabled: boolPointer(!item.Disabled), WorksEnabled: boolPointer(!item.WorksDisabled), LiveEnabled: boolPointer(!item.LiveDisabled),
+					Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
 				})
 			}
 		}
@@ -466,29 +477,22 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		if body.Enabled != nil {
 			item.Disabled = !*body.Enabled
 		}
+		if body.WorksEnabled != nil {
+			item.WorksDisabled = !*body.WorksEnabled
+		}
+		if body.LiveEnabled != nil {
+			item.LiveDisabled = !*body.LiveEnabled
+		}
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
+			item.NameManual = true
 		}
 		subs[gk][sec] = item
-		var douyinEnabled bool
-		_ = json.Unmarshal(raw["DOUYIN_ENABLED"], &douyinEnabled)
-		var saveErr error
-		if douyinEnabled {
-			saveErr = s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs})
-		} else {
-			// The master switch creates the long-lived monitor at boot, so the
-			// first panel subscription requires the existing authenticated restart path.
-			saveErr = s.applyConfig(map[string]any{"DOUYIN_ENABLED": true, "DOUYIN_SUBSCRIPTIONS": subs})
-		}
-		if saveErr != nil {
+		if saveErr := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); saveErr != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: saveErr.Error()})
 			return
 		}
-		message := "抖音订阅已保存并热重载"
-		if !douyinEnabled {
-			message = "抖音订阅已保存，已启用并重启 Bot"
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": message, "secUserId": sec, "profileUrl": profile})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已保存并热重载", "secUserId": sec, "profileUrl": profile})
 	case http.MethodPut:
 		var body douyinPanelSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -557,6 +561,8 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			// Changing creators must not carry the old creator's live ID or
 			// work cursor into the new subscription.
 			item.Disabled = preserved.Disabled
+			item.WorksDisabled = preserved.WorksDisabled
+			item.LiveDisabled = preserved.LiveDisabled
 		}
 		if newProfile != "" {
 			item.ProfileURL = newProfile
@@ -565,8 +571,15 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		if body.Enabled != nil {
 			item.Disabled = !*body.Enabled
 		}
+		if body.WorksEnabled != nil {
+			item.WorksDisabled = !*body.WorksEnabled
+		}
+		if body.LiveEnabled != nil {
+			item.LiveDisabled = !*body.LiveEnabled
+		}
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
+			item.NameManual = true
 		}
 		subs[ngk][newSec] = item
 		if err := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
@@ -597,19 +610,83 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+func loadDouyinCachedNames(raw map[string]json.RawMessage, configPath string) map[string]string {
+	result := make(map[string]string)
+	var profileDir string
+	_ = json.Unmarshal(raw["BROWSER_PROFILE_DIR"], &profileDir)
+	if strings.TrimSpace(profileDir) == "" {
+		_ = json.Unmarshal(raw["WEIBO_BROWSER_PROFILE_DIR"], &profileDir)
+	}
+	if strings.TrimSpace(profileDir) == "" {
+		profileDir = "storage/weibo-browser-profile"
+	}
+	paths := []string{filepath.Join(profileDir, "douyin-contact-cache.json")}
+	if !filepath.IsAbs(profileDir) {
+		paths = append(paths, filepath.Join(filepath.Dir(configPath), profileDir, "douyin-contact-cache.json"))
+	}
+	var payload struct {
+		Contacts []struct {
+			SecUID     string `json:"secUid"`
+			Nickname   string `json:"nickname"`
+			RemarkName string `json:"remarkName"`
+		} `json:"contacts"`
+	}
+	for _, path := range paths {
+		rawCache, err := os.ReadFile(path)
+		if err == nil && json.Unmarshal(rawCache, &payload) == nil {
+			break
+		}
+	}
+	for _, contact := range payload.Contacts {
+		name := strings.TrimSpace(contact.RemarkName)
+		if name == "" {
+			name = strings.TrimSpace(contact.Nickname)
+		}
+		if sec := strings.TrimSpace(contact.SecUID); sec != "" && name != "" {
+			result[sec] = name
+		}
+	}
+	return result
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func douyinSubscriptionStatus(configPath string, item *douyinStoredSub) string {
 	if item.Disabled {
 		return "已停用"
 	}
+	if item.WorksDisabled && item.LiveDisabled {
+		return "作品与直播监控均已关闭"
+	}
+	if item.LiveDisabled {
+		return "仅监控作品"
+	}
 	if strings.TrimSpace(item.LiveID) != "" {
-		path := filepath.Join(filepath.Dir(configPath), "storage", "douyin-live-sessions", safeAdminFilename(item.LiveID)+".json")
+		dir := filepath.Join(filepath.Dir(configPath), "storage", "douyin-live-sessions")
 		var state struct {
+			LiveID        string    `json:"live_id"`
 			Online        bool      `json:"online"`
 			LastUpdatedAt time.Time `json:"last_updated_at"`
 		}
-		if raw, err := os.ReadFile(path); err == nil && json.Unmarshal(raw, &state) == nil {
+		found := false
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+					continue
+				}
+				var candidate struct {
+					LiveID        string    `json:"live_id"`
+					Online        bool      `json:"online"`
+					LastUpdatedAt time.Time `json:"last_updated_at"`
+				}
+				raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+				if readErr == nil && json.Unmarshal(raw, &candidate) == nil && candidate.LiveID == item.LiveID && (!found || candidate.LastUpdatedAt.After(state.LastUpdatedAt)) {
+					state.LiveID, state.Online, state.LastUpdatedAt = candidate.LiveID, candidate.Online, candidate.LastUpdatedAt
+					found = true
+				}
+			}
+		}
+		if found {
 			when := ""
 			if !state.LastUpdatedAt.IsZero() {
 				when = " · 更新于 " + state.LastUpdatedAt.Local().Format("01-02 15:04")
@@ -625,14 +702,4 @@ func douyinSubscriptionStatus(configPath string, item *douyinStoredSub) string {
 		return "主页已解析，等待直播间"
 	}
 	return "等待首次解析"
-}
-
-func safeAdminFilename(value string) string {
-	var result strings.Builder
-	for _, r := range value {
-		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-' || r == '_' {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
 }

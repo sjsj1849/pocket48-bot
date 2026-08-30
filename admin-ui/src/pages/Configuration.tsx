@@ -20,6 +20,8 @@ type SubItem = {
   enabled?: boolean
   source?: string
   status?: string
+  worksEnabled?: boolean
+  liveEnabled?: boolean
 }
 type SubResponse = { subscriptions: SubItem[] }
 type SuperTopic = { oid: string; name?: string; groupKey?: string; groupName?: string; reportSign?: number; lastSignDate?: string; lastSignStatus?: string; lastSignRank?: number }
@@ -162,15 +164,17 @@ type ManagerProps = {
   hint: string
   items: SubItem[]
   saving: boolean
-  onAdd: (groupId: string, target: string, atAll: boolean, name?: string) => Promise<void>
+  onAdd: (groupId: string, target: string, atAll: boolean, name?: string, worksEnabled?: boolean, liveEnabled?: boolean) => Promise<void>
   onRemove: (item: SubItem) => Promise<void>
-  onEdit?: (item: SubItem, groupId: string, target: string, atAll: boolean, name?: string) => Promise<void>
+  onEdit?: (item: SubItem, groupId: string, target: string, atAll: boolean, name?: string, worksEnabled?: boolean, liveEnabled?: boolean) => Promise<void>
   onToggle?: (item: SubItem, enabled: boolean) => Promise<void>
   targetPlaceholder: string
   showAtAll?: boolean
   roomMode?: boolean
   showName?: boolean
   namePlaceholder?: string
+  showMonitorKinds?: boolean
+  defaultGroup?: string
   labelOf: (item: SubItem) => string
   metaOf: (item: SubItem) => string
   targetOf: (item: SubItem) => string
@@ -190,19 +194,38 @@ function SubscriptionManager({
   roomMode,
   showName,
   namePlaceholder,
+  showMonitorKinds,
+  defaultGroup = '',
   labelOf,
   metaOf,
   targetOf,
 }: ManagerProps) {
-  const [groupID, setGroupID] = useState('')
+  const memoryKey = `p48-subscription-group:${title}`
+  const [groupID, setGroupID] = useState(() => {
+    try { return window.localStorage.getItem(memoryKey) || defaultGroup }
+    catch { return defaultGroup }
+  })
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
   const [atAll, setAtAll] = useState(false)
+  const [worksEnabled, setWorksEnabled] = useState(true)
+  const [liveEnabled, setLiveEnabled] = useState(true)
   const [editing, setEditing] = useState<SubItem | null>(null)
   const [editGroup, setEditGroup] = useState('')
   const [editTarget, setEditTarget] = useState('')
   const [editName, setEditName] = useState('')
   const [editAtAll, setEditAtAll] = useState(false)
+  const [editWorksEnabled, setEditWorksEnabled] = useState(true)
+  const [editLiveEnabled, setEditLiveEnabled] = useState(true)
+
+  useEffect(() => {
+    if (defaultGroup && !groupID) setGroupID(defaultGroup)
+  }, [defaultGroup, groupID])
+
+  function updateGroup(value: string) {
+    setGroupID(value)
+    try { window.localStorage.setItem(memoryKey, value) } catch { /* storage can be disabled */ }
+  }
 
   function startEdit(item: SubItem) {
     setEditing(item)
@@ -210,6 +233,8 @@ function SubscriptionManager({
     setEditTarget(targetOf(item))
     setEditName(item.name || '')
     setEditAtAll(Boolean(item.atAll))
+    setEditWorksEnabled(item.worksEnabled !== false)
+    setEditLiveEnabled(item.liveEnabled !== false)
   }
 
   return (
@@ -219,9 +244,15 @@ function SubscriptionManager({
         <p>{hint}</p>
       </div>
       <div className={`sub-add${showName ? ' with-name' : ''}`}>
-        <input type="number" min="1" placeholder="目标 QQ 群号" value={groupID} onChange={(e) => setGroupID(e.target.value)} />
+        <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="目标 QQ 群号" value={groupID} onChange={(e) => updateGroup(e.target.value.replace(/\D/g, ''))} />
         <input type={roomMode ? 'number' : 'text'} min={roomMode ? 1 : undefined} placeholder={targetPlaceholder} value={target} onChange={(e) => setTarget(e.target.value)} />
         {showName ? <input type="text" placeholder={namePlaceholder || '昵称（可选）'} value={name} onChange={(e) => setName(e.target.value)} /> : null}
+        {showMonitorKinds ? (
+          <div className="monitor-kind-options">
+            <label><input type="checkbox" checked={worksEnabled} onChange={(e) => setWorksEnabled(e.target.checked)} /> 作品</label>
+            <label><input type="checkbox" checked={liveEnabled} onChange={(e) => setLiveEnabled(e.target.checked)} /> 直播</label>
+          </div>
+        ) : null}
         {showAtAll ? (
           <label>
             <input type="checkbox" checked={atAll} onChange={(e) => setAtAll(e.target.checked)} /> @全体
@@ -233,7 +264,7 @@ function SubscriptionManager({
           className="secondary-button"
           disabled={saving || !groupID || !target.trim()}
           onClick={() =>
-            void onAdd(groupID, target, atAll, name).then(() => {
+            void onAdd(groupID, target, atAll, name, worksEnabled, liveEnabled).then(() => {
               setTarget('')
               setName('')
               setAtAll(false)
@@ -253,9 +284,15 @@ function SubscriptionManager({
               return (
                 <div className="sub-item editing" key={key}>
                   <div className="sub-edit-grid">
-                    <input type="number" min="1" placeholder="QQ 群号" value={editGroup} onChange={(e) => setEditGroup(e.target.value)} />
+                    <input type="text" inputMode="numeric" pattern="[0-9]*" placeholder="QQ 群号" value={editGroup} onChange={(e) => setEditGroup(e.target.value.replace(/\D/g, ''))} />
                     <input type={roomMode ? 'number' : 'text'} placeholder={targetPlaceholder} value={editTarget} onChange={(e) => setEditTarget(e.target.value)} />
                     {showName ? <input type="text" placeholder={namePlaceholder || '昵称'} value={editName} onChange={(e) => setEditName(e.target.value)} /> : null}
+                    {showMonitorKinds ? (
+                      <div className="monitor-kind-options">
+                        <label><input type="checkbox" checked={editWorksEnabled} onChange={(e) => setEditWorksEnabled(e.target.checked)} /> 作品</label>
+                        <label><input type="checkbox" checked={editLiveEnabled} onChange={(e) => setEditLiveEnabled(e.target.checked)} /> 直播</label>
+                      </div>
+                    ) : null}
                     {showAtAll ? (
                       <label>
                         <input type="checkbox" checked={editAtAll} onChange={(e) => setEditAtAll(e.target.checked)} /> @全体
@@ -267,7 +304,7 @@ function SubscriptionManager({
                       className="secondary-button"
                       disabled={saving || !editGroup || !editTarget.trim()}
                       onClick={() =>
-                        void onEdit(item, editGroup, editTarget, editAtAll, editName).then(() => setEditing(null))
+                        void onEdit(item, editGroup, editTarget, editAtAll, editName, editWorksEnabled, editLiveEnabled).then(() => setEditing(null))
                       }
                     >
                       <Check size={15} />
@@ -699,7 +736,19 @@ export function Configuration() {
     void load()
   }, [load])
 
+  useEffect(() => {
+    if (active !== '抖音' || !values.DOUYIN_ENABLED || !douyin.some((item) => !item.name && item.enabled !== false)) return
+    const timer = window.setInterval(() => {
+      void api<SubResponse>('douyin/subscriptions')
+        .then((response) => setDouyin(response.subscriptions || []))
+        .catch(() => undefined)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [active, douyin, values.DOUYIN_ENABLED])
+
   const boundGroup = useMemo(() => String(values.BOUND_GROUP_ID || ''), [values.BOUND_GROUP_ID])
+  const activeMasterKey = active === '抖音' ? 'DOUYIN_ENABLED' : active === '小红书' ? 'XIAOHONGSHU_ENABLED' : ''
+  const activePlatformEnabled = !activeMasterKey || Boolean(values[activeMasterKey])
 
   const changed = useMemo(() => {
     if (!data) return false
@@ -795,7 +844,7 @@ export function Configuration() {
             </div>
           </div>
           <div className="config-fields">
-            {(data.groups[active] || []).map((field) => (
+            {(data.groups[active] || []).filter((field) => activePlatformEnabled || field.key === activeMasterKey).map((field) => (
               <Field key={field.key} field={field} value={values[field.key]} onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))} />
             ))}
 
@@ -816,6 +865,7 @@ export function Configuration() {
                 />
                 <SubscriptionManager
                   title="房间订阅"
+                  defaultGroup={boundGroup}
                   hint="已订阅房间列表。可用上方搜索加入；也可直接填房间 ID。铅笔可改 QQ 群或房间 ID。"
                   items={rooms}
                   saving={subSaving}
@@ -863,6 +913,7 @@ export function Configuration() {
                 <p className="muted compact">Cookie 是登录态不是密码；UID/OID 与日报说明见「说明」页。浏览器扫码在左侧「浏览器」。</p>
                 <SubscriptionManager
                   title="微博动态 UID 订阅"
+                  defaultGroup={boundGroup}
                   hint="监控用户发博并转发到 QQ 群。群 0 多为历史私信误加，请用铅笔改到绑定群。昵称优先展示，UID 在副标题。"
                   items={weibo}
                   saving={subSaving}
@@ -964,27 +1015,31 @@ export function Configuration() {
               </>
             ) : null}
 
-            {active === '抖音' ? (
+            {active === '抖音' && activePlatformEnabled ? (
               <>
                 <p className="muted compact">创作者订阅与群聊 IM 是两套配置；登录扫码见「浏览器」，细则见「说明」。</p>
                 <SubscriptionManager
                   title="创作者订阅（作品/开播）"
-                  hint="与「群聊 IM」无关。可多 QQ 群分别添加同一创作者；支持编辑、单条启停和删除。配置统一写入 DOUYIN_SUBSCRIPTIONS。"
+                  hint="每位创作者可独立选择作品、直播或两者；昵称会由浏览器自动解析，也可手动填写备注。"
                   items={douyin}
                   saving={subSaving}
+                  defaultGroup={boundGroup}
+                  showName
+                  showMonitorKinds
+                  namePlaceholder="昵称或备注（可选，会自动解析）"
                   targetPlaceholder="抖音主页链接或 sec_user_id"
-                  labelOf={(item) => item.name || item.secUserId || '待获取昵称'}
-                  metaOf={(item) => `群 ${item.groupId} · ${item.secUserId || ''}${item.profileUrl ? ` · ${item.profileUrl}` : ''}${item.atAll ? ' · @全体' : ''} · ${item.enabled === false ? '已停用' : '已启用'}${item.liveId ? ` · web_rid ${item.liveId}` : ''}${item.status ? ` · ${item.status}` : ''} · 来源 ${item.source || 'config'}`}
+                  labelOf={(item) => item.name || '昵称解析中…'}
+                  metaOf={(item) => `群 ${item.groupId} · ${item.secUserId || ''}${item.profileUrl ? ` · ${item.profileUrl}` : ''}${item.atAll ? ' · @全体' : ''} · ${item.enabled === false ? '已停用' : '已启用'} · ${item.worksEnabled === false ? '作品关' : '作品开'} · ${item.liveEnabled === false ? '直播关' : '直播开'}${item.liveId ? ` · web_rid ${item.liveId}` : ''}${item.status ? ` · ${item.status}` : ''} · 来源 ${item.source || 'config'}`}
                   targetOf={(item) => item.secUserId || ''}
-                  onAdd={(groupId, target, atAll) =>
+                  onAdd={(groupId, target, atAll, name, worksEnabled, liveEnabled) =>
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'POST',
-                        body: JSON.stringify({ groupId: Number(groupId), target: target.trim(), atAll, enabled: true }),
+                        body: JSON.stringify({ groupId: Number(groupId), target: target.trim(), name: name?.trim() || undefined, atAll, enabled: true, worksEnabled, liveEnabled }),
                       })
                     })
                   }
-                  onEdit={(item, groupId, target, atAll) =>
+                  onEdit={(item, groupId, target, atAll, name, worksEnabled, liveEnabled) =>
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'PUT',
@@ -993,8 +1048,11 @@ export function Configuration() {
                           oldSecUserId: item.secUserId,
                           groupId: Number(groupId),
                           target: target.trim(),
+                          name: name?.trim() || undefined,
                           atAll,
                           enabled: item.enabled !== false,
+                          worksEnabled,
+                          liveEnabled,
                         }),
                       })
                     })
@@ -1018,6 +1076,8 @@ export function Configuration() {
                           secUserId: item.secUserId,
                           atAll: Boolean(item.atAll),
                           enabled,
+                          worksEnabled: item.worksEnabled !== false,
+                          liveEnabled: item.liveEnabled !== false,
                         }),
                       })
                     })
@@ -1026,11 +1086,12 @@ export function Configuration() {
               </>
             ) : null}
 
-            {active === '小红书' ? (
+            {active === '小红书' && activePlatformEnabled ? (
               <>
                 <p className="muted compact">用主页/xhslink；登录与 notes 验收见「浏览器 / 说明」。</p>
                 <SubscriptionManager
                   title="创作者订阅"
+                  defaultGroup={boundGroup}
                   hint="可多群添加。铅笔可改 QQ 群或目标链接。"
                   items={xhs}
                   saving={subSaving}
