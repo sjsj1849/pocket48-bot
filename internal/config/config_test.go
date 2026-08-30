@@ -38,6 +38,9 @@ func TestLoadConfigInitializesDouyinDefaults(t *testing.T) {
 	if cfg.DouyinLiveWSURL != "ws://127.0.0.1:1088/ws" || cfg.DouyinSubscriptions == nil {
 		t.Fatalf("unexpected douyin live/subscription defaults")
 	}
+	if !cfg.DouyinLiveSummaryEnabled || !cfg.DouyinLiveSoundWaveEnabled || cfg.DouyinLiveRawStatsDebug || cfg.DouyinLiveRawGiftDebug {
+		t.Fatalf("unexpected douyin live summary defaults: %#v", cfg)
+	}
 	if cfg.DouyinIMGroupName != "" || cfg.DouyinIMGroupNumber != "" {
 		t.Fatalf("unexpected douyin IM defaults: %#v", cfg)
 	}
@@ -50,6 +53,13 @@ func TestNIMSafeDefaults(t *testing.T) {
 	cfg := loadTestConfig(t, `{}`)
 	if !cfg.NIMRoomMessagePollFallback || !cfg.NIMLiveDanmakuEnabled {
 		t.Fatalf("unexpected NIM defaults: %#v", cfg)
+	}
+}
+
+func TestDouyinLiveExplicitFalseIsPreserved(t *testing.T) {
+	cfg := loadTestConfig(t, `{"DOUYIN_LIVE_SUMMARY_ENABLED":false,"DOUYIN_LIVE_SOUND_WAVE_ENABLED":false}`)
+	if cfg.DouyinLiveSummaryEnabled || cfg.DouyinLiveSoundWaveEnabled {
+		t.Fatalf("explicit douyin live false was overwritten: %#v", cfg)
 	}
 }
 

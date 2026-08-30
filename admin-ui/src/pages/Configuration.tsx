@@ -17,6 +17,9 @@ type SubItem = {
   lastNoteId?: string
   liveActive?: boolean
   liveId?: string
+  enabled?: boolean
+  source?: string
+  status?: string
 }
 type SubResponse = { subscriptions: SubItem[] }
 type SuperTopic = { oid: string; name?: string; groupKey?: string; groupName?: string; reportSign?: number; lastSignDate?: string; lastSignStatus?: string; lastSignRank?: number }
@@ -162,6 +165,7 @@ type ManagerProps = {
   onAdd: (groupId: string, target: string, atAll: boolean, name?: string) => Promise<void>
   onRemove: (item: SubItem) => Promise<void>
   onEdit?: (item: SubItem, groupId: string, target: string, atAll: boolean, name?: string) => Promise<void>
+  onToggle?: (item: SubItem, enabled: boolean) => Promise<void>
   targetPlaceholder: string
   showAtAll?: boolean
   roomMode?: boolean
@@ -180,6 +184,7 @@ function SubscriptionManager({
   onAdd,
   onRemove,
   onEdit,
+  onToggle,
   targetPlaceholder,
   showAtAll = true,
   roomMode,
@@ -282,6 +287,11 @@ function SubscriptionManager({
                   <small>{metaOf(item)}</small>
                 </div>
                 <div className="sub-item-actions">
+                  {onToggle ? (
+                    <button className="secondary-button" disabled={saving} onClick={() => void onToggle(item, item.enabled === false)}>
+                      {item.enabled === false ? '启用' : '停用'}
+                    </button>
+                  ) : null}
                   {onEdit ? (
                     <button className="icon-button" disabled={saving} aria-label="编辑" onClick={() => startEdit(item)}>
                       <Pencil size={15} />
@@ -959,18 +969,18 @@ export function Configuration() {
                 <p className="muted compact">创作者订阅与群聊 IM 是两套配置；登录扫码见「浏览器」，细则见「说明」。</p>
                 <SubscriptionManager
                   title="创作者订阅（作品/开播）"
-                  hint="与「群聊 IM」无关。可多 QQ 群分别添加同一创作者。铅笔可改目标群或创作者。"
+                  hint="与「群聊 IM」无关。可多 QQ 群分别添加同一创作者；支持编辑、单条启停和删除。配置统一写入 DOUYIN_SUBSCRIPTIONS。"
                   items={douyin}
                   saving={subSaving}
                   targetPlaceholder="抖音主页链接或 sec_user_id"
                   labelOf={(item) => item.name || item.secUserId || '待获取昵称'}
-                  metaOf={(item) => `群 ${item.groupId} · ${item.secUserId || ''}${item.atAll ? ' · @全体' : ''}${item.liveId ? ` · live ${item.liveId}` : ''}`}
+                  metaOf={(item) => `群 ${item.groupId} · ${item.secUserId || ''}${item.profileUrl ? ` · ${item.profileUrl}` : ''}${item.atAll ? ' · @全体' : ''} · ${item.enabled === false ? '已停用' : '已启用'}${item.liveId ? ` · web_rid ${item.liveId}` : ''}${item.status ? ` · ${item.status}` : ''} · 来源 ${item.source || 'config'}`}
                   targetOf={(item) => item.secUserId || ''}
                   onAdd={(groupId, target, atAll) =>
                     withSub(async () => {
                       await api('douyin/subscriptions', {
                         method: 'POST',
-                        body: JSON.stringify({ groupId: Number(groupId), target: target.trim(), atAll }),
+                        body: JSON.stringify({ groupId: Number(groupId), target: target.trim(), atAll, enabled: true }),
                       })
                     })
                   }
@@ -984,6 +994,7 @@ export function Configuration() {
                           groupId: Number(groupId),
                           target: target.trim(),
                           atAll,
+                          enabled: item.enabled !== false,
                         }),
                       })
                     })
@@ -993,6 +1004,21 @@ export function Configuration() {
                       await api('douyin/subscriptions', {
                         method: 'DELETE',
                         body: JSON.stringify({ groupId: item.groupId, secUserId: item.secUserId }),
+                      })
+                    })
+                  }
+                  onToggle={(item, enabled) =>
+                    withSub(async () => {
+                      await api('douyin/subscriptions', {
+                        method: 'PUT',
+                        body: JSON.stringify({
+                          oldGroupId: item.groupId,
+                          oldSecUserId: item.secUserId,
+                          groupId: item.groupId,
+                          secUserId: item.secUserId,
+                          atAll: Boolean(item.atAll),
+                          enabled,
+                        }),
                       })
                     })
                   }

@@ -24,62 +24,66 @@ const (
 )
 
 type configField struct {
-	Key         string     `json:"key"`
-	Group       string     `json:"group"`
-	Label       string     `json:"label"`
-	Description string     `json:"description"`
-	Kind        configKind `json:"kind"`
-	Configured  bool       `json:"configured,omitempty"` // for secrets
-	RestartRequired bool   `json:"restartRequired,omitempty"`
-	Value       any        `json:"value"`
+	Key             string     `json:"key"`
+	Group           string     `json:"group"`
+	Label           string     `json:"label"`
+	Description     string     `json:"description"`
+	Kind            configKind `json:"kind"`
+	Configured      bool       `json:"configured,omitempty"` // for secrets
+	RestartRequired bool       `json:"restartRequired,omitempty"`
+	Value           any        `json:"value"`
 }
 
 var configFields = map[string]configField{
 	// Bot
-	"NAPCAT_WS_URL": {"NAPCAT_WS_URL", "Bot", "NapCat WebSocket 地址", "例如 ws://localhost:3001", kindString, false, false, nil},
-	"NAPCAT_ACCESS_TOKEN": {"NAPCAT_ACCESS_TOKEN", "Bot", "NapCat 访问令牌", "留空如果不需要", kindSecret, false, false, nil},
-	"BOUND_GROUP_ID": {"BOUND_GROUP_ID", "Bot", "默认通知群号", "Bot 内部通知和未特别指定群号的订阅转发到该群", kindInteger, false, false, nil},
-	"COMMAND_PREFIX": {"COMMAND_PREFIX", "Bot", "命令前缀", "触发的命令符号", kindString, false, false, nil},
-	"DISABLE_GROUP_COMMANDS": {"DISABLE_GROUP_COMMANDS", "Bot", "禁用群聊指令", "开启后不再响应群里的手动命令", kindBoolean, false, false, nil},
-	"MEDIA_DELIVERY": {"MEDIA_DELIVERY", "Bot", "媒体发送方式", "local（本机下载转发）或 remote（直传链接）", kindString, false, false, nil},
-	"ALERT_EMAIL_ENABLED": {"ALERT_EMAIL_ENABLED", "Bot", "启用邮件告警", "当发生需要人工处理的错误时发送", kindBoolean, false, false, nil},
-	"ALERT_EMAIL_TO": {"ALERT_EMAIL_TO", "Bot", "告警收件人", "多个用逗号分隔", kindString, false, false, nil},
-	"ALERT_EMAIL_FROM": {"ALERT_EMAIL_FROM", "Bot", "发件人地址", "SMTP 发件箱", kindString, false, false, nil},
-	"ALERT_EMAIL_SMTP_HOST": {"ALERT_EMAIL_SMTP_HOST", "Bot", "SMTP 服务器", "例如 smtp.gmail.com", kindString, false, false, nil},
-	"ALERT_EMAIL_SMTP_PORT": {"ALERT_EMAIL_SMTP_PORT", "Bot", "SMTP 端口", "常见 587（TLS）或 465（SSL）", kindInteger, false, false, nil},
-	"ALERT_EMAIL_SMTP_USER": {"ALERT_EMAIL_SMTP_USER", "Bot", "SMTP 用户名", "邮箱完整地址", kindString, false, false, nil},
-	"ALERT_EMAIL_SMTP_PASSWORD": {"ALERT_EMAIL_SMTP_PASSWORD", "Bot", "SMTP 密码", "邮箱密码或应用专用密码", kindSecret, false, false, nil},
+	"NAPCAT_WS_URL":                {"NAPCAT_WS_URL", "Bot", "NapCat WebSocket 地址", "例如 ws://localhost:3001", kindString, false, false, nil},
+	"NAPCAT_ACCESS_TOKEN":          {"NAPCAT_ACCESS_TOKEN", "Bot", "NapCat 访问令牌", "留空如果不需要", kindSecret, false, false, nil},
+	"BOUND_GROUP_ID":               {"BOUND_GROUP_ID", "Bot", "默认通知群号", "Bot 内部通知和未特别指定群号的订阅转发到该群", kindInteger, false, false, nil},
+	"COMMAND_PREFIX":               {"COMMAND_PREFIX", "Bot", "命令前缀", "触发的命令符号", kindString, false, false, nil},
+	"DISABLE_GROUP_COMMANDS":       {"DISABLE_GROUP_COMMANDS", "Bot", "禁用群聊指令", "开启后不再响应群里的手动命令", kindBoolean, false, false, nil},
+	"MEDIA_DELIVERY":               {"MEDIA_DELIVERY", "Bot", "媒体发送方式", "local（本机下载转发）或 remote（直传链接）", kindString, false, false, nil},
+	"ALERT_EMAIL_ENABLED":          {"ALERT_EMAIL_ENABLED", "Bot", "启用邮件告警", "当发生需要人工处理的错误时发送", kindBoolean, false, false, nil},
+	"ALERT_EMAIL_TO":               {"ALERT_EMAIL_TO", "Bot", "告警收件人", "多个用逗号分隔", kindString, false, false, nil},
+	"ALERT_EMAIL_FROM":             {"ALERT_EMAIL_FROM", "Bot", "发件人地址", "SMTP 发件箱", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_HOST":        {"ALERT_EMAIL_SMTP_HOST", "Bot", "SMTP 服务器", "例如 smtp.gmail.com", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_PORT":        {"ALERT_EMAIL_SMTP_PORT", "Bot", "SMTP 端口", "常见 587（TLS）或 465（SSL）", kindInteger, false, false, nil},
+	"ALERT_EMAIL_SMTP_USER":        {"ALERT_EMAIL_SMTP_USER", "Bot", "SMTP 用户名", "邮箱完整地址", kindString, false, false, nil},
+	"ALERT_EMAIL_SMTP_PASSWORD":    {"ALERT_EMAIL_SMTP_PASSWORD", "Bot", "SMTP 密码", "邮箱密码或应用专用密码", kindSecret, false, false, nil},
 	"ALERT_EMAIL_COOLDOWN_MINUTES": {"ALERT_EMAIL_COOLDOWN_MINUTES", "Bot", "告警冷却时间（分钟）", "同类型告警至少间隔这么久", kindInteger, false, false, nil},
-	"ADMIN_PANEL_URL": {"ADMIN_PANEL_URL", "Bot", "面板地址（可选）", "日报等链接会用到", kindString, false, false, nil},
+	"ADMIN_PANEL_URL":              {"ADMIN_PANEL_URL", "Bot", "面板地址（可选）", "日报等链接会用到", kindString, false, false, nil},
 	// 口袋48
-	"POCKET_USERNAME": {"POCKET_USERNAME", "口袋48", "口袋48 手机号", "登录用手机号", kindString, false, false, nil},
-	"POCKET_PASSWORD": {"POCKET_PASSWORD", "口袋48", "口袋48 密码", "登录用密码", kindSecret, false, false, nil},
-	"POCKET_TOKEN": {"POCKET_TOKEN", "口袋48", "Token（自动）", "登录成功后自动获取，留空让系统自动登录", kindSecret, false, false, nil},
-	"LIVE_MONITORING": {"LIVE_MONITORING", "口袋48", "直播监控", "监控口袋48直播状态", kindBoolean, false, false, nil},
-	"POLLING_INTERVAL": {"POLLING_INTERVAL", "口袋48", "消息轮询间隔（秒）", "口袋48实时消息轮询间隔，建议 3-5 秒", kindInteger, false, false, nil},
-	"NIM_ENABLED": {"NIM_ENABLED", "口袋48", "NIM 实时消息（IM）", "通过 NIM SDK 获取实时消息，比轮询快", kindBoolean, false, false, nil},
-	"NIM_ROOM_MESSAGE_ENABLED": {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到 QQ", kindBoolean, false, false, nil},
+	"POCKET_USERNAME":                {"POCKET_USERNAME", "口袋48", "口袋48 手机号", "登录用手机号", kindString, false, false, nil},
+	"POCKET_PASSWORD":                {"POCKET_PASSWORD", "口袋48", "口袋48 密码", "登录用密码", kindSecret, false, false, nil},
+	"POCKET_TOKEN":                   {"POCKET_TOKEN", "口袋48", "Token（自动）", "登录成功后自动获取，留空让系统自动登录", kindSecret, false, false, nil},
+	"LIVE_MONITORING":                {"LIVE_MONITORING", "口袋48", "直播监控", "监控口袋48直播状态", kindBoolean, false, false, nil},
+	"POLLING_INTERVAL":               {"POLLING_INTERVAL", "口袋48", "消息轮询间隔（秒）", "口袋48实时消息轮询间隔，建议 3-5 秒", kindInteger, false, false, nil},
+	"NIM_ENABLED":                    {"NIM_ENABLED", "口袋48", "NIM 实时消息（IM）", "通过 NIM SDK 获取实时消息，比轮询快", kindBoolean, false, false, nil},
+	"NIM_ROOM_MESSAGE_ENABLED":       {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到 QQ", kindBoolean, false, false, nil},
 	"NIM_ROOM_MESSAGE_POLL_FALLBACK": {"NIM_ROOM_MESSAGE_POLL_FALLBACK", "口袋48", "NIM 轮询兜底", "NIM 连接异常时自动切换至轮询模式", kindBoolean, false, false, nil},
-	"NIM_LIVE_DANMAKU_ENABLED": {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发直播弹幕与进出事件", kindBoolean, false, false, nil},
-	"NIM_VIEWER_EVENT_ENABLED": {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "NIM 进出事件", "粉丝进入/离开直播间事件", kindBoolean, false, false, nil},
+	"NIM_LIVE_DANMAKU_ENABLED":       {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发直播弹幕与进出事件", kindBoolean, false, false, nil},
+	"NIM_VIEWER_EVENT_ENABLED":       {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "NIM 进出事件", "粉丝进入/离开直播间事件", kindBoolean, false, false, nil},
 	// 微博
-	"WEIBO_BROWSER_AUTH_ENABLED": {"WEIBO_BROWSER_AUTH_ENABLED", "微博", "启用浏览器侧卡登录", "开启后用面板「浏览器」页扫码，自动维护微博/抖音/小红书登录态（Cookie）。推荐；比手贴 Cookie 稳", kindBoolean, false, false, nil},
+	"WEIBO_BROWSER_AUTH_ENABLED":    {"WEIBO_BROWSER_AUTH_ENABLED", "微博", "启用浏览器侧卡登录", "开启后用面板「浏览器」页扫码，自动维护微博/抖音/小红书登录态（Cookie）。推荐；比手贴 Cookie 稳", kindBoolean, false, false, nil},
 	"WEIBO_BROWSER_REFRESH_MINUTES": {"WEIBO_BROWSER_REFRESH_MINUTES", "微博", "Cookie 刷新周期", "自动刷新间隔（分钟，最低 5）", kindInteger, false, false, nil},
-	"WEIBO_COOKIE": {"WEIBO_COOKIE", "微博", "weibo.com 登录态（Cookie）", "不是微博密码。浏览器登录后自动写入的一长串会话凭证；也可从已登录的 weibo.com 开发者工具复制。留空保持现有值", kindSecret, false, false, nil},
-	"WEIBO_MWEIBO_COOKIE": {"WEIBO_MWEIBO_COOKIE", "微博", "m.weibo.cn 登录态（Cookie）", "不是密码。手机站会话凭证，用于部分接口/日报；开启浏览器登录后通常会自动同步。留空保持现有值", kindSecret, false, false, nil},
-	"WEIBO_SUPER_AUTO_ENABLED": {"WEIBO_SUPER_AUTO_ENABLED", "微博", "超话自动签到", "开关：每日对「签到列表」里的超话自动签到（数据与日报列表独立）", kindBoolean, false, false, nil},
-	"WEIBO_SUPER_COUNT_ENABLED": {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "开关：每日统计「日报列表」签到人数并邮件/QQ 推送（数据与签到列表独立）", kindBoolean, false, false, nil},
+	"WEIBO_COOKIE":                  {"WEIBO_COOKIE", "微博", "weibo.com 登录态（Cookie）", "不是微博密码。浏览器登录后自动写入的一长串会话凭证；也可从已登录的 weibo.com 开发者工具复制。留空保持现有值", kindSecret, false, false, nil},
+	"WEIBO_MWEIBO_COOKIE":           {"WEIBO_MWEIBO_COOKIE", "微博", "m.weibo.cn 登录态（Cookie）", "不是密码。手机站会话凭证，用于部分接口/日报；开启浏览器登录后通常会自动同步。留空保持现有值", kindSecret, false, false, nil},
+	"WEIBO_SUPER_AUTO_ENABLED":      {"WEIBO_SUPER_AUTO_ENABLED", "微博", "超话自动签到", "开关：每日对「签到列表」里的超话自动签到（数据与日报列表独立）", kindBoolean, false, false, nil},
+	"WEIBO_SUPER_COUNT_ENABLED":     {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "开关：每日统计「日报列表」签到人数并邮件/QQ 推送（数据与签到列表独立）", kindBoolean, false, false, nil},
 	"WEIBO_SUPER_COUNT_DELIVERY":    {"WEIBO_SUPER_COUNT_DELIVERY", "微博", "日报发送渠道", "email=仅邮件（默认），qq=仅QQ，both=邮件+QQ", kindString, false, false, nil},
 	"WEIBO_SUPER_COUNT_QQ":          {"WEIBO_SUPER_COUNT_QQ", "微博", "日报额外 QQ 号", "仅渠道含 QQ 时生效。留空则只发给管理员；多个用逗号/空格/换行分隔", kindString, false, false, nil},
 	// 抖音
-	"DOUYIN_ENABLED": {"DOUYIN_ENABLED", "抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean, false, false, nil},
-	"DOUYIN_POLL_SECONDS": {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger, false, false, nil},
-	"DOUYIN_IM_ENABLED": {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean, false, false, nil},
-	"DOUYIN_IM_PRIVATE_ENABLED": {"DOUYIN_IM_PRIVATE_ENABLED", "抖音", "私信提醒", "私信通知到默认通知群", kindBoolean, false, false, nil},
-	"DOUYIN_IM_GROUP_NAME": {"DOUYIN_IM_GROUP_NAME", "抖音", "目标群名（辅助）", "可选展示名；多群时优先用抖音回传的群名", kindString, false, false, nil},
-	"DOUYIN_IM_GROUP_NUMBER": {"DOUYIN_IM_GROUP_NUMBER", "抖音", "目标群号（可多个）", "要转发的抖音群号，多个用逗号/空格/换行分隔。与「创作者订阅」独立：那边监控作品/开播，这里监控群主发言", kindString, false, false, nil},
+	"DOUYIN_ENABLED":                 {"DOUYIN_ENABLED", "抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean, false, false, nil},
+	"DOUYIN_POLL_SECONDS":            {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger, false, false, nil},
+	"DOUYIN_LIVE_SUMMARY_ENABLED":    {"DOUYIN_LIVE_SUMMARY_ENABLED", "抖音", "下播数据汇总", "下播通知附带监测时长、最高在线及可靠的场观/礼物数据", kindBoolean, false, false, nil},
+	"DOUYIN_LIVE_SOUND_WAVE_ENABLED": {"DOUYIN_LIVE_SOUND_WAVE_ENABLED", "抖音", "监测礼物音浪估算", "仅按礼物消息中的 diamondCount 累计，不代表官方收入", kindBoolean, false, false, nil},
+	"DOUYIN_LIVE_RAW_STATS_DEBUG":    {"DOUYIN_LIVE_RAW_STATS_DEBUG", "抖音", "保存直播统计调试样本", "默认关闭；开启后写入脱敏统计样本", kindBoolean, false, false, nil},
+	"DOUYIN_LIVE_RAW_GIFT_DEBUG":     {"DOUYIN_LIVE_RAW_GIFT_DEBUG", "抖音", "保存礼物调试样本", "默认关闭；开启后写入脱敏礼物样本", kindBoolean, false, false, nil},
+	"DOUYIN_IM_ENABLED":              {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean, false, false, nil},
+	"DOUYIN_IM_PRIVATE_ENABLED":      {"DOUYIN_IM_PRIVATE_ENABLED", "抖音", "私信提醒", "私信通知到默认通知群", kindBoolean, false, false, nil},
+	"DOUYIN_IM_GROUP_NAME":           {"DOUYIN_IM_GROUP_NAME", "抖音", "目标群名（辅助）", "可选展示名；多群时优先用抖音回传的群名", kindString, false, false, nil},
+	"DOUYIN_IM_GROUP_NUMBER":         {"DOUYIN_IM_GROUP_NUMBER", "抖音", "目标群号（可多个）", "要转发的抖音群号，多个用逗号/空格/换行分隔。与「创作者订阅」独立：那边监控作品/开播，这里监控群主发言", kindString, false, false, nil},
 	// 小红书
-	"XIAOHONGSHU_ENABLED": {"XIAOHONGSHU_ENABLED", "小红书", "启用小红书", "帖子监控与可用时的开播提醒", kindBoolean, false, false, nil},
+	"XIAOHONGSHU_ENABLED":      {"XIAOHONGSHU_ENABLED", "小红书", "启用小红书", "帖子监控与可用时的开播提醒", kindBoolean, false, false, nil},
 	"XIAOHONGSHU_POLL_SECONDS": {"XIAOHONGSHU_POLL_SECONDS", "小红书", "帖子轮询间隔", "秒，最低 30", kindInteger, false, false, nil},
 }
 
@@ -93,7 +97,8 @@ var configFieldOrder = []string{
 	"NIM_ENABLED", "NIM_ROOM_MESSAGE_ENABLED", "NIM_ROOM_MESSAGE_POLL_FALLBACK", "NIM_LIVE_DANMAKU_ENABLED", "NIM_VIEWER_EVENT_ENABLED",
 	"WEIBO_BROWSER_AUTH_ENABLED", "WEIBO_BROWSER_REFRESH_MINUTES", "WEIBO_COOKIE", "WEIBO_MWEIBO_COOKIE",
 	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED", "WEIBO_SUPER_COUNT_DELIVERY", "WEIBO_SUPER_COUNT_QQ",
-	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
+	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_LIVE_SUMMARY_ENABLED", "DOUYIN_LIVE_SOUND_WAVE_ENABLED",
+	"DOUYIN_LIVE_RAW_STATS_DEBUG", "DOUYIN_LIVE_RAW_GIFT_DEBUG", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
 	"DOUYIN_IM_GROUP_NUMBER", "DOUYIN_IM_GROUP_NAME",
 	"XIAOHONGSHU_ENABLED", "XIAOHONGSHU_POLL_SECONDS",
 }
@@ -118,7 +123,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			field.Value = ""
 		}
 		if field.Kind == kindBoolean && raw[key] == nil {
-			field.Value = false
+			field.Value = key == "DOUYIN_LIVE_SUMMARY_ENABLED" || key == "DOUYIN_LIVE_SOUND_WAVE_ENABLED"
 		}
 		field.RestartRequired = configFieldNeedsRestart(key)
 		groups[field.Group] = append(groups[field.Group], field)
@@ -126,8 +131,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"groups":      groups,
-			"groupOrder":  configGroupOrder,
+			"groups":     groups,
+			"groupOrder": configGroupOrder,
 		})
 		return
 	}

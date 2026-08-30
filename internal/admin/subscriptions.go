@@ -3,10 +3,13 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/logic"
@@ -355,6 +358,9 @@ type douyinPanelSub struct {
 	LiveID     string `json:"liveId,omitempty"`
 	OldGroupID int64  `json:"oldGroupId,omitempty"`
 	OldSec     string `json:"oldSecUserId,omitempty"`
+	Enabled    *bool  `json:"enabled,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 type douyinStoredSub struct {
@@ -366,6 +372,7 @@ type douyinStoredSub struct {
 	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
 	LiveID        string `json:"live_id,omitempty"`
 	Auto          bool   `json:"auto,omitempty"`
+	Disabled      bool   `json:"disabled,omitempty"`
 }
 
 func loadDouyinSubs(encoded json.RawMessage) map[string]map[string]*douyinStoredSub {
@@ -407,6 +414,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 				result = append(result, douyinPanelSub{
 					GroupID: gid, SecUserID: id, ProfileURL: item.ProfileURL,
 					Name: item.Name, AtAll: item.AtAll, LiveID: item.LiveID,
+					Enabled: boolPointer(!item.Disabled), Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
 				})
 			}
 		}
@@ -455,15 +463,32 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 		item.ProfileURL = profile
 		item.AtAll = body.AtAll
 		item.Auto = false
+		if body.Enabled != nil {
+			item.Disabled = !*body.Enabled
+		}
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		}
 		subs[gk][sec] = item
-		if err := s.applyConfig(map[string]any{"DOUYIN_ENABLED": true, "DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
-			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		var douyinEnabled bool
+		_ = json.Unmarshal(raw["DOUYIN_ENABLED"], &douyinEnabled)
+		var saveErr error
+		if douyinEnabled {
+			saveErr = s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs})
+		} else {
+			// The master switch creates the long-lived monitor at boot, so the
+			// first panel subscription requires the existing authenticated restart path.
+			saveErr = s.applyConfig(map[string]any{"DOUYIN_ENABLED": true, "DOUYIN_SUBSCRIPTIONS": subs})
+		}
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: saveErr.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已保存，Bot 已重新启动", "secUserId": sec, "profileUrl": profile})
+		message := "抖音订阅已保存并热重载"
+		if !douyinEnabled {
+			message = "抖音订阅已保存，已启用并重启 Bot"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": message, "secUserId": sec, "profileUrl": profile})
 	case http.MethodPut:
 		var body douyinPanelSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -522,23 +547,33 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			subs[ngk] = map[string]*douyinStoredSub{}
 		}
 		item := &douyinStoredSub{SecUserID: newSec}
-		if preserved != nil {
+		if existing := subs[ngk][newSec]; existing != nil {
+			*item = *existing
+			item.SecUserID = newSec
+		} else if preserved != nil && newSec == oldSec {
 			*item = *preserved
 			item.SecUserID = newSec
+		} else if preserved != nil {
+			// Changing creators must not carry the old creator's live ID or
+			// work cursor into the new subscription.
+			item.Disabled = preserved.Disabled
 		}
 		if newProfile != "" {
 			item.ProfileURL = newProfile
 		}
 		item.AtAll = body.AtAll
+		if body.Enabled != nil {
+			item.Disabled = !*body.Enabled
+		}
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		}
 		subs[ngk][newSec] = item
-		if err := s.applyConfig(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已更新，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已更新并热重载"})
 	case http.MethodDelete:
 		var body douyinPanelSub
 		if err := decodeJSON(r, &body); err != nil {
@@ -552,12 +587,52 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 				delete(subs, gk)
 			}
 		}
-		if err := s.applyConfig(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
+		if err := s.writeConfigAndReloadBot(map[string]any{"DOUYIN_SUBSCRIPTIONS": subs}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已删除，Bot 已重新启动"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "抖音订阅已删除并热重载"})
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func douyinSubscriptionStatus(configPath string, item *douyinStoredSub) string {
+	if item.Disabled {
+		return "已停用"
+	}
+	if strings.TrimSpace(item.LiveID) != "" {
+		path := filepath.Join(filepath.Dir(configPath), "storage", "douyin-live-sessions", safeAdminFilename(item.LiveID)+".json")
+		var state struct {
+			Online        bool      `json:"online"`
+			LastUpdatedAt time.Time `json:"last_updated_at"`
+		}
+		if raw, err := os.ReadFile(path); err == nil && json.Unmarshal(raw, &state) == nil {
+			when := ""
+			if !state.LastUpdatedAt.IsZero() {
+				when = " · 更新于 " + state.LastUpdatedAt.Local().Format("01-02 15:04")
+			}
+			if state.Online {
+				return "直播监控中" + when
+			}
+			return "最近一场已结束" + when
+		}
+		return "已解析直播间，等待/正在监控"
+	}
+	if strings.TrimSpace(item.Name) != "" {
+		return "主页已解析，等待直播间"
+	}
+	return "等待首次解析"
+}
+
+func safeAdminFilename(value string) string {
+	var result strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-' || r == '_' {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }

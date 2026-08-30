@@ -80,11 +80,23 @@ type douyinBrowserEvent struct {
 }
 
 type douyinLiveState struct {
-	Online    bool
-	StartedAt time.Time
-	Peak      int64
-	Name      string
-	Title     string
+	LiveID                  string           `json:"live_id"`
+	RoomID                  string           `json:"room_id"`
+	Name                    string           `json:"name,omitempty"`
+	Title                   string           `json:"title,omitempty"`
+	DetectedStartedAt       time.Time        `json:"detected_started_at"`
+	LastUpdatedAt           time.Time        `json:"last_updated_at"`
+	Online                  bool             `json:"online"`
+	CurrentOnline           int64            `json:"current_online,omitempty"`
+	PeakOnline              int64            `json:"peak_online,omitempty"`
+	TotalAudience           int64            `json:"total_audience,omitempty"`
+	EstimatedSoundWave      int64            `json:"estimated_sound_wave,omitempty"`
+	SoundWaveAvailable      bool             `json:"sound_wave_available,omitempty"`
+	GiftEventCount          int64            `json:"gift_event_count,omitempty"`
+	ProcessedGiftMessageIDs []string         `json:"processed_gift_message_ids,omitempty"`
+	ComboGiftCounts         map[string]int64 `json:"combo_gift_counts,omitempty"`
+	StartNotificationSent   bool             `json:"start_notification_sent"`
+	EndNotificationSent     bool             `json:"end_notification_sent"`
 }
 
 type DouyinMonitor struct {
@@ -92,30 +104,32 @@ type DouyinMonitor struct {
 	napcat       *napcat.Client
 	notifyAdmins func(string)
 
-	mu               sync.Mutex
-	started          bool
-	stopping         bool
-	wg               sync.WaitGroup
-	liveCmd          *exec.Cmd
-	liveCancels      map[string]context.CancelFunc
-	liveStates       map[string]*douyinLiveState
-	browser          *WeiboAuthBridge
-	imConversations  map[string]douyinIMTarget // conversationID -> target
-	imSelfUID        string
-	imConnected      bool
+	mu              sync.Mutex
+	started         bool
+	stopping        bool
+	wg              sync.WaitGroup
+	liveCmd         *exec.Cmd
+	liveCancels     map[string]context.CancelFunc
+	liveStates      map[string]*douyinLiveState
+	livePersistedAt map[string]time.Time
+	liveSessionDir  string
+	browser         *WeiboAuthBridge
+	imConversations map[string]douyinIMTarget // conversationID -> target
+	imSelfUID       string
+	imConnected     bool
 
 	// Captcha window: count account_error "验证码中间页" hits that block post lists.
 	captchaHits      []time.Time
 	captchaLastAlert time.Time
 
 	// IM disconnect watchdog: silent sidecar/bot restart → email only if still down after auto-heal.
-	imDisconnectedAt     time.Time
+	imDisconnectedAt      time.Time
 	imLastDisconnectAlert time.Time
-	imSidecarRestartAt   time.Time
-	imBotRestartAt       time.Time
-	imWatchdogStop       chan struct{}
-	imWatchdogOnce       sync.Once
-	requestBotRestart    func(reason string)
+	imSidecarRestartAt    time.Time
+	imBotRestartAt        time.Time
+	imWatchdogStop        chan struct{}
+	imWatchdogOnce        sync.Once
+	requestBotRestart     func(reason string)
 }
 
 type douyinIMTarget struct {
@@ -139,15 +153,19 @@ func (m *DouyinMonitor) SetRequestBotRestart(fn func(reason string)) {
 }
 
 func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins func(string)) *DouyinMonitor {
-	return &DouyinMonitor{
-		cfg:          cfg,
-		napcat:       client,
-		notifyAdmins: notifyAdmins,
+	m := &DouyinMonitor{
+		cfg:             cfg,
+		napcat:          client,
+		notifyAdmins:    notifyAdmins,
 		liveCancels:     make(map[string]context.CancelFunc),
 		liveStates:      make(map[string]*douyinLiveState),
+		livePersistedAt: make(map[string]time.Time),
+		liveSessionDir:  douyinLiveSessionStoreDir,
 		imConversations: make(map[string]douyinIMTarget),
 		imWatchdogStop:  make(chan struct{}),
 	}
+	m.loadLiveStatesFromDisk()
+	return m
 }
 
 func parseDouyinCommandLine(line, fallback string) ([]string, error) {
@@ -193,7 +211,7 @@ func (m *DouyinMonitor) accountsLocked() []douyinAccountCommand {
 	seen := make(map[string]douyinAccountCommand)
 	for _, group := range m.cfg.DouyinSubscriptions {
 		for key, item := range group {
-			if item == nil {
+			if item == nil || item.Disabled {
 				continue
 			}
 			sec := strings.TrimSpace(item.SecUserID)
@@ -299,7 +317,6 @@ func (m *DouyinMonitor) Sync() error {
 		if !desiredLive[liveID] {
 			cancel()
 			delete(m.liveCancels, liveID)
-			delete(m.liveStates, liveID)
 		}
 	}
 	m.mu.Unlock()
@@ -455,8 +472,6 @@ func (m *DouyinMonitor) noteDouyinCaptchaError(secUserID, message string) {
 		window, count, threshold, truncateDouyinLogText(secUserID, 24), msg,
 	))
 }
-
-
 
 func (m *DouyinMonitor) handleIMStatus(event douyinBrowserEvent) {
 	status := strings.TrimSpace(event.Status)
@@ -875,13 +890,15 @@ func truncateDouyinLogText(text string, max int) string {
 
 func inferDouyinQuotedName(event douyinBrowserEvent, senderName, selfUID string) string {
 	quotedUID := strings.TrimSpace(event.QuotedSenderUID)
+	// An explicit name decoded from the quote payload is more authoritative
+	// than UID heuristics (which may reuse a stale self UID after reconnect).
+	if name := strings.TrimSpace(event.QuotedName); name != "" {
+		return name
+	}
 	// Self-quote always shows 我 — cached remark/nickname (e.g. our own account
 	// saved in contact cache as 张若昀) must never override this.
 	if quotedUID != "" && (quotedUID == event.SelfUID || quotedUID == selfUID) {
 		return "我"
-	}
-	if name := strings.TrimSpace(event.QuotedName); name != "" {
-		return name
 	}
 	if quotedUID == "" {
 		return ""
@@ -1289,10 +1306,14 @@ func (m *DouyinMonitor) handleAccount(event douyinBrowserEvent) {
 	}
 	m.mu.Lock()
 	changed := false
+	enabled := false
 	for _, group := range m.cfg.DouyinSubscriptions {
 		item := group[sec]
 		if item == nil {
 			continue
+		}
+		if !item.Disabled {
+			enabled = true
 		}
 		if event.Nickname != "" && item.Name != event.Nickname {
 			item.Name = event.Nickname
@@ -1318,7 +1339,7 @@ func (m *DouyinMonitor) handleAccount(event douyinBrowserEvent) {
 			}
 		}()
 	}
-	if event.LiveID != "" {
+	if enabled && event.LiveID != "" {
 		m.ensureLive(event.LiveID)
 	}
 }
@@ -1371,7 +1392,7 @@ func (m *DouyinMonitor) handlePosts(event douyinBrowserEvent) {
 	m.mu.Lock()
 	for groupID, group := range m.cfg.DouyinSubscriptions {
 		item := group[sec]
-		if item == nil {
+		if item == nil || item.Disabled {
 			continue
 		}
 		if event.Nickname != "" {
@@ -1512,7 +1533,7 @@ func (m *DouyinMonitor) ensureLive(liveID string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.liveCancels[liveID] = cancel
 	if m.liveStates[liveID] == nil {
-		m.liveStates[liveID] = &douyinLiveState{}
+		m.liveStates[liveID] = &douyinLiveState{LiveID: liveID, RoomID: liveID, ComboGiftCounts: make(map[string]int64)}
 	}
 	m.mu.Unlock()
 	m.wg.Add(1)
@@ -1592,22 +1613,57 @@ func (m *DouyinMonitor) handleLiveMessage(liveID string, raw []byte) {
 		return
 	}
 	method, _ := body["method"].(string)
-	if method != "WebcastRoomUserSeqMessage" && method != "WebcastRoomStatsMessage" {
-		return
-	}
-	if online := extractDouyinOnline(body); online > 0 {
+	switch method {
+	case "WebcastRoomUserSeqMessage", "WebcastRoomStatsMessage":
+		if m.cfg.DouyinLiveRawStatsDebug {
+			m.dumpDouyinLiveSample("stats", liveID, body)
+		}
+		current := extractDouyinCurrentOnline(body)
+		total := extractDouyinTotalAudience(body)
 		m.mu.Lock()
 		state := m.liveStates[liveID]
-		if state != nil && state.Online && online > state.Peak {
-			state.Peak = online
+		if state != nil && state.Online {
+			if current > 0 {
+				state.CurrentOnline = current
+				if current > state.PeakOnline {
+					state.PeakOnline = current
+				}
+			}
+			if total > state.TotalAudience {
+				state.TotalAudience = total
+			}
+			state.LastUpdatedAt = time.Now()
 		}
 		m.mu.Unlock()
+		m.persistLiveState(liveID, false)
+	case "WebcastGiftMessage":
+		if m.cfg.DouyinLiveRawGiftDebug {
+			m.dumpDouyinLiveSample("gift", liveID, body)
+		}
+		if m.cfg.DouyinLiveSoundWaveEnabled {
+			m.applyDouyinGift(liveID, body)
+		}
 	}
 }
 
 func numberAsInt64(value interface{}) int64 {
 	switch value := value.(type) {
 	case float64:
+		return int64(value)
+	case float32:
+		return int64(value)
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case int32:
+		return int64(value)
+	case uint64:
+		if value <= uint64(^uint64(0)>>1) {
+			return int64(value)
+		}
+		return 0
+	case uint:
 		return int64(value)
 	case json.Number:
 		result, _ := value.Int64()
@@ -1620,65 +1676,68 @@ func numberAsInt64(value interface{}) int64 {
 	}
 }
 
-func extractDouyinOnline(value interface{}) int64 {
-	priority := map[string]bool{"onlineuserforanchor": true, "onlineusercount": true, "usercount": true, "total": true}
-	var walk func(interface{}) int64
-	walk = func(node interface{}) int64 {
-		switch node := node.(type) {
-		case map[string]interface{}:
-			for key, child := range node {
-				if priority[strings.ToLower(key)] {
-					if result := numberAsInt64(child); result > 0 {
-						return result
-					}
-				}
-			}
-			for _, child := range node {
-				if result := walk(child); result > 0 {
-					return result
-				}
-			}
-		case []interface{}:
-			for _, child := range node {
-				if result := walk(child); result > 0 {
-					return result
-				}
-			}
+func extractDouyinExplicitNumber(value interface{}, fields ...string) int64 {
+	for _, field := range fields {
+		if result := numberAsInt64(findDouyinValue(value, field)); result > 0 {
+			return result
 		}
-		return 0
 	}
-	return walk(value)
+	return 0
 }
 
+// extractDouyinCurrentOnline only accepts fields confirmed to represent the
+// number currently in the room. In particular, a generic "total" is ignored.
+func extractDouyinCurrentOnline(value interface{}) int64 {
+	return extractDouyinExplicitNumber(value, "onlineUserForAnchor", "onlineUserCount", "userCount")
+}
+
+// extractDouyinTotalAudience only accepts explicit cumulative audience fields.
+func extractDouyinTotalAudience(value interface{}) int64 {
+	return extractDouyinExplicitNumber(value, "audienceCount", "totalUserCount")
+}
+
+// Kept for source compatibility with older tests/extensions.
+func extractDouyinOnline(value interface{}) int64 { return extractDouyinCurrentOnline(value) }
+
 func (m *DouyinMonitor) liveOnline(liveID, name, title string) {
+	now := time.Now()
 	m.mu.Lock()
 	state := m.liveStates[liveID]
 	if state == nil {
-		state = &douyinLiveState{}
+		state = &douyinLiveState{LiveID: liveID, RoomID: liveID, ComboGiftCounts: make(map[string]int64)}
 		m.liveStates[liveID] = state
 	}
-	if state.Online {
+	if state.LiveID == "" {
+		state.LiveID = liveID
+		state.RoomID = liveID
+	}
+	if state.ComboGiftCounts == nil {
+		state.ComboGiftCounts = make(map[string]int64)
+	}
+	if state.Online || state.StartNotificationSent || state.EndNotificationSent {
 		m.mu.Unlock()
 		return
 	}
 	state.Online = true
-	state.StartedAt = time.Now()
-	state.Peak = 0
+	state.DetectedStartedAt = now
+	state.LastUpdatedAt = now
 	state.Name = name
 	state.Title = title
+	state.StartNotificationSent = true
 	m.mu.Unlock()
+	m.persistLiveState(liveID, true)
 	m.broadcastLive(liveID, true, name, title, 0, 0)
 }
 
 func (m *DouyinMonitor) liveEnded(liveID, name, title string) {
 	m.mu.Lock()
 	state := m.liveStates[liveID]
-	if state == nil || !state.Online {
+	if state == nil || !state.Online || state.EndNotificationSent {
 		m.mu.Unlock()
 		return
 	}
-	duration := time.Since(state.StartedAt)
-	peak := state.Peak
+	duration := time.Since(state.DetectedStartedAt)
+	peak := state.PeakOnline
 	if name == "" {
 		name = state.Name
 	}
@@ -1686,25 +1745,36 @@ func (m *DouyinMonitor) liveEnded(liveID, name, title string) {
 		title = state.Title
 	}
 	state.Online = false
+	state.LastUpdatedAt = time.Now()
+	state.EndNotificationSent = true
+	state.ComboGiftCounts = make(map[string]int64)
 	m.mu.Unlock()
+	m.persistLiveState(liveID, true)
 	m.broadcastLive(liveID, false, name, title, duration, peak)
+	m.pruneDouyinLiveHistory(50)
 }
 
-func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, title string, duration time.Duration, peak int64) {
-	type target struct {
-		groupID int64
-		cfg     config.DouyinConfig
-	}
-	var targets []target
+type douyinLiveTarget struct {
+	groupID int64
+	cfg     config.DouyinConfig
+}
+
+func (m *DouyinMonitor) liveTargets(liveID string) []douyinLiveTarget {
+	var targets []douyinLiveTarget
 	m.mu.Lock()
 	for groupID, group := range m.cfg.DouyinSubscriptions {
 		for _, item := range group {
-			if item != nil && item.LiveID == liveID {
-				targets = append(targets, target{groupID: groupID, cfg: *item})
+			if item != nil && !item.Disabled && item.LiveID == liveID {
+				targets = append(targets, douyinLiveTarget{groupID: groupID, cfg: *item})
 			}
 		}
 	}
 	m.mu.Unlock()
+	return targets
+}
+
+func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, title string, duration time.Duration, peak int64) {
+	targets := m.liveTargets(liveID)
 	for _, target := range targets {
 		titleNick := resolveDouyinWorksTitleNick(eventName, target.cfg.Name)
 		if titleNick == "" {
@@ -1719,7 +1789,7 @@ func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, tit
 			}
 			text += "\n已开播"
 			if title != "" {
-				text += "\n" + title
+				text += "\n直播标题：" + title
 			}
 			text += "\nhttps://live.douyin.com/" + liveID
 		} else {
@@ -1727,9 +1797,17 @@ func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, tit
 			if bodyLabel != "" && bodyLabel != titleNick {
 				text += "\n" + bodyLabel
 			}
-			text += "\n直播已结束\n直播时长：" + formatDouyinDuration(duration)
-			if peak > 0 {
-				text += fmt.Sprintf("\n最高在线人数：%d", peak)
+			text += "\n直播已结束"
+			if m.cfg.DouyinLiveSummaryEnabled {
+				m.mu.Lock()
+				state := m.liveStates[liveID]
+				var total, sound int64
+				var soundAvailable bool
+				if state != nil {
+					total, sound, soundAvailable = state.TotalAudience, state.EstimatedSoundWave, state.SoundWaveAvailable
+				}
+				m.mu.Unlock()
+				text = appendDouyinLiveSummary(text, duration, peak, total, sound, m.cfg.DouyinLiveSoundWaveEnabled && soundAvailable)
 			}
 		}
 		segments := make([]interface{}, 0, 2)
@@ -1739,6 +1817,28 @@ func (m *DouyinMonitor) broadcastLive(liveID string, online bool, eventName, tit
 		segments = append(segments, napcat.TextSegment(text))
 		m.napcat.SendGroupMessage(target.groupID, segments)
 	}
+}
+
+func appendDouyinLiveSummary(text string, duration time.Duration, peak, total, sound int64, soundAvailable bool) string {
+	text += "\n监测时长：" + formatDouyinDuration(duration)
+	if peak > 0 {
+		text += "\n最高在线：" + formatDouyinNumber(peak)
+	}
+	if total > 0 {
+		text += "\n累计场观：" + formatDouyinNumber(total)
+	}
+	if soundAvailable && sound > 0 {
+		text += "\n监测音浪估算：" + formatDouyinNumber(sound)
+	}
+	return text
+}
+
+func formatDouyinNumber(value int64) string {
+	text := strconv.FormatInt(value, 10)
+	for i := len(text) - 3; i > 0; i -= 3 {
+		text = text[:i] + "," + text[i:]
+	}
+	return text
 }
 
 func formatDouyinDuration(duration time.Duration) string {
