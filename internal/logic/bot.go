@@ -927,6 +927,7 @@ func (b *Bot) reloadSubscriptions() {
 	b.cfg.DouyinLiveSoundWaveEnabled = cfg.DouyinLiveSoundWaveEnabled
 	b.cfg.DouyinLiveRawStatsDebug = cfg.DouyinLiveRawStatsDebug
 	b.cfg.DouyinLiveRawGiftDebug = cfg.DouyinLiveRawGiftDebug
+	b.cfg.DouyinLiveCookieAccount = cfg.DouyinLiveCookieAccount
 	b.cfg.DouyinIMEnabled = cfg.DouyinIMEnabled
 	b.cfg.DouyinIMPrivateEnabled = cfg.DouyinIMPrivateEnabled
 	b.cfg.DouyinIMGroupName = cfg.DouyinIMGroupName

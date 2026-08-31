@@ -73,6 +73,7 @@ type Config struct {
 	DouyinLiveSoundWaveEnabled bool                                    `json:"DOUYIN_LIVE_SOUND_WAVE_ENABLED"`
 	DouyinLiveRawStatsDebug    bool                                    `json:"DOUYIN_LIVE_RAW_STATS_DEBUG"`
 	DouyinLiveRawGiftDebug     bool                                    `json:"DOUYIN_LIVE_RAW_GIFT_DEBUG"`
+	DouyinLiveCookieAccount    string                                  `json:"DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT,omitempty"`
 	DouyinSubscriptions        map[int64]map[string]*DouyinConfig      `json:"DOUYIN_SUBSCRIPTIONS"`
 	DouyinIMEnabled            bool                                    `json:"DOUYIN_IM_ENABLED"`
 	DouyinIMPrivateEnabled     bool                                    `json:"DOUYIN_IM_PRIVATE_ENABLED"`

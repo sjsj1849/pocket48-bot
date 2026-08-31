@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
+	"github.com/zalando/go-keyring"
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/napcat"
@@ -94,6 +96,13 @@ type douyinLiveState struct {
 	CurrentOnline            int64            `json:"current_online,omitempty"`
 	PeakOnline               int64            `json:"peak_online,omitempty"`
 	TotalAudience            int64            `json:"total_audience,omitempty"`
+	LikeCount                int64            `json:"like_count,omitempty"`
+	GiftCount                int64            `json:"gift_count,omitempty"`
+	DiamondTotal             int64            `json:"diamond_total,omitempty"`
+	DiamondAvailable         bool             `json:"diamond_available,omitempty"`
+	FanTicketTotal           int64            `json:"fan_ticket_total,omitempty"`
+	PKLeftScore              int64            `json:"pk_left_score,omitempty"`
+	PKRightScore             int64            `json:"pk_right_score,omitempty"`
 	EstimatedSoundWave       int64            `json:"estimated_sound_wave,omitempty"`
 	SoundWaveAvailable       bool             `json:"sound_wave_available,omitempty"`
 	GiftEventCount           int64            `json:"gift_event_count,omitempty"`
@@ -124,7 +133,13 @@ type DouyinMonitor struct {
 	liveStates      map[string]*douyinLiveState
 	livePersistedAt map[string]time.Time
 	liveSessionDir  string
+	liveStore       *douyinLiveStore
+	liveStorePath   string
 	livePersistMu   sync.Mutex
+	liveEventQueue  chan douyinLiveEnvelope
+	liveEventWG     sync.WaitGroup
+	liveQueueDropAt time.Time
+	liveCookie      func(string) (string, error)
 	enqueueGroup    func(int64, interface{}) bool
 	browser         *WeiboAuthBridge
 	imConversations map[string]douyinIMTarget // conversationID -> target
@@ -143,6 +158,11 @@ type DouyinMonitor struct {
 	imWatchdogStop        chan struct{}
 	imWatchdogOnce        sync.Once
 	requestBotRestart     func(reason string)
+}
+
+type douyinLiveEnvelope struct {
+	liveID string
+	raw    []byte
 }
 
 type douyinIMTarget struct {
@@ -175,6 +195,10 @@ func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins fu
 		liveStates:      make(map[string]*douyinLiveState),
 		livePersistedAt: make(map[string]time.Time),
 		liveSessionDir:  douyinLiveSessionStoreDir,
+		liveStorePath:   douyinLiveDatabasePath,
+		liveCookie: func(account string) (string, error) {
+			return keyring.Get(douyinLiveCookieService, account)
+		},
 		imConversations: make(map[string]douyinIMTarget),
 		imWatchdogStop:  make(chan struct{}),
 	}
@@ -279,7 +303,19 @@ func (m *DouyinMonitor) Start() error {
 	}
 	m.started = true
 	m.stopping = false
+	m.liveEventQueue = make(chan douyinLiveEnvelope, 1024)
+	queue := m.liveEventQueue
 	m.mu.Unlock()
+	m.liveEventWG.Add(1)
+	go func() {
+		defer m.liveEventWG.Done()
+		for event := range queue {
+			m.handleLiveMessage(event.liveID, event.raw)
+		}
+	}()
+	if err := m.ensureLiveStore(); err != nil {
+		log.Printf("[Douyin-live] database unavailable, continuing with JSON state: %v", err)
+	}
 
 	if err := m.startOptionalLiveProcess(); err != nil {
 		log.Printf("[Douyin-live] sidecar start failed, will still try configured WebSocket: %v", err)
@@ -1568,6 +1604,11 @@ func (m *DouyinMonitor) ensureLive(liveID string) {
 
 func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 	defer m.wg.Done()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.runLiveHTTPFallback(ctx, liveID)
+	}()
 	defer func() {
 		m.mu.Lock()
 		delete(m.liveCancels, liveID)
@@ -1575,6 +1616,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 		m.mu.Unlock()
 	}()
 	backoff := time.Second
+	lastHTTPSample := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -1582,9 +1624,26 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 		default:
 		}
 		base := strings.TrimRight(strings.TrimSpace(m.cfg.DouyinLiveWSURL), "/")
-		conn, _, err := websocket.DefaultDialer.Dial(base+"/"+url.PathEscape(liveID), nil)
+		endpoint := base + "/" + url.PathEscape(liveID)
+		if account := strings.TrimSpace(m.cfg.DouyinLiveCookieAccount); account != "" && m.liveCookie != nil {
+			if secret, secretErr := m.liveCookie(account); secretErr == nil && secret != "" {
+				if parsed, parseErr := url.Parse(endpoint); parseErr == nil {
+					query := parsed.Query()
+					query.Set("cookie_b64", base64.RawURLEncoding.EncodeToString([]byte(secret)))
+					parsed.RawQuery = query.Encode()
+					endpoint = parsed.String()
+				}
+			}
+		}
+		conn, _, err := websocket.DefaultDialer.Dial(endpoint, nil)
 		if err != nil {
 			m.setLiveConnection(liveID, false)
+			if time.Since(lastHTTPSample) >= 30*time.Second {
+				lastHTTPSample = time.Now()
+				httpCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+				m.sampleDouyinHTTPMetrics(httpCtx, liveID)
+				cancel()
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -1613,7 +1672,7 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 				m.setLiveConnection(liveID, false)
 				break
 			}
-			m.handleLiveMessage(liveID, raw)
+			m.enqueueLiveEvent(liveID, raw)
 			select {
 			case <-ctx.Done():
 				_ = conn.Close()
@@ -1621,6 +1680,45 @@ func (m *DouyinMonitor) runLive(ctx context.Context, liveID string) {
 				return
 			default:
 			}
+		}
+	}
+}
+
+func (m *DouyinMonitor) runLiveHTTPFallback(ctx context.Context, liveID string) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sampleCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			m.sampleDouyinHTTPMetrics(sampleCtx, liveID)
+			cancel()
+		}
+	}
+}
+
+func (m *DouyinMonitor) enqueueLiveEvent(liveID string, raw []byte) {
+	m.mu.Lock()
+	queue := m.liveEventQueue
+	stopping := m.stopping
+	m.mu.Unlock()
+	if queue == nil || stopping {
+		return
+	}
+	event := douyinLiveEnvelope{liveID: liveID, raw: append([]byte(nil), raw...)}
+	select {
+	case queue <- event:
+	default:
+		m.mu.Lock()
+		shouldLog := time.Since(m.liveQueueDropAt) >= time.Minute
+		if shouldLog {
+			m.liveQueueDropAt = time.Now()
+		}
+		m.mu.Unlock()
+		if shouldLog {
+			log.Printf("[Douyin-live-health] event queue full; dropping event live_id=%s", liveID)
 		}
 	}
 }
@@ -1658,38 +1756,43 @@ func (m *DouyinMonitor) handleLiveMessage(liveID string, raw []byte) {
 		return
 	}
 	method, _ := body["method"].(string)
+	capturedAt := time.Now()
+	sessionID, store := m.currentLiveSession(liveID)
+	if sessionID == "" {
+		return
+	}
+	eventKey := douyinEventKey(method, body)
+	if method == "WebcastGiftMessage" || method == "GiftMessage" || method == "WebcastLightGiftMessage" || method == "LightGiftMessage" {
+		eventKey = douyinGiftEventKey(method, body)
+	}
+	if store != nil {
+		inserted, err := store.recordEvent(sessionID, eventKey, method, capturedAt, body)
+		if err != nil {
+			log.Printf("[Douyin-live] persist event type=%s: %v", method, err)
+		} else if !inserted {
+			return
+		}
+	}
 	switch method {
-	case "WebcastRoomUserSeqMessage", "WebcastRoomStatsMessage":
+	case "WebcastRoomUserSeqMessage", "RoomUserSeqMessage", "WebcastRoomStatsMessage", "RoomStatsMessage":
 		if m.cfg.DouyinLiveRawStatsDebug {
 			m.dumpDouyinLiveSample("stats", liveID, body)
 		}
-		current := extractDouyinCurrentOnline(body)
-		total := extractDouyinTotalAudience(body)
-		m.mu.Lock()
-		state := m.liveStates[liveID]
-		if state != nil && state.Online {
-			if state.RoomID == "" {
-				state.RoomID = extractDouyinRoomID(body)
-			}
-			if current > 0 {
-				state.CurrentOnline = current
-				if current > state.PeakOnline {
-					state.PeakOnline = current
-				}
-			}
-			if total > state.TotalAudience {
-				state.TotalAudience = total
-			}
-			state.LastUpdatedAt = time.Now()
-		}
-		m.mu.Unlock()
-		m.persistLiveState(liveID, false)
-	case "WebcastGiftMessage":
+		m.applyResolvedMetrics(liveID, resolveDouyinMetrics(method, body), capturedAt)
+	case "WebcastLikeMessage", "LikeMessage":
+		m.applyResolvedMetrics(liveID, resolveDouyinMetrics(method, body), capturedAt)
+	case "WebcastGiftMessage", "GiftMessage", "WebcastLightGiftMessage", "LightGiftMessage":
 		if m.cfg.DouyinLiveRawGiftDebug {
 			m.dumpDouyinLiveSample("gift", liveID, body)
 		}
 		if m.cfg.DouyinLiveSoundWaveEnabled {
-			m.applyDouyinGift(liveID, body)
+			m.applyDouyinGiftEvent(liveID, method, eventKey, capturedAt, body)
+		}
+	case "WebcastUpdateFanTicketMessage", "UpdateFanTicketMessage":
+		m.applyDouyinFanTicket(liveID, eventKey, capturedAt, extractDouyinFanTicket(body))
+	case "WebcastMatchAgainstScoreMessage", "MatchAgainstScoreMessage":
+		if left, right, ok := extractDouyinPKScores(body); ok {
+			m.applyDouyinPKScores(liveID, eventKey, capturedAt, left, right)
 		}
 	}
 }
@@ -1996,7 +2099,24 @@ func (m *DouyinMonitor) formatLiveNotification(target douyinLiveTarget, state do
 				endedAt = state.LastUpdatedAt
 			}
 			duration := endedAt.Sub(state.DetectedStartedAt)
-			text = appendDouyinLiveSummary(text, duration, state.PeakOnline, state.TotalAudience, state.EstimatedSoundWave, m.cfg.DouyinLiveSoundWaveEnabled && state.SoundWaveAvailable)
+			diamonds := state.DiamondTotal
+			if diamonds == 0 {
+				diamonds = state.EstimatedSoundWave
+			}
+			text = appendDouyinLiveSummary(text, duration, state.PeakOnline, state.TotalAudience, diamonds,
+				m.cfg.DouyinLiveSoundWaveEnabled && (state.DiamondAvailable || state.SoundWaveAvailable))
+			if state.LikeCount > 0 {
+				text += "\n点赞总量：" + formatDouyinNumber(state.LikeCount)
+			}
+			if state.GiftCount > 0 {
+				text += "\n礼物数量（采集增量）：" + formatDouyinNumber(state.GiftCount)
+			}
+			if state.FanTicketTotal > 0 {
+				text += "\n粉丝票总量：" + formatDouyinNumber(state.FanTicketTotal)
+			}
+			if state.PKLeftScore > 0 || state.PKRightScore > 0 {
+				text += "\nPK 分数（左/右）：" + formatDouyinNumber(state.PKLeftScore) + " / " + formatDouyinNumber(state.PKRightScore)
+			}
 		}
 	}
 	segments := make([]interface{}, 0, 2)
@@ -2098,7 +2218,7 @@ func (m *DouyinMonitor) retryPendingLiveNotifications() {
 	}
 }
 
-func appendDouyinLiveSummary(text string, duration time.Duration, peak, total, sound int64, soundAvailable bool) string {
+func appendDouyinLiveSummary(text string, duration time.Duration, peak, total, diamonds int64, diamondAvailable bool) string {
 	text += "\n监测时长：" + formatDouyinDuration(duration)
 	if peak > 0 {
 		text += "\n最高在线：" + formatDouyinNumber(peak)
@@ -2106,8 +2226,8 @@ func appendDouyinLiveSummary(text string, duration time.Duration, peak, total, s
 	if total > 0 {
 		text += "\n累计场观：" + formatDouyinNumber(total)
 	}
-	if soundAvailable && sound > 0 {
-		text += "\n监测音浪估算：" + formatDouyinNumber(sound)
+	if diamondAvailable && diamonds > 0 {
+		text += "\n礼物钻石（WebSocket 采集值）：" + formatDouyinNumber(diamonds)
 	}
 	return text
 }
@@ -2189,9 +2309,46 @@ func (m *DouyinMonitor) Stop() {
 	}
 	m.wg.Wait()
 	m.mu.Lock()
+	queue := m.liveEventQueue
+	m.liveEventQueue = nil
+	if queue != nil {
+		close(queue)
+	}
+	m.mu.Unlock()
+	m.liveEventWG.Wait()
+	m.mu.Lock()
 	m.started = false
 	m.liveCmd = nil
+	store := m.liveStore
+	m.liveStore = nil
 	m.mu.Unlock()
+	if store != nil {
+		_ = store.close()
+	}
+}
+
+func (m *DouyinMonitor) ensureLiveStore() error {
+	m.mu.Lock()
+	if m.liveStore != nil {
+		m.mu.Unlock()
+		return nil
+	}
+	path := m.liveStorePath
+	m.mu.Unlock()
+	store, err := openDouyinLiveStore(path)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.liveStore == nil {
+		m.liveStore = store
+		store = nil
+	}
+	m.mu.Unlock()
+	if store != nil {
+		_ = store.close()
+	}
+	return nil
 }
 
 var douyinURLPattern = regexp.MustCompile(`https?://[^\s]+`)
