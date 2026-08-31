@@ -14,6 +14,28 @@ import (
 
 const douyinProcessedGiftLimit = 2048
 
+func douyinLivePayload(body map[string]interface{}) map[string]interface{} {
+	if payload, ok := mapValueFold(body, "payload").(map[string]interface{}); ok {
+		return payload
+	}
+	return body
+}
+
+// douyinLiveObject deliberately checks only the decoded message and its
+// immediate payload. Recursive same-name searches can select an unrelated
+// nested user/gift/stat object when the upstream schema grows.
+func douyinLiveObject(body map[string]interface{}, key string) map[string]interface{} {
+	if object, ok := mapValueFold(body, key).(map[string]interface{}); ok {
+		return object
+	}
+	if payload, ok := mapValueFold(body, "payload").(map[string]interface{}); ok {
+		if object, ok := mapValueFold(payload, key).(map[string]interface{}); ok {
+			return object
+		}
+	}
+	return nil
+}
+
 func mapValueFold(m map[string]interface{}, key string) interface{} {
 	for candidate, value := range m {
 		if strings.EqualFold(candidate, key) {
@@ -142,34 +164,46 @@ func containsDouyinGiftMessageID(ids []string, id string) bool {
 	return false
 }
 
-// applyDouyinGift uses only gift.diamondCount as a unit price. repeatCount,
-// comboCount and groupCount are treated as cumulative combo counters.
 func (m *DouyinMonitor) applyDouyinGift(liveID string, body map[string]interface{}) {
-	gift := findDouyinObject(body, "gift")
+	m.applyDouyinGiftEvent(liveID, "WebcastGiftMessage", douyinGiftEventKey("WebcastGiftMessage", body), time.Now(), body)
+}
+
+// applyDouyinGiftEvent uses only the protocol's diamondCount as a unit price.
+// It never labels this value as sound wave. repeatCount, comboCount and
+// groupCount are cumulative counters, so only their positive delta is added.
+func (m *DouyinMonitor) applyDouyinGiftEvent(liveID, method, eventKey string, capturedAt time.Time, body map[string]interface{}) {
+	gift := douyinLiveObject(body, "gift")
+	if gift == nil && (method == "WebcastLightGiftMessage" || method == "LightGiftMessage") {
+		gift = douyinLiveObject(body, "giftInfo")
+	}
+	if gift == nil {
+		gift = douyinLiveObject(body, "giftStruct")
+	}
 	if gift == nil {
 		return
 	}
-	common := findDouyinObject(body, "common")
-	user := findDouyinObject(body, "user")
+	common := douyinLiveObject(body, "common")
+	user := douyinLiveObject(body, "user")
 	msgID := ""
 	if common != nil {
 		msgID = firstDouyinString(common, "msgId", "logId")
 	}
 	if msgID == "" {
-		msgID = firstDouyinNestedString(body, "msgId", "logId")
+		msgID = firstDouyinString(body, "msgId", "logId")
 	}
-	giftID := firstDouyinString(gift, "id")
+	giftID := firstDouyinString(gift, "id", "giftId")
 	userID := ""
 	if user != nil {
 		userID = firstDouyinString(user, "id", "secUid")
 	}
-	comboID := firstDouyinNestedString(body, "comboId", "groupId")
-	count := firstDouyinNestedNumber(body, "repeatCount", "comboCount", "groupCount")
+	payload := douyinLivePayload(body)
+	comboID := firstDouyinString(payload, "comboId", "groupId")
+	count := firstDouyinNumber(payload, "repeatCount", "comboCount", "groupCount")
 	if count <= 0 {
 		count = 1
 	}
-	repeatEnd := douyinBool(findDouyinValue(body, "repeatEnd"))
-	isCombo := comboID != "" || findDouyinValue(body, "repeatCount") != nil || findDouyinValue(body, "comboCount") != nil || findDouyinValue(body, "groupCount") != nil
+	repeatEnd := douyinBool(mapValueFold(payload, "repeatEnd"))
+	isCombo := comboID != "" || mapValueFold(payload, "repeatCount") != nil || mapValueFold(payload, "comboCount") != nil || mapValueFold(payload, "groupCount") != nil
 	comboKey := userID + "|" + giftID + "|" + comboID
 	price := firstDouyinNumber(gift, "diamondCount")
 
@@ -179,12 +213,16 @@ func (m *DouyinMonitor) applyDouyinGift(liveID string, body map[string]interface
 		m.mu.Unlock()
 		return
 	}
-	if msgID != "" && containsDouyinGiftMessageID(state.ProcessedGiftMessageIDs, msgID) {
+	dedupeID := eventKey
+	if dedupeID == "" {
+		dedupeID = msgID
+	}
+	if dedupeID != "" && containsDouyinGiftMessageID(state.ProcessedGiftMessageIDs, dedupeID) {
 		m.mu.Unlock()
 		return
 	}
-	if msgID != "" {
-		state.ProcessedGiftMessageIDs = append(state.ProcessedGiftMessageIDs, msgID)
+	if dedupeID != "" {
+		state.ProcessedGiftMessageIDs = append(state.ProcessedGiftMessageIDs, dedupeID)
 		if len(state.ProcessedGiftMessageIDs) > douyinProcessedGiftLimit {
 			state.ProcessedGiftMessageIDs = append([]string(nil), state.ProcessedGiftMessageIDs[len(state.ProcessedGiftMessageIDs)-douyinProcessedGiftLimit:]...)
 		}
@@ -207,13 +245,65 @@ func (m *DouyinMonitor) applyDouyinGift(liveID string, body map[string]interface
 		}
 	}
 	if price > 0 {
+		state.DiamondAvailable = true
 		state.SoundWaveAvailable = true
 		if delta > 0 {
+			state.DiamondTotal += price * delta
 			state.EstimatedSoundWave += price * delta
 		}
 	}
-	state.LastUpdatedAt = time.Now()
+	if delta > 0 {
+		state.GiftCount += delta
+	}
+	state.LastUpdatedAt = capturedAt
+	sessionID := state.SessionID
+	store := m.liveStore
 	m.mu.Unlock()
+	if store != nil {
+		_ = store.recordRevenue(douyinRevenueSnapshot{SessionID: sessionID, CapturedAt: capturedAt,
+			DiamondDelta: price * delta, GiftCountDelta: delta, SourceEventKey: eventKey})
+	}
+	m.persistLiveState(liveID, false)
+}
+
+func (m *DouyinMonitor) applyDouyinFanTicket(liveID, eventKey string, capturedAt time.Time, total int64) {
+	if total <= 0 {
+		return
+	}
+	m.mu.Lock()
+	state := m.liveStates[liveID]
+	if state == nil || !state.Online {
+		m.mu.Unlock()
+		return
+	}
+	if total > state.FanTicketTotal {
+		state.FanTicketTotal = total
+	}
+	state.LastUpdatedAt = capturedAt
+	sessionID, store, savedTotal := state.SessionID, m.liveStore, state.FanTicketTotal
+	m.mu.Unlock()
+	if store != nil {
+		_ = store.recordRevenue(douyinRevenueSnapshot{SessionID: sessionID, CapturedAt: capturedAt,
+			FanTicketTotal: savedTotal, SourceEventKey: eventKey})
+	}
+	m.persistLiveState(liveID, false)
+}
+
+func (m *DouyinMonitor) applyDouyinPKScores(liveID, eventKey string, capturedAt time.Time, left, right int64) {
+	m.mu.Lock()
+	state := m.liveStates[liveID]
+	if state == nil || !state.Online {
+		m.mu.Unlock()
+		return
+	}
+	state.PKLeftScore, state.PKRightScore = left, right
+	state.LastUpdatedAt = capturedAt
+	sessionID, store := state.SessionID, m.liveStore
+	m.mu.Unlock()
+	if store != nil {
+		_ = store.recordRevenue(douyinRevenueSnapshot{SessionID: sessionID, CapturedAt: capturedAt,
+			PKLeftScore: left, PKRightScore: right, SourceEventKey: eventKey})
+	}
 	m.persistLiveState(liveID, false)
 }
 
@@ -261,6 +351,11 @@ func sanitizeDouyinSample(value interface{}) interface{} {
 		}
 		return result
 	case string:
+		lower := strings.ToLower(node)
+		if strings.Contains(lower, "sessionid=") || strings.Contains(lower, "ttwid=") ||
+			strings.Contains(lower, "passport_csrf_token=") || strings.Contains(lower, "odin_tt=") {
+			return "[redacted]"
+		}
 		if parsed, err := url.Parse(node); err == nil && parsed.IsAbs() && parsed.RawQuery != "" {
 			parsed.RawQuery = ""
 			parsed.Fragment = ""

@@ -215,6 +215,7 @@ Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布�
   "DOUYIN_LIVE_SOUND_WAVE_ENABLED": true,
   "DOUYIN_LIVE_RAW_STATS_DEBUG": false,
   "DOUYIN_LIVE_RAW_GIFT_DEBUG": false,
+  "DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT": "",
   "DOUYIN_IM_ENABLED": true,
   "DOUYIN_IM_PRIVATE_ENABLED": true,
   "DOUYIN_IM_GROUP_NAME": "目标群显示名",
@@ -225,7 +226,7 @@ Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布�
 - `DOUYIN_LIVE_SIDECAR_CMD` 留空时，Bot 连接已经运行的 `DOUYIN_LIVE_WS_URL`；连接断开会指数退避重试。
 - 如果填写命令，例如 `./douyinLive --port 1088 --log-level info`，Bot 启停时会一并管理该进程。
 - 浏览器只从被监控用户自己的资料接口提取直播状态和 `web_rid`，不会采用页面推荐区中其他主播的直播间。首次发现该用户开播后会保存 `live.douyin.com/<ID>`，以后 Bot 可在其离线期间保持本地直播 WebSocket 连接，并按 `ROOM_ONLINE`/`ROOM_ENDED` 通知群。
-- 最高在线人数来自 `WebcastRoomUserSeqMessage`/`WebcastRoomStatsMessage`。抖音未下发人数的场次不会显示该字段。
+- 最高在线优先使用 `RoomUserSeqMessage.total` 或 HTTP 的精确 `user_count`/`room_user_count`；若精确字段是哨兵值 `1` 而相邻的 `*_str` 是 `1.2万` 等格式化值，则使用格式化值。数据源字段和必要原始字段会随指标快照保存。WebSocket 不可用时每 30 秒匿名采样直播页作为降级来源。
 - 公开主页通常可在未登录状态读取；需要登录时由管理员显式执行 `bot douyin login`，二维码只私聊超级管理员和管理员。
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
 - 抖音**作品**扫描优先 Cookie+HTTP，不依赖常驻创作者主页标签；`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存。抖音 **IM** 仍需长驻 IM 页。
@@ -233,8 +234,11 @@ Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布�
 - 需要监控的账号统一保存在 `DOUYIN_SUBSCRIPTIONS`。可通过管理面板「配置 → 抖音 → 创作者订阅」添加、编辑、启停、删除，也可使用 `bot douyin add/del`；两者读写同一模型。每个订阅可分别开启作品或直播监控，多 QQ 群订阅和各自的 `AtAll` 设置会分别保留。面板会记住最近使用的目标群号；昵称由浏览器解析，也可填写备注。
 - 每场直播使用独立 SessionID 写入 `storage/douyin-live-sessions/`，不会把可复用的主页 `LiveID/web_rid` 当成永久场次 ID。上游提供真实 RoomID 时一并记录；没有 RoomID 时，以“下播后再次开播”创建新 Session。Bot 重启和 WebSocket 重连会恢复在线场次。统计事件最多约每 10 秒落盘一次，开播和下播立即原子保存，最近保留 50 场或 14 天。
 - 通知按群保存 `pending → queued` 状态：先持久化 pending，进入 NapCat 发送队列后才逐群标记 queued。崩溃窗口采用 at-least-once 语义，极端情况下可能重复，但不会因提前标记而永久漏发。
-- 下播汇总中的时长是 Bot 的「监测时长」。最高在线只读取 `onlineUserForAnchor`、`onlineUserCount`、`userCount`；累计场观只读取 `audienceCount`、`totalUserCount`，没有可靠字段时整行省略。
-- 礼物估算只读取完整礼物消息的 `gift.diamondCount`，按连击累计数量增量计算并用 `common.msgId`/`logId` 去重。这是监测到的钻石值估算，不是官方收入；上游漏消息时会偏低。
+- 下播汇总中的时长是 Bot 的「监测时长」。在线人数、累计观看、点赞、礼物数量、礼物钻石、粉丝票和 PK 左右分数分别存储；没有可靠字段时整行省略，不把这些指标统称或换算成“音浪”。
+- 实时链路处理 `RoomUserSeqMessage`、`RoomStatsMessage`、`GiftMessage`、`LightGiftMessage`、`UpdateFanTicketMessage` 和上游能够转发的 `MatchAgainstScoreMessage`。本地 sidecar 负责抖音 WebSocket 的 gzip、ACK 与重连，Bot 使用 1024 条有界队列消费事件；连接断开时指数退避。
+- 礼物钻石只读取协议中的 `diamondCount`。礼物连击按 `repeatCount`/`groupId` 的累计差额计数，并用 `msgId`/`logId` 以及数据库 `event_key` 双重去重。这不是官方收入；协议变化或上游漏消息时会偏低。PK 消息存在多个协议版本，未拿真实直播样本对照前不能保证所有房间都能取得。
+- 实时数据增量迁移到 `storage/douyin-live.db`：`live_metric_snapshot` 保存时序指标，`live_realtime_event` 保存脱敏事件并对 `event_key` 唯一约束，`live_revenue_snapshot` 分别保存礼物钻石增量、粉丝票及 PK 分数。原有场次 JSON 继续保留。
+- 默认匿名连接。如目标消息确实要求登录，运行 `pocket48-douyin-cookie --account default` 将 Cookie 写入 Windows Credential Manager、macOS Keychain 或 Linux Secret Service，再把 `DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT` 设为 `default`。用 `--status` 检查、`--clear` 清除。程序不会读取浏览器 Cookie，Cookie 也不会写入配置、SQLite 或日志。
 - 原始统计/礼物调试开关默认关闭。开启后样本分别保存到 `storage/douyin-live-stat-dumps/`、`storage/douyin-live-gift-dumps/`，敏感字段和 URL 查询参数会被脱敏。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
 - 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群；QQ 文案标题为 `【昵称|抖音】`（不再写「抖音私信」）。
@@ -463,9 +467,10 @@ bot code <验证码>          # 输入验证码完成登录
 | `DOUYIN_LIVE_WS_URL` | douyinLive 本地 WebSocket 基地址 | `"ws://127.0.0.1:1088/ws"` |
 | `DOUYIN_LIVE_SIDECAR_CMD` | 可选的 douyinLive 启动命令 | `""` |
 | `DOUYIN_LIVE_SUMMARY_ENABLED` | 下播通知附加本场监测汇总 | `true` |
-| `DOUYIN_LIVE_SOUND_WAVE_ENABLED` | 按 `gift.diamondCount` 监测礼物音浪估算 | `true` |
+| `DOUYIN_LIVE_SOUND_WAVE_ENABLED` | 兼容旧键名：按协议 `diamondCount` 采集礼物钻石，不表示音浪/收入 | `true` |
 | `DOUYIN_LIVE_RAW_STATS_DEBUG` | 保存脱敏直播统计样本 | `false` |
 | `DOUYIN_LIVE_RAW_GIFT_DEBUG` | 保存脱敏礼物消息样本 | `false` |
+| `DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT` | 可选系统凭据名称；Cookie 本身不进入配置 | `""` |
 | `DOUYIN_IM_ENABLED` | 启用抖音群聊/私聊只读实时连接 | `false` |
 | `DOUYIN_IM_PRIVATE_ENABLED` | 将收到的抖音私信仅转发给 Bot 管理员 | `false` |
 | `DOUYIN_IM_GROUP_NAME` | 目标抖音群显示名及群号匹配失败时的兜底 | `""` |
