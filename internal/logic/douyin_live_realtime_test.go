@@ -3,7 +3,6 @@ package logic
 import (
 	"bytes"
 	"database/sql"
-	"encoding/json"
 	"log"
 	"path/filepath"
 	"strings"
@@ -125,63 +124,16 @@ func TestDouyinEventKeyIsIdempotentAndCookieIsRedacted(t *testing.T) {
 	}
 }
 
-func TestDouyinGiftCumulativeRepeatAndPKSides(t *testing.T) {
-	store, err := openDouyinLiveStore(filepath.Join(t.TempDir(), "live.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
+func TestDouyinRealtimeRevenueEventsAreIgnored(t *testing.T) {
 	m := NewDouyinMonitor(&config.Config{DouyinLiveSoundWaveEnabled: true}, nil, nil)
 	m.liveSessionDir = t.TempDir()
-	m.liveStore = store
 	m.liveStates["room"] = &douyinLiveState{SessionID: "session", LiveID: "room", Online: true, ComboGiftCounts: map[string]int64{}}
-	message := func(id string, repeat int) []byte {
-		body := map[string]interface{}{
-			"method": "WebcastGiftMessage",
-			"payload": map[string]interface{}{
-				"common":  map[string]interface{}{"msgId": id},
-				"user":    map[string]interface{}{"id": "user"},
-				"gift":    map[string]interface{}{"id": "gift", "diamondCount": 100},
-				"groupId": "combo", "repeatCount": repeat,
-			},
-		}
-		raw, _ := json.Marshal(body)
-		return raw
-	}
-	m.handleLiveMessage("room", message("same-message", 1))
-	m.handleLiveMessage("room", message("same-message", 3))
-	m.handleLiveMessage("room", message("same-message", 3))
-	state := m.liveStates["room"]
-	if state.GiftCount != 3 || state.DiamondTotal != 300 {
-		t.Fatalf("gift count=%d diamonds=%d", state.GiftCount, state.DiamondTotal)
-	}
+	m.handleLiveMessage("room", []byte(`{"method":"WebcastGiftMessage","msgId":"gift1","payload":{"gift":{"id":"1","diamondCount":100},"repeatCount":3}}`))
+	m.handleLiveMessage("room", []byte(`{"method":"LightGiftMessage","msgId":"light1","payload":{"giftInfo":{"giftId":"7","diamondCount":3},"repeatCount":2}}`))
+	m.handleLiveMessage("room", []byte(`{"method":"UpdateFanTicketMessage","msgId":"ticket1","payload":{"roomFanTicketCount":"12,345"}}`))
 	m.handleLiveMessage("room", []byte(`{"method":"MatchAgainstScoreMessage","msgId":"pk1","against":{"leftGoalInt":123,"rightGoalInt":456}}`))
-	if state.PKLeftScore != 123 || state.PKRightScore != 456 {
-		t.Fatalf("PK sides left=%d right=%d", state.PKLeftScore, state.PKRightScore)
-	}
-	var left, right int64
-	if err := store.db.QueryRow(`SELECT pk_left_score, pk_right_score FROM live_revenue_snapshot WHERE source_event_key='MatchAgainstScoreMessage:pk1'`).Scan(&left, &right); err != nil {
-		t.Fatal(err)
-	}
-	if left != 123 || right != 456 {
-		t.Fatalf("stored PK sides left=%d right=%d", left, right)
-	}
-}
-
-func TestLightGiftAndFanTicketUseDistinctMetrics(t *testing.T) {
-	m := NewDouyinMonitor(&config.Config{DouyinLiveSoundWaveEnabled: true}, nil, nil)
-	m.liveSessionDir = t.TempDir()
-	m.liveStates["room"] = &douyinLiveState{SessionID: "session", LiveID: "room", Online: true, ComboGiftCounts: map[string]int64{}}
-	m.handleLiveMessage("room", []byte(`{"method":"LightGiftMessage","msgId":"light-1","payload":{"giftInfo":{"giftId":"7","diamondCount":3},"repeatCount":2}}`))
-	m.handleLiveMessage("room", []byte(`{"method":"UpdateFanTicketMessage","msgId":"ticket-1","payload":{"roomFanTicketCount":"12,345"}}`))
 	state := m.liveStates["room"]
-	if state.GiftCount != 2 || state.DiamondTotal != 6 {
-		t.Fatalf("light gift count=%d diamonds=%d", state.GiftCount, state.DiamondTotal)
-	}
-	if state.FanTicketTotal != 12_345 {
-		t.Fatalf("fan ticket=%d", state.FanTicketTotal)
-	}
-	if state.PKLeftScore != 0 || state.PKRightScore != 0 {
-		t.Fatalf("fan ticket polluted PK score: %+v", state)
+	if state.GiftCount != 0 || state.DiamondTotal != 0 || state.FanTicketTotal != 0 || state.PKLeftScore != 0 || state.PKRightScore != 0 {
+		t.Fatalf("revenue event mutated alert-only state: %+v", state)
 	}
 }

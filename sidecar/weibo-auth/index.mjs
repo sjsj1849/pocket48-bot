@@ -70,7 +70,8 @@ const douyinContacts = new Map();
 // accounts serially. Old 1-account-1-tab design left many profile tabs open
 // forever and ballooned Chromium renderer memory on small VMs.
 let profileScanRunning = false;
-let profileScanQueued = null; // 'douyin' | 'xiaohongshu' | 'both' | null
+let douyinWorksHTTPBackoffUntil = 0;
+let douyinWorksHTTPFailureLoggedAt = 0;
 let douyinContactSyncRunning = false;
 const douyinContactSyncMs = 6 * 60 * 60_000;
 
@@ -1939,6 +1940,7 @@ async function fetchAwemePostsHTTP(secUserId, cookieHeader) {
   });
   const url = `https://www.douyin.com/aweme/v1/web/aweme/post/?${params.toString()}`;
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(15_000),
     headers: {
       cookie: cookieHeader,
       'user-agent': DOUYIN_HTTP_UA,
@@ -1980,7 +1982,9 @@ async function scanDouyinAccount(account, cookieHeader = '') {
   try {
     const cookie = cookieHeader || await getDouyinCookieHeader();
     let liveState = { profileLive: { active: false, liveId: '', nickname: '' }, snapshot: {} };
-    if (account.liveEnabled !== false) {
+    // A persisted web_rid is monitored directly by douyinLive, including
+    // later starts. Only navigate profiles until the first live_id is known.
+    if (account.liveEnabled !== false && !String(account.liveId || '').trim()) {
       try {
         liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
       } catch (error) {
@@ -1999,21 +2003,34 @@ async function scanDouyinAccount(account, cookieHeader = '') {
       return;
     }
 
+    if (Date.now() < douyinWorksHTTPBackoffUntil) {
+      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
+      return;
+    }
+
     const result = await fetchAwemePostsHTTP(secUserId, cookie);
     if (result.posts.length > 0) {
+      douyinWorksHTTPBackoffUntil = 0;
       emitDouyinAccountState(account, secUserId, profileUrl, result.posts, liveState.profileLive, liveState.snapshot);
       return;
     }
 
     // Soft failures: empty list with status 0 may mean private/no posts; treat as empty success.
     if (result.status_code === 0) {
+      douyinWorksHTTPBackoffUntil = 0;
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
 
     // Auth / risk — do NOT thrash profile pages; surface once.
     const msg = result.message || `status_code=${result.status_code} http=${result.http}`;
-    log(`douyin HTTP posts empty for ${nameHint}: ${msg}`);
+    const now = Date.now();
+    const backoffMs = result.http === 403 ? 30 * 60_000 : 10 * 60_000;
+    douyinWorksHTTPBackoffUntil = now + backoffMs;
+    if (now - douyinWorksHTTPFailureLoggedAt >= 5 * 60_000) {
+      douyinWorksHTTPFailureLoggedAt = now;
+      log(`douyin HTTP posts paused for ${Math.round(backoffMs / 60_000)}m after ${nameHint}: ${msg}`);
+    }
     if (/验证|captcha|login|登录|未登录|risk|风控/i.test(msg) || result.status_code === 8 || result.http === 403) {
       emit('douyin_account_error', {
         secUserId,
@@ -2036,34 +2053,16 @@ async function scanDouyinAccount(account, cookieHeader = '') {
   }
 }
 
-function mergeProfileScanQueue(next) {
-  if (!next) return;
-  if (!profileScanQueued || profileScanQueued === next) {
-    profileScanQueued = next;
-    return;
-  }
-  profileScanQueued = 'both';
-}
-
 async function runProfileScans(which) {
   if (shuttingDown) return;
-  if (profileScanRunning) {
-    mergeProfileScanQueue(which);
-    return;
-  }
+  // Drop timer ticks while a slow scan is still running. Queueing another
+  // full pass caused continuous navigation and unbounded Playwright heap use.
+  if (profileScanRunning) return;
   profileScanRunning = true;
-  let pending = which || 'both';
   try {
-    while (!shuttingDown && pending) {
-      const doDouyin = pending === 'douyin' || pending === 'both';
-      const doXhs = pending === 'xiaohongshu' || pending === 'both';
-      pending = null;
-      if (doDouyin) await scanAllDouyinInner();
-      if (doXhs) await scanAllXiaohongshuInner();
-      // Drain coalesced requests that arrived while we were scanning.
-      pending = profileScanQueued;
-      profileScanQueued = null;
-    }
+    const requested = which || 'both';
+    if (requested === 'douyin' || requested === 'both') await scanAllDouyinInner();
+    if (requested === 'xiaohongshu' || requested === 'both') await scanAllXiaohongshuInner();
   } finally {
     profileScanRunning = false;
   }

@@ -38,7 +38,7 @@ func TestLoadConfigInitializesDouyinDefaults(t *testing.T) {
 	if cfg.DouyinLiveWSURL != "ws://127.0.0.1:1088/ws" || cfg.DouyinSubscriptions == nil {
 		t.Fatalf("unexpected douyin live/subscription defaults")
 	}
-	if !cfg.DouyinLiveSummaryEnabled || !cfg.DouyinLiveSoundWaveEnabled || cfg.DouyinLiveRawStatsDebug || cfg.DouyinLiveRawGiftDebug {
+	if cfg.DouyinLiveSummaryEnabled || cfg.DouyinLiveSoundWaveEnabled || cfg.DouyinLiveRawStatsDebug || cfg.DouyinLiveRawGiftDebug {
 		t.Fatalf("unexpected douyin live summary defaults: %#v", cfg)
 	}
 	if cfg.DouyinIMGroupName != "" || cfg.DouyinIMGroupNumber != "" {

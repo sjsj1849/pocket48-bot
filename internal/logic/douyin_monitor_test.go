@@ -119,6 +119,10 @@ func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 	if !ok || len(segments) < 2 || segments[0].(napcat.MessageSegment).Type != "at" {
 		t.Fatalf("AtAll message=%#v", queuedMessages[0])
 	}
+	textSegment, ok := segments[1].(napcat.MessageSegment)
+	if !ok || !strings.HasPrefix(textSegment.Data["text"], "\n【") {
+		t.Fatalf("AtAll title is not on its own line: %#v", queuedMessages[0])
+	}
 	m.liveEnded("room-1", "actual-room-1", "", "")
 	updated := m.liveStates["room-1"].LastUpdatedAt
 	m.liveEnded("room-1", "actual-room-1", "", "")
@@ -130,18 +134,15 @@ func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestDouyinOnlineAndAudienceSemantics(t *testing.T) {
+func TestDouyinRealtimeStatsAreIgnored(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
 	addDouyinLiveTestTargets(m, "room-1", 100)
 	m.liveOnline("room-1", "actual-room-1", "主播", "标题")
 	m.handleLiveMessage("room-1", []byte(`{"method":"WebcastRoomStatsMessage","payload":{"onlineUserCount":50,"audienceCount":100,"total":999999}}`))
 	m.handleLiveMessage("room-1", []byte(`{"method":"WebcastRoomStatsMessage","payload":{"onlineUserCount":20,"audienceCount":80}}`))
 	state := m.liveStates["room-1"]
-	if state.CurrentOnline != 20 || state.PeakOnline != 50 {
-		t.Fatalf("current=%d peak=%d", state.CurrentOnline, state.PeakOnline)
-	}
-	if state.TotalAudience != 100 {
-		t.Fatalf("total audience decreased or used generic total: %d", state.TotalAudience)
+	if state.CurrentOnline != 0 || state.PeakOnline != 0 || state.TotalAudience != 0 {
+		t.Fatalf("realtime statistics should be ignored: %#v", state)
 	}
 	if got := extractDouyinCurrentOnline(map[string]interface{}{"total": float64(123)}); got != 0 {
 		t.Fatalf("generic total used as current online: %d", got)

@@ -74,11 +74,7 @@ var configFields = map[string]configField{
 	// 抖音
 	"DOUYIN_ENABLED":                     {"DOUYIN_ENABLED", "抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean, false, false, nil},
 	"DOUYIN_POLL_SECONDS":                {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger, false, false, nil},
-	"DOUYIN_LIVE_SUMMARY_ENABLED":        {"DOUYIN_LIVE_SUMMARY_ENABLED", "抖音", "下播数据汇总", "下播通知附带监测时长、最高在线及可靠的场观/礼物数据", kindBoolean, false, false, nil},
-	"DOUYIN_LIVE_SOUND_WAVE_ENABLED":     {"DOUYIN_LIVE_SOUND_WAVE_ENABLED", "抖音", "采集礼物钻石", "兼容旧配置名；仅累计协议 gift.diamondCount，不称为音浪或收入", kindBoolean, false, false, nil},
 	"DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT": {"DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT", "抖音", "直播 Cookie 凭据名称", "可选；Cookie 本身只能用 pocket48-douyin-cookie 写入系统凭据库", kindString, false, false, nil},
-	"DOUYIN_LIVE_RAW_STATS_DEBUG":        {"DOUYIN_LIVE_RAW_STATS_DEBUG", "抖音", "保存直播统计调试样本", "默认关闭；开启后写入脱敏统计样本", kindBoolean, false, false, nil},
-	"DOUYIN_LIVE_RAW_GIFT_DEBUG":         {"DOUYIN_LIVE_RAW_GIFT_DEBUG", "抖音", "保存礼物调试样本", "默认关闭；开启后写入脱敏礼物样本", kindBoolean, false, false, nil},
 	"DOUYIN_IM_ENABLED":                  {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean, false, false, nil},
 	"DOUYIN_IM_PRIVATE_ENABLED":          {"DOUYIN_IM_PRIVATE_ENABLED", "抖音", "私信提醒", "私信通知到默认通知群", kindBoolean, false, false, nil},
 	"DOUYIN_IM_GROUP_NAME":               {"DOUYIN_IM_GROUP_NAME", "抖音", "目标群名（辅助）", "可选展示名；多群时优先用抖音回传的群名", kindString, false, false, nil},
@@ -98,8 +94,7 @@ var configFieldOrder = []string{
 	"NIM_ENABLED", "NIM_ROOM_MESSAGE_ENABLED", "NIM_ROOM_MESSAGE_POLL_FALLBACK", "NIM_LIVE_DANMAKU_ENABLED", "NIM_VIEWER_EVENT_ENABLED",
 	"WEIBO_BROWSER_AUTH_ENABLED", "WEIBO_BROWSER_REFRESH_MINUTES", "WEIBO_COOKIE", "WEIBO_MWEIBO_COOKIE",
 	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED", "WEIBO_SUPER_COUNT_DELIVERY", "WEIBO_SUPER_COUNT_QQ",
-	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_LIVE_SUMMARY_ENABLED", "DOUYIN_LIVE_SOUND_WAVE_ENABLED",
-	"DOUYIN_LIVE_RAW_STATS_DEBUG", "DOUYIN_LIVE_RAW_GIFT_DEBUG", "DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
+	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
 	"DOUYIN_IM_GROUP_NUMBER", "DOUYIN_IM_GROUP_NAME",
 	"XIAOHONGSHU_ENABLED", "XIAOHONGSHU_POLL_SECONDS",
 }

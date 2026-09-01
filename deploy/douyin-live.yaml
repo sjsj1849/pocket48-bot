@@ -4,7 +4,7 @@ websocket:
   allowed_origins: []
 unknown: false
 log:
-  level: "info"
+  level: "warn"
 sign:
   provider: "local"
 api:
@@ -12,7 +12,7 @@ api:
   allowed_domains:
     - "douyin.com"
 monitor:
-  poll_interval: "15s"
+  poll_interval: "30s"
   notify_interval: "30s"
 cookie:
   use_stored: false

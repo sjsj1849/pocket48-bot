@@ -283,10 +283,10 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.DouyinLiveWSURL = "ws://127.0.0.1:1088/ws"
 	}
 	if _, ok := raw["DOUYIN_LIVE_SUMMARY_ENABLED"]; !ok {
-		cfg.DouyinLiveSummaryEnabled = true
+		cfg.DouyinLiveSummaryEnabled = false
 	}
 	if _, ok := raw["DOUYIN_LIVE_SOUND_WAVE_ENABLED"]; !ok {
-		cfg.DouyinLiveSoundWaveEnabled = true
+		cfg.DouyinLiveSoundWaveEnabled = false
 	}
 	if cfg.DouyinSubscriptions == nil {
 		cfg.DouyinSubscriptions = make(map[int64]map[string]*DouyinConfig)
