@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -204,6 +205,13 @@ func (b *WeiboAuthBridge) Start() error {
 	}
 
 	cmd := exec.Command(parts[0], args...)
+	cmd.Env = os.Environ()
+	if strings.TrimSpace(os.Getenv("NODE_OPTIONS")) == "" {
+		cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=512")
+	}
+	if strings.TrimSpace(os.Getenv("MALLOC_ARENA_MAX")) == "" {
+		cmd.Env = append(cmd.Env, "MALLOC_ARENA_MAX=2")
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		b.reset()
