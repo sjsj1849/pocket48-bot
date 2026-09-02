@@ -1981,12 +1981,26 @@ func (m *DouyinMonitor) formatLiveNotification(target douyinLiveTarget, state do
 			text += "\n直播标题：" + state.Title
 		}
 		text += "\nhttps://live.douyin.com/" + state.LiveID
+		detectedAt := state.DetectedStartedAt
+		if detectedAt.IsZero() {
+			detectedAt = state.LastUpdatedAt
+		}
+		if !detectedAt.IsZero() {
+			text += "\n" + detectedAt.In(time.Local).Format("2006-01-02 15:04:05")
+		}
 	} else {
 		text = fmt.Sprintf("【%s|抖音直播】", titleNick)
 		if bodyLabel != "" && bodyLabel != titleNick {
 			text += "\n" + bodyLabel
 		}
 		text += "\n直播已结束"
+		detectedAt := state.DetectedEndedAt
+		if detectedAt.IsZero() {
+			detectedAt = state.LastUpdatedAt
+		}
+		if !detectedAt.IsZero() {
+			text += "\n" + detectedAt.In(time.Local).Format("2006-01-02 15:04:05")
+		}
 	}
 	segments := make([]interface{}, 0, 2)
 	if target.cfg.AtAll {
