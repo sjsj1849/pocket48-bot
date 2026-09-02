@@ -123,6 +123,9 @@ func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 	if !ok || !strings.HasPrefix(textSegment.Data["text"], "\n【") {
 		t.Fatalf("AtAll title is not on its own line: %#v", queuedMessages[0])
 	}
+	if !strings.Contains(textSegment.Data["text"], first.In(time.Local).Format("2006-01-02 15:04:05")) {
+		t.Fatalf("start notification has no detected timestamp: %#v", queuedMessages[0])
+	}
 	m.liveEnded("room-1", "actual-room-1", "", "")
 	updated := m.liveStates["room-1"].LastUpdatedAt
 	m.liveEnded("room-1", "actual-room-1", "", "")
@@ -131,6 +134,15 @@ func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 	}
 	if sends != 2 {
 		t.Fatalf("duplicate ROOM_ENDED sends=%d", sends)
+	}
+	endSegments, ok := queuedMessages[1].([]interface{})
+	if !ok || len(endSegments) < 2 {
+		t.Fatalf("end message=%#v", queuedMessages[1])
+	}
+	endText, ok := endSegments[1].(napcat.MessageSegment)
+	endedAt := m.liveStates["room-1"].DetectedEndedAt
+	if !ok || !strings.Contains(endText.Data["text"], endedAt.In(time.Local).Format("2006-01-02 15:04:05")) {
+		t.Fatalf("end notification has no detected timestamp: %#v", queuedMessages[1])
 	}
 }
 
