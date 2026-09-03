@@ -4,7 +4,12 @@ import process from 'node:process';
 import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
-import { extractProfileLive, normalizeAwemeList } from './douyin-parser.mjs';
+import {
+  DouyinAccountBackoff,
+  extractProfileLive,
+  normalizeAwemeList,
+  resolveDouyinProfilePosts,
+} from './douyin-parser.mjs';
 import { buildDouyinIMWebSocketURL, decodeDouyinIMInit, decodeDouyinIMPush, isOwnDouyinIMMessage, compactDouyinShareQuote, looksLikeDouyinShareCardText, shouldForwardOwnPrivate, rememberDouyinPrivatePeer } from './douyin-im.mjs';
 import { extractXiaohongshuProfile, normalizeXiaohongshuNotes } from './xiaohongshu-parser.mjs';
 
@@ -70,8 +75,8 @@ const douyinContacts = new Map();
 // accounts serially. Old 1-account-1-tab design left many profile tabs open
 // forever and ballooned Chromium renderer memory on small VMs.
 let profileScanRunning = false;
-let douyinWorksHTTPBackoffUntil = 0;
-let douyinWorksHTTPFailureLoggedAt = 0;
+const douyinWorksHTTPBackoff = new DouyinAccountBackoff();
+const douyinWorksHTTPFailureLoggedAt = new Map();
 let douyinContactSyncRunning = false;
 const douyinContactSyncMs = 6 * 60 * 60_000;
 
@@ -1965,12 +1970,20 @@ async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
     (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
     { timeout: 15_000 },
   ).catch(() => undefined);
+  // This request is signed by Douyin's own page runtime. It remains usable
+  // when the unsigned server-side works endpoint returns HTTP 403.
+  const postsResponse = lookupPage.waitForResponse(
+    (response) => response.url().includes('/aweme/v1/web/aweme/post/'),
+    { timeout: 15_000 },
+  ).catch(() => undefined);
   await lookupPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-  const response = await profileResponse;
-  const body = await response?.json().catch(() => undefined);
-  const profileLive = extractProfileLive(body);
+  const [profileReply, postsReply] = await Promise.all([profileResponse, postsResponse]);
+  const profileBody = await profileReply?.json().catch(() => undefined);
+  const postsBody = await postsReply?.json().catch(() => undefined);
+  const profileLive = extractProfileLive(profileBody);
   const snapshot = await douyinPageSnapshot(lookupPage, secUserId).catch(() => ({}));
-  return { profileLive, snapshot };
+  const posts = resolveDouyinProfilePosts(postsBody, snapshot, secUserId);
+  return { profileLive, snapshot, posts };
 }
 
 async function scanDouyinAccount(account, cookieHeader = '') {
@@ -1981,10 +1994,12 @@ async function scanDouyinAccount(account, cookieHeader = '') {
 
   try {
     const cookie = cookieHeader || await getDouyinCookieHeader();
-    let liveState = { profileLive: { active: false, liveId: '', nickname: '' }, snapshot: {} };
+    let liveState = { profileLive: { active: false, liveId: '', nickname: '' }, snapshot: {}, posts: [] };
+    let profileAttempted = false;
     // A persisted web_rid is monitored directly by douyinLive, including
     // later starts. Only navigate profiles until the first live_id is known.
     if (account.liveEnabled !== false && !String(account.liveId || '').trim()) {
+      profileAttempted = true;
       try {
         liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
       } catch (error) {
@@ -1997,27 +2012,35 @@ async function scanDouyinAccount(account, cookieHeader = '') {
       return;
     }
 
+    // Accounts without a persisted live_id already loaded their profile for
+    // live discovery. Reuse that signed response instead of making a second,
+    // unsigned HTTP request which Douyin commonly rejects with 403.
+    if (liveState.posts.length > 0) {
+      emitDouyinAccountState(account, secUserId, profileUrl, liveState.posts, liveState.profileLive, liveState.snapshot);
+      return;
+    }
+
     if (!cookie) {
       emit('douyin_account_error', { secUserId, message: '抖音 Cookie 为空，请先在面板登录' });
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
 
-    if (Date.now() < douyinWorksHTTPBackoffUntil) {
+    if (douyinWorksHTTPBackoff.active(secUserId)) {
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
 
     const result = await fetchAwemePostsHTTP(secUserId, cookie);
     if (result.posts.length > 0) {
-      douyinWorksHTTPBackoffUntil = 0;
+      douyinWorksHTTPBackoff.clear(secUserId);
       emitDouyinAccountState(account, secUserId, profileUrl, result.posts, liveState.profileLive, liveState.snapshot);
       return;
     }
 
     // Soft failures: empty list with status 0 may mean private/no posts; treat as empty success.
     if (result.status_code === 0) {
-      douyinWorksHTTPBackoffUntil = 0;
+      douyinWorksHTTPBackoff.clear(secUserId);
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
@@ -2026,10 +2049,26 @@ async function scanDouyinAccount(account, cookieHeader = '') {
     const msg = result.message || `status_code=${result.status_code} http=${result.http}`;
     const now = Date.now();
     const backoffMs = result.http === 403 ? 30 * 60_000 : 10 * 60_000;
-    douyinWorksHTTPBackoffUntil = now + backoffMs;
-    if (now - douyinWorksHTTPFailureLoggedAt >= 5 * 60_000) {
-      douyinWorksHTTPFailureLoggedAt = now;
+    douyinWorksHTTPBackoff.fail(secUserId, backoffMs, now);
+    const lastFailureLog = Number(douyinWorksHTTPFailureLoggedAt.get(secUserId) || 0);
+    if (now - lastFailureLog >= 5 * 60_000) {
+      douyinWorksHTTPFailureLoggedAt.set(secUserId, now);
       log(`douyin HTTP posts paused for ${Math.round(backoffMs / 60_000)}m after ${nameHint}: ${msg}`);
+    }
+
+    // A saved live_id lets us normally avoid profile navigation. If direct
+    // works HTTP is blocked, perform one browser fallback per backoff window.
+    if (!profileAttempted) {
+      try {
+        liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
+        if (liveState.posts.length > 0) {
+          log(`douyin works browser fallback user=${nameHint} count=${liveState.posts.length}`);
+          emitDouyinAccountState(account, secUserId, profileUrl, liveState.posts, liveState.profileLive, liveState.snapshot);
+          return;
+        }
+      } catch (error) {
+        log(`douyin works browser fallback failed for ${nameHint}: ${error.message}`);
+      }
     }
     if (/验证|captcha|login|登录|未登录|risk|风控/i.test(msg) || result.status_code === 8 || result.http === 403) {
       emit('douyin_account_error', {

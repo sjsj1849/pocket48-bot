@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { awemeCreateTime, extractProfileLive, findLiveID, normalizeAwemeList } from './douyin-parser.mjs';
+import {
+  awemeCreateTime,
+  DouyinAccountBackoff,
+  extractProfileLive,
+  findLiveID,
+  normalizeAwemeList,
+  resolveDouyinProfilePosts,
+} from './douyin-parser.mjs';
 
 test('normalizes Douyin video and note posts', () => {
   const posts = normalizeAwemeList({ aweme_list: [
@@ -24,6 +31,19 @@ test('rejects recommended and advertising posts from other authors', () => {
 test('derives the publish time from a Douyin aweme id', () => {
   assert.equal(awemeCreateTime('7280485100071046440'), 1695120031);
   assert.equal(awemeCreateTime('invalid'), 0);
+});
+
+test('uses signed browser profile posts when the direct HTTP response is blocked', () => {
+  const cards = [{ id: 'post-from-page', createTime: 123 }];
+  assert.deepEqual(resolveDouyinProfilePosts(null, { cards }, 'sec'), cards);
+});
+
+test('backs off failed creators independently', () => {
+  const backoff = new DouyinAccountBackoff();
+  backoff.fail('creator-a', 30_000, 1_000);
+  assert.equal(backoff.active('creator-a', 2_000), true);
+  assert.equal(backoff.active('creator-b', 2_000), false);
+  assert.equal(backoff.active('creator-a', 31_001), false);
 });
 
 test('finds nested Douyin live id', () => {

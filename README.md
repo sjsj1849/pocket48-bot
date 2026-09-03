@@ -229,7 +229,7 @@ Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布�
 - 直播链路只消费 `ROOM_ONLINE`/`ROOM_ENDED` 状态并发送开播、下播通知。聊天、在线人数、礼物、钻石、粉丝票和 PK 等高频事件会立即丢弃，不写数据库或调试样本。
 - 公开主页通常可在未登录状态读取；需要登录时由管理员显式执行 `bot douyin login`，二维码只私聊超级管理员和管理员。
 - 微博和抖音只启动一个 Chromium；Profile 位于 `storage/` 且不会提交到 Git，仍应按账号凭据保护。
-- 抖音**作品**扫描优先 Cookie+HTTP，不依赖常驻创作者主页标签；`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存。抖音 **IM** 仍需长驻 IM 页。
+- 抖音**作品**扫描优先复用创作者主页中由页面自身签名的作品响应；服务端 Cookie+HTTP 被 403 拒绝时按账号独立退避，并受控使用同一浏览器页降级。`bot douyin login` 打开的登录页在成功/过期后会关闭以省内存，抖音 **IM** 仍需长驻 IM 页。
 - `BROWSER_*` 是统一浏览器配置；原有 `WEIBO_BROWSER_AUTH_CMD`、`WEIBO_BROWSER_PROFILE_DIR`、`WEIBO_BROWSER_HEADLESS` 仅作为旧配置兼容回退，不会再启动第二个浏览器。
 - 需要监控的账号统一保存在 `DOUYIN_SUBSCRIPTIONS`。可通过管理面板「配置 → 抖音 → 创作者订阅」添加、编辑、启停、删除，也可使用 `bot douyin add/del`；两者读写同一模型。每个订阅可分别开启作品或直播监控，多 QQ 群订阅和各自的 `AtAll` 设置会分别保留。面板会记住最近使用的目标群号；昵称由浏览器解析，也可填写备注。
 - 每场直播使用独立 SessionID 保存最小通知状态，不会把可复用的主页 `LiveID/web_rid` 当成永久场次 ID。Bot 重启和 WebSocket 重连会恢复尚未完成的通知。
