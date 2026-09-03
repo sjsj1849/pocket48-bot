@@ -52,6 +52,35 @@ export function normalizeAwemeList(body, secUserId = '') {
   });
 }
 
+export function resolveDouyinProfilePosts(body, snapshot, secUserId = '') {
+  const apiPosts = normalizeAwemeList(body, secUserId);
+  if (apiPosts.length > 0) return apiPosts;
+  return Array.isArray(snapshot?.cards) ? snapshot.cards : [];
+}
+
+export class DouyinAccountBackoff {
+  constructor() {
+    this.deadlines = new Map();
+  }
+
+  active(accountKey, now = Date.now()) {
+    const deadline = Number(this.deadlines.get(String(accountKey || '')) || 0);
+    if (deadline <= now) {
+      this.deadlines.delete(String(accountKey || ''));
+      return false;
+    }
+    return true;
+  }
+
+  fail(accountKey, delayMs, now = Date.now()) {
+    this.deadlines.set(String(accountKey || ''), now + Math.max(0, Number(delayMs) || 0));
+  }
+
+  clear(accountKey) {
+    this.deadlines.delete(String(accountKey || ''));
+  }
+}
+
 export function findLiveID(value, depth = 0) {
   if (!value || depth > 12) return '';
   if (Array.isArray(value)) {
