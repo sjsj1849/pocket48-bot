@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
+import { withHardTimeout } from './async-utils.mjs';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
 import {
   DouyinAccountBackoff,
@@ -2123,7 +2124,23 @@ async function scanAllDouyinInner() {
     log(`douyin works scan via HTTP accounts=${settings.douyinAccounts.length} cookie=${cookie ? 'yes' : 'no'}`);
     for (const account of settings.douyinAccounts) {
       if (shuttingDown) break;
-      await scanDouyinAccount(account, cookie);
+      const accountKey = String(account.secUserId || account.name || 'unknown');
+      try {
+        // Playwright can occasionally leave goto/evaluate or response-body
+        // promises pending even after their own timeout. Never let one creator
+        // freeze the global scan lock and disable every subsequent poll.
+        await withHardTimeout(scanDouyinAccount(account, cookie), 50_000, `douyin scan ${accountKey}`);
+      } catch (error) {
+        log(`douyin account scan aborted user=${account.name || accountKey}: ${error.message}`);
+        emit('douyin_account_error', {
+          secUserId: String(account.secUserId || ''),
+          message: `抖音作品扫描超时，已跳过本轮：${error.message}`,
+        });
+      } finally {
+        // A fresh temporary page isolates the next creator from a poisoned or
+        // half-navigated renderer and guarantees the page is not retained.
+        await releaseDouyinLookupPage();
+      }
     }
   } finally {
     await releaseDouyinLookupPage();
