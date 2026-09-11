@@ -2006,6 +2006,7 @@ type WeiboSuperCountResult struct {
 	ReadCount          string // m.weibo 累计阅读，如 "1672.9万"
 	SuperLikeText      string
 	SuperLikeCount     int
+	SuperLikeKnown     bool
 	PostLabel          string
 	PostCount          string
 	FansLabel          string
@@ -2578,6 +2579,7 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 
 	// m.weibo 补阅读（以及 web 缺帖/粉时的兜底）；失败不影响签到主链路
 	m.enrichSuperCountFromMWeibo(res, baseID)
+	m.enrichSuperLikeFromMWeibo(res, baseID)
 
 	return res, nil
 }

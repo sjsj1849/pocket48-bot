@@ -167,6 +167,7 @@ type WeiboSuperCountSnapshotItem struct {
 	Name               string `json:"name,omitempty"`
 	SignCount          int    `json:"sign_count"`
 	SuperLikeCount     int    `json:"super_like_count"`
+	SuperLikeKnown     bool   `json:"super_like_known,omitempty"`
 	Heat24h            string `json:"heat24h,omitempty"`
 	ReadCount          string `json:"read_count,omitempty"`
 	PostCount          string `json:"post_count,omitempty"`
