@@ -1029,6 +1029,7 @@ func buildWeiboSuperCountDailySnapshotV2(results []monitor.WeiboSuperCountResult
 			Name:               strings.TrimSpace(item.Name),
 			SignCount:          item.SignCount,
 			SuperLikeCount:     item.SuperLikeCount,
+			SuperLikeKnown:     item.SuperLikeKnown || item.SuperLikeCount > 0,
 			Heat24h:            strings.TrimSpace(item.Heat24h),
 			ReadCount:          strings.TrimSpace(item.ReadCount),
 			PostCount:          strings.TrimSpace(item.PostCount),
@@ -1075,7 +1076,9 @@ func buildLikeBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCount
 		if oid == "" {
 			continue
 		}
-		baseline[oid] = item.SuperLikeCount
+		if item.SuperLikeKnown || item.SuperLikeCount > 0 {
+			baseline[oid] = item.SuperLikeCount
+		}
 	}
 	return baseline
 }
@@ -1161,6 +1164,7 @@ func (b *Bot) buildWeiboSuperCountResultsFromSnapshotV2(snapshot map[string]*con
 			Name:               name,
 			SignCount:          item.SignCount,
 			SuperLikeCount:     item.SuperLikeCount,
+			SuperLikeKnown:     item.SuperLikeKnown || item.SuperLikeCount > 0,
 			Heat24h:            strings.TrimSpace(item.Heat24h),
 			ReadCount:          strings.TrimSpace(item.ReadCount),
 			PostCount:          strings.TrimSpace(item.PostCount),
@@ -1218,7 +1222,7 @@ func formatWeiboSuperCountRanking(results []monitor.WeiboSuperCountResult, faile
 				name = item.OID
 			}
 			line := fmt.Sprintf("%d) %s - 签到%d人", i+1, name, item.SignCount)
-			if item.SuperLikeCount > 0 {
+			if item.SuperLikeKnown || item.SuperLikeCount > 0 {
 				line += fmt.Sprintf(" | 超LIKE%d人", item.SuperLikeCount)
 			}
 			if item.LevelText != "" {
@@ -1272,7 +1276,7 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 				line += fmt.Sprintf(" | 阅读%s", rc)
 			}
 			likePart := ""
-			if item.SuperLikeCount > 0 {
+			if item.SuperLikeKnown || item.SuperLikeCount > 0 {
 				likePart = fmt.Sprintf("%d", item.SuperLikeCount)
 				if likeBaseline != nil {
 					if prev, ok := likeBaseline[oid]; ok {
@@ -1367,7 +1371,7 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 				}
 			}
 			likeText := ""
-			hasLike := item.SuperLikeCount > 0
+			hasLike := item.SuperLikeKnown || item.SuperLikeCount > 0
 			if hasLike {
 				likeText = fmt.Sprintf("%d", item.SuperLikeCount)
 				if likeBaseline != nil {
