@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"pocket48-bot/internal/weverse"
 	"runtime"
 	"strconv"
 	"strings"
@@ -80,7 +81,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, overviewResponse{
 		UpdatedAt: time.Now().Format("15:04:05"),
 		Services:  services,
-		Activity:  parseActivity(lines, 12),
+		Activity:  overviewActivity(lines, services, 12),
 		Resources: readResources(),
 		Attention: buildOverviewAttention(services),
 	})
@@ -90,6 +91,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 // Disabled platforms (e.g. XIAOHONGSHU_ENABLED=false) are omitted so the dashboard
 // only reflects services actually in use.
 type overviewFeatureFlags struct {
+	ConfigPath         string
 	DouyinEnabled      bool
 	DouyinIMEnabled    bool
 	XiaohongshuEnabled bool
@@ -99,6 +101,7 @@ func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
 	// Defaults: show core services; platform cards follow config (missing key = off for XHS,
 	// on for douyin/im only if historically true — read JSON booleans explicitly).
 	flags := overviewFeatureFlags{
+		ConfigPath:         configPath,
 		DouyinEnabled:      true,
 		DouyinIMEnabled:    true,
 		XiaohongshuEnabled: false,
@@ -185,10 +188,14 @@ func buildOverviewAttention(services []serviceState) []attention {
 					ID: "weibo", Title: "微博认证异常", Description: item.LastEvent, Action: "查看浏览器", Target: "browser",
 				})
 			}
+		case "weverse":
+			if item.Status == "down" {
+				attentionItems = append(attentionItems, attention{ID: "weverse", Title: "Weverse 监控异常", Description: item.LastEvent, Action: "查看配置", Target: "config"})
+			}
 		case "napcat":
 			if item.Status == "down" {
 				attentionItems = append(attentionItems, attention{
-					ID: "napcat", Title: "NapCat/QQ 连接中断", Description: item.LastEvent, Action: "查看服务", Target: "services",
+					ID: "napcat", Title: "OneBot/QQ 连接中断", Description: item.LastEvent, Action: "查看服务", Target: "services",
 				})
 			}
 		}
@@ -202,7 +209,7 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		{ID: "bot", Name: "Bot", Subtitle: "主控服务与任务调度", Status: choose(active, "healthy", "down"), StatusText: choose(active, "运行中", "已停止"), Uptime: uptime, Detail: "pocket48-bot.service", LastEvent: "任务调度正常"},
 		{ID: "qchat", Name: "QChat", Subtitle: "口袋48实时消息", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "WebSocket", LastEvent: "等待连接状态"},
 		{ID: "pocket_live", Name: "Live NIM", Subtitle: "口袋48直播礼物与结束事件", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "NIM Chatroom", LastEvent: "等待直播链路状态"},
-		{ID: "napcat", Name: "NapCat", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
+		{ID: "napcat", Name: "OneBot / LLOneBot", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
 	}
 	if flags.DouyinEnabled {
@@ -305,6 +312,9 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		case strings.Contains(line, "[Douyin-IM] status=error"):
 			setLatest("douyin_im", "down", "连接异常", "群聊连接发生错误")
 		}
+	}
+	if card := weverseService(flags.ConfigPath, time.Now()); card != nil {
+		states = append(states, *card)
 	}
 	return states
 }
@@ -615,4 +625,80 @@ func readJSONFile(path string, target any) error {
 		return err
 	}
 	return json.Unmarshal(data, target)
+}
+
+// Weverse is polled rather than a persistent socket: use the persisted scan
+// status, not incidental log lines which can fall out of the log tail.
+func weverseService(configPath string, now time.Time) *serviceState {
+	if configPath == "" {
+		return nil
+	}
+	dir := weverse.Dir(configPath)
+	cfg, err := weverse.LoadSettings(dir)
+	if err != nil || !cfg.Enabled {
+		return nil
+	}
+	card := &serviceState{ID: "weverse", Name: "Weverse", Subtitle: "爱豆动态、回复与直播", Status: "attention", StatusText: "检查中", Uptime: "—", Detail: fmt.Sprintf("每 %d 秒扫描", cfg.PollSeconds), LastEvent: "等待首次扫描", LastTime: "—"}
+	count := 0
+	for _, sub := range cfg.Subscriptions {
+		if sub.Enabled {
+			count++
+		}
+	}
+	if count == 0 {
+		card.StatusText = "待配置"
+		card.LastEvent = "没有启用的订阅"
+		return card
+	}
+	var status weverse.Status
+	if err := weverse.Read(dir, "status.json", &status); err != nil {
+		card.Status = "down"
+		card.StatusText = "状态异常"
+		card.LastEvent = "无法读取扫描状态"
+		return card
+	}
+	checked, err := time.Parse(time.RFC3339, status.LastCheck)
+	if err != nil {
+		return card
+	}
+	card.LastTime = checked.Local().Format("15:04:05")
+	card.LastEvent = fmt.Sprintf("扫描完成：%d 条动态/回复，%d 个订阅（历史数据不重复推送）", status.Events, count)
+	if status.Error != "" {
+		card.Status = "down"
+		card.StatusText = "扫描异常"
+		card.LastEvent = status.Error
+		return card
+	}
+	maxAge := time.Duration(cfg.PollSeconds)*time.Second + 4*time.Minute
+	if now.Sub(checked) > maxAge {
+		card.Status = "down"
+		card.StatusText = "扫描超时"
+		card.LastEvent = "长时间没有完成扫描，请检查主控服务"
+		return card
+	}
+	if status.LastSuccess == status.LastCheck {
+		card.Status = "healthy"
+		card.StatusText = "运行中"
+	}
+	return card
+}
+
+func overviewActivity(lines []string, services []serviceState, limit int) []activityItem {
+	items := parseActivity(lines, limit)
+	// Keep the latest actual Weverse scan visible even when other platforms emit
+	// enough heartbeat messages to fill the recent log window.
+	for _, card := range services {
+		if card.ID != "weverse" || card.LastTime == "—" {
+			continue
+		}
+		level := "success"
+		if card.Status != "healthy" {
+			level = "warning"
+		}
+		items = append([]activityItem{{Time: card.LastTime, Level: level, Source: "Weverse", Message: card.LastEvent}}, items...)
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
