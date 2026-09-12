@@ -12,6 +12,8 @@ func TestParseMWeiboSuperLike(t *testing.T) {
 		want       int
 		valid      bool
 	}{
+		{"without rank suffix", `{"ok":1,"data":{"cards":[{"card_group":[{"itemid":"badge_chaolike","desc":"超LIKE(290人)"}]}]}}`, 290, true},
+		{"nested zero without suffix", `{"ok":1,"data":{"cards":[{"card_group":[{"itemid":"badge_chaolike","desc":"超LIKE(0人)"}]}]}}`, 0, true},
 		{"count", `{"ok":1,"data":{"cards":[{"itemid":"badge_chaolike","desc":"超LIKE榜(295人)"}]}}`, 295, true},
 		{"comma", `{"ok":1,"data":{"cards":[{"desc":"超LIKE榜（1,295人）"}]}}`, 1295, true},
 		{"empty", `{"ok":1,"data":{"cards":[{"desc":"绚羽超话超LIKE榜"},{"card_group":[{"itemid":"badge_chaolike_record_empty"}]}]}}`, 0, true},
@@ -41,7 +43,7 @@ func TestLiveMWeiboSuperLike(t *testing.T) {
 	m := &WeiboMonitor{}
 	m.SetCookie(cfg.WeiboCookie)
 	m.SetMWeiboCookie(cfg.WeiboMWeiboCookie)
-	for _, oid := range []string{"1008083e042947a55a5273bc0ee55c623ca829", "1008080e1356953b659905e124dfa701d5a422"} {
+	for _, oid := range []string{"1008083e042947a55a5273bc0ee55c623ca829", "1008080e1356953b659905e124dfa701d5a422", "1008088558d16cd2543e8b9c52d1a619fa65c6", "10080881f7468de44dae1addeb8455c864014d", "100808430244540aa38ff181545cb0d539f038", "1008087641b5b1c7276c07e11f9cb5b74ddfc9"} {
 		res := &WeiboSuperCountResult{}
 		m.enrichSuperLikeFromMWeibo(res, oid)
 		if !res.SuperLikeKnown {

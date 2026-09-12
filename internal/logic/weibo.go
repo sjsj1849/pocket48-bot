@@ -1346,7 +1346,7 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 		hasLike, hasRead, hasFans, hasPosts, hasLevel, hasHeat bool
 	}
 	rows := make([]row, 0, len(results))
-	showLike, showRead, showFans, showPosts, showLevel, showHeat := false, false, false, false, false, false
+	showLike, showRead, showFans, showPosts, showLevel, showHeat := true, false, false, false, false, false
 	if len(results) > 0 {
 		signRank := make([]monitor.WeiboSuperCountResult, len(results))
 		copy(signRank, results)
@@ -1506,7 +1506,7 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 				case "sign":
 					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px"), esc(r.sign), deltaHTML)
 				case "like":
-					val := "-"
+					val := "未获取"
 					if r.hasLike {
 						val = r.like
 					}
