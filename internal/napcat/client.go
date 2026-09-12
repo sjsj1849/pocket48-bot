@@ -108,7 +108,7 @@ func (c *Client) notifyUp() {
 }
 
 func (c *Client) connect() error {
-	log.Printf("Connecting to %s with Token: '%s'", c.cfg.NapCatWSURL, c.cfg.NapCatAccessToken)
+	log.Print("[NapCat] 正在连接 OneBot WebSocket")
 	headers := http.Header{}
 	if c.cfg.NapCatAccessToken != "" {
 		headers.Add("Authorization", "Bearer "+c.cfg.NapCatAccessToken)

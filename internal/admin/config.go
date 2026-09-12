@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,6 +173,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			value = mode
+		}
+		if key == "NAPCAT_WS_URL" {
+			if err := validateOneBotURL(value.(string)); err != nil {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+				return
+			}
 		}
 		if key == "MEDIA_DELIVERY" {
 			mode, ok := value.(string)
@@ -408,4 +415,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "Bot 已重新启动"})
+}
+
+func validateOneBotURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return errors.New("OneBot 地址必须是完整的 ws:// 或 wss:// 地址，例如 ws://127.0.0.1:3001")
+	}
+	return nil
 }
