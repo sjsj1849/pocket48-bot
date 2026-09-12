@@ -278,3 +278,13 @@ func TestLivePublicSearch(t *testing.T) {
 	}
 	t.Logf("Hearts2Hearts: community=%d, members=%v", items[0].ID, items[0].Members)
 }
+
+func TestOfficialArtistMemberProfiles(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		respond(w, []any{Object{"memberId": "artist-id", "artistOfficialProfile": Object{"officialName": "CARMEN", "officialImageUrl": "https://example.com/artist.jpg"}}})
+	})
+	members, err := c.Members(context.Background(), 235)
+	if err != nil || len(members) != 1 || members[0].Name != "CARMEN" || members[0].ID != "artist-id" {
+		t.Fatalf("%v %v", members, err)
+	}
+}

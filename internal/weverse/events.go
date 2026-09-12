@@ -162,8 +162,10 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			return nil, err
 		}
 		artist := map[string]bool{}
+		artistNames := map[string]string{}
 		for _, m := range members {
 			artist[m.ID] = true
+			artistNames[m.ID] = m.Name
 		}
 		wantPosts, wantComments, wantLive := false, false, false
 		for _, sub := range cfg.Subscriptions {
@@ -179,6 +181,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				return err
 			}
 			if event.ID != "" && artist[event.MemberID] {
+				event.Author = artistNames[event.MemberID]
 				all[event.ID] = event
 			}
 			return nil
@@ -230,6 +233,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 					if share := str(obj(x)["shareUrl"]); validShareURL(share, slug) {
 						event.URL = share
 					}
+					event.Author = artistNames[event.MemberID]
 					all[event.ID] = event
 				}
 			}

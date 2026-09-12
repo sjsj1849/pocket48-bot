@@ -103,7 +103,19 @@ func (c *Client) Members(ctx context.Context, id int64) ([]Member, error) {
 		x := obj(v)
 		id := text(x, "memberId", "id")
 		if id != "" {
-			result = append(result, Member{ID: id, Name: str(x["profileName"]), Image: str(x["profileImageUrl"])})
+			official := obj(x["artistOfficialProfile"])
+			name := text(official, "officialName")
+			if name == "" {
+				name = text(x, "profileName", "name")
+			}
+			image := text(official, "officialImageUrl")
+			if image == "" {
+				image = str(x["profileImageUrl"])
+			}
+			if name == "" {
+				return nil, fmt.Errorf("成员名称格式已变更")
+			}
+			result = append(result, Member{ID: id, Name: name, Image: image})
 		}
 	}
 	return result, nil
