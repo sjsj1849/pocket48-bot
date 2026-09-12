@@ -2,6 +2,7 @@ package logic
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"html"
@@ -1048,6 +1049,9 @@ func (b *Bot) Start() error {
 		}
 		b.weiboMonitor.Start()
 	}
+	weverseCtx, stopWeverse := context.WithCancel(context.Background())
+	defer stopWeverse()
+	go b.runWeverseLoop(weverseCtx)
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()
@@ -1107,6 +1111,7 @@ func (b *Bot) Start() error {
 	}()
 
 	sig := <-stopChan
+	stopWeverse()
 	b.LogInfo("Received signal: %v. Shutting down...", sig)
 	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled || b.cfg.XiaohongshuEnabled {
 		b.weiboAuth.BeginStop()

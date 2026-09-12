@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Check, Eye, EyeOff, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { api } from '../api'
+import { WeverseConfig } from './WeverseConfig'
 import type { ConfigField } from '../types'
 import { ErrorState } from '../App'
 
@@ -1042,7 +1043,7 @@ export function Configuration() {
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '操作失败'}</div> : null}
       <div className="config-layout">
         <nav className="config-tabs">
-          {data.groupOrder.map((group) => (
+          {[...data.groupOrder, 'Weverse'].map((group) => (
             <button key={group} className={active === group ? 'active' : ''} onClick={() => setActive(group)}>
               {group}
               <span>{data.groups[group]?.length || 0}</span>
@@ -1057,6 +1058,7 @@ export function Configuration() {
             </div>
           </div>
           <div className="config-fields">
+            {active === 'Weverse' ? <WeverseConfig defaultGroup={boundGroup} /> : null}
             {(data.groups[active] || []).filter((field) => activePlatformEnabled || field.key === activeMasterKey).map((field) => (
               <Field key={field.key} field={field} value={values[field.key]} onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))} />
             ))}
