@@ -1,3 +1,4 @@
+import { handleWeversePanel } from './weverse-session.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -758,6 +759,8 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
   for (const p of context.pages()) {
     if (keep.has(p) || p.isClosed()) continue;
     const url = pageUrlSafe(p);
+    if (/^https:\/\/(?:[^/]+\.)?weverse\.io(?:\/|$)/i.test(url)) continue;
+
     // Protect IM / passport / QR even if our ref was lost after restart churn.
     if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan|website-login|captcha|verify/i.test(url)) continue;
     // Protect ALL xhs pages when pruning from scan loop (login/captcha safety).
@@ -3508,6 +3511,18 @@ wss.on('connection', (socket) => {
         return;
       }
       switch (cmd) {
+        case 'weverse_panel_open':
+        case 'weverse_panel_sync': {
+          try {
+            await startBrowser();
+            const result = await handleWeversePanel(context, cmd.endsWith('_open') ? 'open' : 'sync');
+            socket.send(JSON.stringify({ type: 'weverse_panel_result', requestId: command.requestId, ...result }));
+          } catch {
+            socket.send(JSON.stringify({ type: 'weverse_panel_result', requestId: command.requestId, error: 'Weverse 浏览器操作失败，请稍后重试' }));
+          }
+          break;
+        }
+
         case 'start':
           settings = {
             ...settings,

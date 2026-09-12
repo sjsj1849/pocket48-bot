@@ -1,0 +1,31 @@
+# Weverse 监控
+
+入口：管理面板 → 配置 → Weverse。沿用现有 QQ 消息格式 `【成员名|Weverse动态 / 回复 / 直播】`，附原文、可用的中文机器翻译、图片、原文链接和北京时间。
+
+## 使用
+
+1. 点击「打开 Weverse 登录」，在面板的浏览器页完成登录并加入 Hearts2Hearts 社区，然后回到 Weverse 配置点击「同步登录态」。不要通过聊天发送密码或 token。
+2. 在 Weverse 账号设置中将翻译语言设置为中文。翻译使用网页自己的翻译接口，不额外收费接入第三方翻译服务，不自动修改账号设置。
+3. 搜索 Hearts2Hearts、H2H、成员官方名（例如 CARMEN），或粘贴社区链接。搜索基于实时公开目录，缓存一小时；选择团体后，通过登录态加载成员 ID。
+4. 选择整团或指定成员，填写 QQ 群号，选择发帖、回复、开播、翻译和 @全体，再添加订阅。整团会使用每次采集的成员目录，因此会包含后来加入的成员。
+5. 先点「只读测试」，确认实际内容及译文。它只展示最近十条匹配内容，不发 QQ 消息，也不改推送去重状态。确认后开启总开关并保存运行设置。配置在下一轮检查生效，无需重启。
+
+Hearts2Hearts 的公开社区 ID 是 235，官方目录当前列出 CARMEN、JIWOO、YUHA、STELLA、JUUN、A-NA、IAN、YE-ON。成员订阅保存的是登录后返回的 ID，不用名字匹配推送。
+
+## 行为与限制
+
+- 首次启用、重新启用、变更成员 / 事件选择或目标群，只建立基线，不补发旧消息。正常重启读取持久化去重记录；消息入队后记录事件 ID。
+- 回复通过社区通知定位原帖，读取艺人评论及楼中楼回复，校验作者是否为该社区成员。相同通知新增评论时会重新检查，按实际评论 ID 去重。不会将通知标为已读。
+- 读取动态、通知和评论分页。后续扫描从上次成功检查前五分钟开始覆盖；单类最多二十页，超出时报告错误，不推进成功检查时间。
+- 韩文原文始终保留，中文译文紧随对应文本。翻译失败仍推送原文。图片内文字、语音和直播音频不做翻译。
+- 只监控当前登录账号有权访问的网页内容。首次真实登录测试前，不能保证账号可见的每一种回复通知及直播结构都已兼容。共同直播、以团体官方账号发布的直播，以及未出现在社区通知中的回复，需使用真实样本验证；目前按内容作者的成员 ID 筛选。
+- Access token 过期时使用 refresh token 自动续期，刷新与浏览器同步通过跨进程文件锁协调。账号退出、撤销会话或续期失效后，需回面板重新登录同步。
+- 存储位于配置文件同目录的 `storage/weverse/`：`settings.json`、`session.json`、`state.json`、`status.json`。会话文件权限为 0600；面板接口只返回是否已配置，不返回 token。该目录不能提交到 Git。
+
+## 实现参考与验证
+
+协议依据 [Weverse 网页](https://weverse.io/hearts2hearts/artist) 的当前公开客户端脚本及 [yt-dlp Weverse 提取器](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/weverse.py)；Go 客户端独立实现，无新增第三方运行服务。
+
+自动测试：`go test ./internal/weverse ./internal/logic ./internal/admin`，以及 `node --test sidecar/weibo-auth/weverse-session.test.mjs`。
+
+公开目录实测：`WEVERSE_LIVE_TEST=1 go test ./internal/weverse -run TestLivePublicSearch -v`。这一测试不需要登录，不代表已完成真实发帖、回复及开播测试。
