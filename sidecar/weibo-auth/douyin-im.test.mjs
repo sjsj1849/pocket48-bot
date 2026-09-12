@@ -566,3 +566,31 @@ test('type 105 video comment card uses title + cover + link', () => {
   assert.equal(decoded.link, 'https://www.douyin.com/video/7664070807320226698');
   assert.equal(decoded.images.length, 1);
 });
+
+
+test('type 110 distinguishes disabled emoji flags from shared videos', () => {
+  assert.equal(formatDouyinType110({}, { 'a:use_default_emoji': '0', 'a:video_emoji_rec': '0' }), '[抖音卡片]');
+  assert.equal(formatDouyinType110({}, { 'a:use_default_emoji': '1' }), '[表情]');
+  assert.equal(formatDouyinType110({}, { 'a:share_item_id': '7617328023528593657', 'a:use_default_emoji': '0', 'a:video_emoji_rec': '1' }), '[视频]');
+});
+
+test('decode JAMBO empty type 110 video card with emoji metadata', () => {
+  const ext = {
+    'a:share_item_id': '7617328023528593657',
+    'a:use_default_emoji': '0',
+    'a:video_emoji_rec': '1',
+  };
+  const message = [
+    ...field(1, 'private-conv'), ...intField(2, 1),
+    ...intField(3, 123), ...intField(6, 110), ...intField(7, 456),
+    ...field(8, ''),
+    ...Object.entries(ext).flatMap(([key,value]) => field(9, mapEntry(key,value))),
+  ];
+  const notify = [...field(2, 'private-conv'), ...intField(3, 1), ...field(5, message)];
+  const frame = [...field(7, 'pb'), ...field(8, field(6, field(500, notify)))];
+  const decoded = decodeDouyinIMPush(frame);
+  assert.equal(decoded.messageType, 110);
+  assert.equal(decoded.text, '[视频]');
+  assert.equal(decoded.link, 'https://www.douyin.com/video/7617328023528593657');
+  assert.equal(decoded.internalMetadata, false);
+});

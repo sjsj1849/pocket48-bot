@@ -766,12 +766,18 @@ function isDouyinControlCommand(messageType, content = {}, ext = {}) {
 }
 
 // Type 110: client-rendered special cards / video-emoji.
-// - 2026-07-17: video_emoji_rec / use_default_emoji → no body text (show [表情])
+// Explicit shared-video IDs take precedence over optional emoji flags.
 // - 2026-07-19 20:56:58 张若昀 private: empty content, UI 「你还没有喂精灵～」, push has zero text/hex
 // - 2026-08-22 14:41:55 锐锐 product-link card: ALSO empty 110 (len=0 preview="") —
 //   push carries no title/url, so empty 110 cards are indistinguishable from each
 //   other. Use a neutral label instead of guessing a specific client UI string.
 function formatDouyinType110(content = {}, ext = {}) {
+  const sharedId = String(ext['a:share_item_id'] || ext.share_item_id || '').trim();
+  if (/^\d{8,}$/.test(sharedId)) {
+    return formatDouyinVideoShare(content, ext).text;
+  }
+  const flagEnabled = (value) => value === true || value === 1 || value === '1' || value === 'true';
+
   const fromContent =
     (typeof content?.text === 'string' && content.text.trim())
     || (typeof content?.title === 'string' && content.title.trim())
@@ -781,10 +787,10 @@ function formatDouyinType110(content = {}, ext = {}) {
   if (fromContent) return fromContent.startsWith('[') ? fromContent : `[${fromContent}]`;
 
   if (
-    ext['a:video_emoji_rec']
-    || ext['a:use_default_emoji']
-    || ext.video_emoji_rec
-    || ext.use_default_emoji
+    flagEnabled(ext['a:video_emoji_rec'])
+    || flagEnabled(ext['a:use_default_emoji'])
+    || flagEnabled(ext.video_emoji_rec)
+    || flagEnabled(ext.use_default_emoji)
   ) {
     return '[表情]';
   }
