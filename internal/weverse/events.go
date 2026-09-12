@@ -69,12 +69,7 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 		timestamp = num(video["onAirStartAt"])
 	}
 	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
-	for _, v := range list(obj(ext["image"])["photos"]) {
-		x := obj(v)
-		if u := text(x, "url", "originalUrl"); strings.HasPrefix(u, "https://") {
-			e.Images = append(e.Images, u)
-		}
-	}
+	e.Images = eventImages(p)
 	return e, nil
 }
 func eventFromComment(p Object, postID, slug string, cid int64, parentBody string) (Event, error) {
@@ -90,6 +85,7 @@ func eventFromComment(p Object, postID, slug string, cid int64, parentBody strin
 	if parent := obj(p["parent"]); str(parent["type"]) == "COMMENT" {
 		event.ParentCommentID = str(obj(parent["data"])["commentId"])
 	}
+	event.Images = eventImages(p)
 	return event, nil
 }
 
@@ -374,4 +370,28 @@ func (c *Client) pages(ctx context.Context, ep, param, timeKey string, since tim
 		next = cursor
 	}
 	return nil, fmt.Errorf("Weverse 积压内容超过单次检查上限，未推进检查记录")
+}
+
+// Current web responses place photos in orderedAttachments; retain the legacy
+// extension.image.photos fallback without sending the same photo twice.
+func eventImages(p Object) []string {
+	var images []string
+	seen := map[string]bool{}
+	add := func(photo Object) {
+		u := text(photo, "url", "originalUrl")
+		if strings.HasPrefix(u, "https://") && !seen[u] {
+			images = append(images, u)
+			seen[u] = true
+		}
+	}
+	for _, v := range list(p["orderedAttachments"]) {
+		attachment := obj(v)
+		if strings.EqualFold(str(attachment["type"]), "photo") {
+			add(obj(attachment["data"]))
+		}
+	}
+	for _, v := range list(obj(obj(p["extension"])["image"])["photos"]) {
+		add(obj(v))
+	}
+	return images
 }
