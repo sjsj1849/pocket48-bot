@@ -384,3 +384,17 @@ h1, .sidebar-brand > span { font-family: 'Newsreader Variable', Georgia, serif; 
 @media (max-width: 640px) { .wv-fields { grid-template-columns: 1fr; } .wv-card { padding: 14px; } .wv-actions > button { flex: 1; } }
 
 .weverse-config input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid #dce1e7; border-radius: 6px; background: #fff; color: inherit; font: inherit; }
+
+/* Overview details are always visible; uptime is the hosting Bot's runtime. */
+.service-row { border-bottom: 1px solid var(--line); }
+.service-row:last-child { border-bottom: 0; }
+.service-main { grid-template-columns: 12px minmax(150px, 1.6fr) 90px 120px; border-bottom: 0; }
+.service-main:hover { background: white; }
+.service-detail { max-height: none; opacity: 1; overflow: visible; padding: 0 20px 14px 45px; background: white; transition: none; }
+.service-detail span { min-width: 0; overflow-wrap: anywhere; }
+.service-detail time { white-space: nowrap; }
+@media (max-width: 640px) {
+ .service-main { grid-template-columns: 10px minmax(0, 1fr) auto; }
+ .service-uptime { display: block; grid-column: 2 / -1; }
+ .service-detail { grid-template-columns: 1fr; padding: 0 14px 12px 34px; gap: 5px; }
+}

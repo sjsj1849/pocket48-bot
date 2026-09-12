@@ -1,21 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowRight, ChevronDown, RefreshCw, RotateCw } from 'lucide-react'
+import { ArrowRight, RefreshCw, RotateCw } from 'lucide-react'
 import { api } from '../api'
 import type { OverviewData, Page, ServiceState } from '../types'
 import { ErrorState } from '../App'
 
 function ServiceRow({ service }: { service: ServiceState }) {
-  const [open, setOpen] = useState(false)
   return (
-    <div className={`service-row ${open ? 'expanded' : ''}`}>
-      <button className="service-main" onClick={() => setOpen((value) => !value)}>
+    <div className="service-row">
+      <div className="service-main">
         <span className={`status-dot ${service.status}`} />
         <span className="service-name"><strong>{service.name}</strong><small>{service.subtitle}</small></span>
         <span className={`status-pill ${service.status}`}>{service.statusText}</span>
-        <span className="service-uptime">{service.uptime}</span>
-        <ChevronDown size={17} className="chevron" />
-      </button>
-      <div className="service-detail"><span>{service.detail}</span><span>{service.lastEvent}</span><time>{service.lastTime || '暂无记录'}</time></div>
+        <span className="service-uptime" title="主控服务本次启动后的运行时长">主控运行 {service.uptime}</span>
+      </div>
+      <div className="service-detail"><span>{service.detail}</span><span>{service.lastEvent}</span><time>最近记录：{service.lastTime || '暂无记录'}</time></div>
     </div>
   )
 }

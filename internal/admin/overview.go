@@ -314,6 +314,7 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		}
 	}
 	if card := weverseService(flags.ConfigPath, time.Now()); card != nil {
+		card.Uptime = uptime
 		states = append(states, *card)
 	}
 	return states
