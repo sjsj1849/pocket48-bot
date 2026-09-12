@@ -36,7 +36,7 @@ func parseMWeiboSuperLike(body []byte) (int, error) {
 	if payload.OK != 1 {
 		return 0, fmt.Errorf("chaolike response not successful")
 	}
-	countRE := regexp.MustCompile(`(?i)超LIKE榜\s*[(（]\s*([0-9][0-9,]*)\s*人\s*[)）]`)
+	countRE := regexp.MustCompile(`(?i)超LIKE(?:榜)?\s*[(（]\s*([0-9][0-9,]*)\s*人\s*[)）]`)
 	empty := false
 	parse := func(id, desc string) (int, bool) {
 		if id == "badge_chaolike_record_empty" {

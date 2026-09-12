@@ -47,3 +47,14 @@ func TestSuperLikeSnapshotAndDailyComparison(t *testing.T) {
 		t.Fatal("failure reported as decrease")
 	}
 }
+
+func TestSuperLikeColumnRemainsVisibleWhenCollectionFails(t *testing.T) {
+	rows := []monitor.WeiboSuperCountResult{{OID: "test", Name: "八小妹", SignCount: 10}}
+	h := buildWeiboSuperCountHTMLTable(rows, nil, nil, nil)
+	if !strings.Contains(h, "超LIKE") || !strings.Contains(h, "未获取") {
+		t.Fatal("missing column/error marker")
+	}
+	if strings.Contains(h, "(-") {
+		t.Fatal("unknown value treated as decrease")
+	}
+}
