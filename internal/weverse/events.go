@@ -29,6 +29,10 @@ type Event struct {
 	TranslationError  string   `json:"translationError,omitempty"`
 	URL               string   `json:"url"`
 	Images            []string `json:"images,omitempty"`
+	CoverURL          string   `json:"coverUrl,omitempty"`
+	LiveStartedAt     int64    `json:"liveStartedAt,omitempty"`
+	LiveEndedAt       int64    `json:"liveEndedAt,omitempty"`
+	LiveDuration      int64    `json:"liveDuration,omitempty"`
 	Time              int64    `json:"time"`
 	PostID            string   `json:"postId"`
 	CommentID         string   `json:"commentId,omitempty"`
@@ -73,6 +77,24 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 	}
 	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
 	e.Images = eventImages(p)
+	if kind == "live" {
+		e.LiveStartedAt = timestamp
+		if title := plain(text(obj(ext["mediaInfo"]), "title")); title != "" {
+			e.Body = title
+		}
+		if title := plain(text(p, "title")); title != "" {
+			e.Body = title
+		}
+		e.CoverURL = text(obj(obj(ext["mediaInfo"])["thumbnail"]), "url")
+		if e.CoverURL == "" {
+			e.CoverURL = text(video, "thumb", "thumbnailUrl", "coverUrl")
+		}
+		if strings.HasPrefix(e.CoverURL, "https://") {
+			e.Images = []string{e.CoverURL}
+		} else {
+			e.CoverURL = ""
+		}
+	}
 	return e, nil
 }
 func eventFromComment(p Object, postID, slug string, cid int64, parentBody string) (Event, error) {
@@ -358,10 +380,10 @@ func Matches(s Subscription, e Event) bool {
 	if !s.Enabled || s.CommunityID != e.CommunityID {
 		return false
 	}
-	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" {
+	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_end" && e.Kind != "live_replay" {
 		return false
 	}
-	if (e.Kind == "post" && !s.Posts) || (e.Kind == "comment" && !s.Comments) || (e.Kind == "live" && !s.Live) {
+	if (e.Kind == "post" && !s.Posts) || (e.Kind == "comment" && !s.Comments) || ((e.Kind == "live" || e.Kind == "live_end" || e.Kind == "live_replay") && !s.Live) {
 		return false
 	}
 	if len(s.MemberIDs) == 0 {

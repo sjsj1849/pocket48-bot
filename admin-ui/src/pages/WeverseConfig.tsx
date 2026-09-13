@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
-type Subscription = { id: string; groupId: number; communityId: number; communityName: string; slug: string; memberIds: string[]; memberNames: string[]; posts: boolean; comments: boolean; live: boolean; translate: boolean; atAll: boolean; enabled: boolean }
+type Subscription = { id: string; groupId: number; communityId: number; communityName: string; slug: string; memberIds: string[]; memberNames: string[]; posts: boolean; comments: boolean; live: boolean; translate: boolean; atAll: boolean; atAllMemberIds?: string[]; atAllMemberNames?: string[]; enabled: boolean }
 type Settings = { enabled: boolean; pollSeconds: number; proxyUrl?: string; subscriptions: Subscription[] }
 type Community = { id: number; name: string; slug: string; members: string[] }
 type Member = { id: string; name: string }
 type Result = { settings: Settings; sessionConfigured: boolean; status: { lastCheck?: string; lastSuccess?: string; error?: string } }
-const events = [['posts', '发帖'], ['comments', '回复粉丝 / 评论'], ['live', '开播'], ['translate', '附中文翻译'], ['atAll', '@全体成员']] as const
-const draftDefaults = { posts: true, comments: true, live: true, translate: true, atAll: false }
+const events = [['posts', '发帖'], ['comments', '成员回复 / 评论'], ['live', '开播 / 结束 / 回放'], ['translate', '附中文翻译'], ['atAll', '@全体成员']] as const
+const draftDefaults = { posts: true, comments: true, live: true, translate: true, atAll: false, atAllMemberIds: [] as string[], atAllMemberNames: [] as string[] }
 
 export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
   const [data, setData] = useState<Result>()
@@ -21,6 +21,7 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
   const [group, setGroup] = useState(defaultGroup)
   const [draft, setDraft] = useState(draftDefaults)
   const [editing, setEditing] = useState('')
+ const [mentionRestricted, setMentionRestricted] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -52,7 +53,7 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
   async function selectCommunity(c: Community, edit?: Subscription) {
     const generation = ++memberGeneration.current
     setCommunity(c); setMembers([]); setSelected(edit?.memberIds || []); setAllMembers(!edit?.memberIds.length)
-    setEditing(edit?.id || ''); setGroup(edit ? String(edit.groupId) : defaultGroup); setDraft(edit || draftDefaults)
+    setEditing(edit?.id || ''); setGroup(edit ? String(edit.groupId) : defaultGroup); setDraft({ ...draftDefaults, ...edit, atAllMemberIds: edit?.atAllMemberIds || [], atAllMemberNames: edit?.atAllMemberNames || [] }); setMentionRestricted(!!edit?.atAllMemberIds?.length)
     await action('members', async () => {
       const r = await api<{ members: Member[] }>(`weverse/members?communityId=${c.id}`)
       if (generation === memberGeneration.current) setMembers(r.members)
@@ -106,16 +107,22 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
         {!allMembers && <div className="wv-members">{members.map(m => <label key={m.id} className="wv-check"><input type="checkbox" checked={selected.includes(m.id)} onChange={e => setSelected(v => e.target.checked ? [...v, m.id] : v.filter(id => id !== m.id))} />{m.name}</label>)}</div>}
         <label>推送 QQ 群号<input aria-label="推送 QQ 群号" inputMode="numeric" value={group} onChange={e => setGroup(e.target.value)} /></label>
         <div className="wv-members">{events.map(([k, label]) => <label key={k} className="wv-check"><input type="checkbox" checked={draft[k]} onChange={e => setDraft({ ...draft, [k]: e.target.checked })} />{label}</label>)}</div>
-        <button className="primary-button" disabled={!!busy || !members.length || !/^\d+$/.test(group) || Number(group) <= 0 || (!allMembers && !selected.length) || (!draft.posts && !draft.comments && !draft.live)} onClick={() => void action('subscribe', async () => {
+        {draft.atAll && <div className="wv-editor">
+          <label className="wv-check"><input type="checkbox" checked={mentionRestricted} onChange={e => setMentionRestricted(e.target.checked)} />仅指定成员 @全体</label>
+          <p className="muted">只影响 @全体成员，其他成员的内容仍正常转发。</p>
+          {mentionRestricted && <div className="wv-members">{members.map(m => <label key={m.id} className="wv-check"><input type="checkbox" checked={draft.atAllMemberIds.includes(m.id)} onChange={e => setDraft(v => ({ ...v, atAllMemberIds: e.target.checked ? [...v.atAllMemberIds, m.id] : v.atAllMemberIds.filter(id => id !== m.id) }))} />@全体：{m.name}</label>)}</div>}
+        </div>}
+        <button className="primary-button" disabled={!!busy || !members.length || (draft.atAll && mentionRestricted && !draft.atAllMemberIds.length) || !/^\d+$/.test(group) || Number(group) <= 0 || (!allMembers && !selected.length) || (!draft.posts && !draft.comments && !draft.live)} onClick={() => void action('subscribe', async () => {
           const chosen = members.filter(m => selected.includes(m.id))
-          const item: Subscription = { ...draft, id: editing || crypto.randomUUID(), groupId: Number(group), communityId: community.id, communityName: community.name, slug: community.slug, memberIds: allMembers ? [] : chosen.map(m => m.id), memberNames: allMembers ? [] : chosen.map(m => m.name), enabled: true }
+ const mentions=members.filter(m=>draft.atAllMemberIds.includes(m.id))
+          const item: Subscription = { ...draft, atAllMemberIds: mentionRestricted ? mentions.map(m=>m.id) : [], atAllMemberNames: mentionRestricted ? mentions.map(m=>m.name) : [], id: editing || crypto.randomUUID(), groupId: Number(group), communityId: community.id, communityName: community.name, slug: community.slug, memberIds: allMembers ? [] : chosen.map(m => m.id), memberNames: allMembers ? [] : chosen.map(m => m.name), enabled: true }
           await save({ ...settings, subscriptions: [...settings.subscriptions.filter(s => s.id !== item.id), item] }); setCommunity(undefined); setEditing('')
         })}>{editing ? '保存订阅' : '添加订阅'}</button>
       </div>}
     </section>
     <section className="wv-card"><h3>已订阅</h3>
       {!settings.subscriptions.length && <p className="muted">还没有订阅。搜索 Hearts2Hearts 后选择成员和推送群。</p>}
-      {settings.subscriptions.map(s => <div className="wv-subscription" key={s.id}><div><strong>{s.communityName} · {s.memberNames.length ? s.memberNames.join('、') : '整团'}</strong><p>QQ群 {s.groupId} · {events.filter(([k]) => s[k]).map(([, label]) => label).join(' / ')}</p></div><div className="wv-actions">
+      {settings.subscriptions.map(s => <div className="wv-subscription" key={s.id}><div><strong>{s.communityName} · {s.memberNames.length ? s.memberNames.join('、') : '整团'}</strong><p>QQ群 {s.groupId} · {events.filter(([k]) => s[k]).map(([, label]) => label).join(' / ')}</p>{s.atAll && <p>@全体：{s.atAllMemberIds?.length ? (s.atAllMemberNames || []).join('、') : '全部成员'}</p>}</div><div className="wv-actions">
         <button className="secondary-button" disabled={!!busy} onClick={() => void action('toggle', () => save({ ...settings, subscriptions: settings.subscriptions.map(v => v.id === s.id ? { ...v, enabled: !v.enabled } : v) }))}>{s.enabled ? '暂停' : '启用'}</button>
         <button className="secondary-button" disabled={!!busy} onClick={() => void selectCommunity({ id: s.communityId, name: s.communityName, slug: s.slug, members: s.memberNames }, s)}>编辑</button>
         <button className="secondary-button" disabled={!!busy} onClick={() => { if (window.confirm(`删除 ${s.communityName} 的这条订阅？`)) void action('delete', () => save({ ...settings, subscriptions: settings.subscriptions.filter(v => v.id !== s.id) })) }}>删除</button>

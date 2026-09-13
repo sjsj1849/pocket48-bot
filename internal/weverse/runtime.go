@@ -14,7 +14,8 @@ type Cursor struct {
 	Signature   string           `json:"signature"`
 }
 type Runtime struct {
-	Subscriptions map[string]*Cursor `json:"subscriptions"`
+	Subscriptions map[string]*Cursor      `json:"subscriptions"`
+	Lives         map[string]*TrackedLive `json:"lives,omitempty"`
 }
 
 // Pending establishes a per-subscription baseline. Re-enabling or changing a
@@ -80,7 +81,7 @@ func (c *Client) TranslateEvent(ctx context.Context, e *Event) {
 		if lang != "zh-cn" && lang != "zh_CN" && lang != "zh-tw" && lang != "zh_TW" && lang != "zh" {
 			return "", fmt.Errorf("请在 Weverse 设置中将翻译语言设为中文")
 		}
-		result := plain(text(t, "plainBody", "body"))
+		result := plain(text(t, "plainBody", "body", "title"))
 		if result == "" {
 			return "", fmt.Errorf("暂未返回译文")
 		}
