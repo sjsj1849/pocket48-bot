@@ -1240,10 +1240,9 @@ func (m *WeiboMonitor) DispatchPerfectWeibo(config *WeiboConfig, card WeiboCard,
 
 func (m *WeiboMonitor) formatWeiboCleanText(card WeiboCard, cardID string, atAll bool, uid string) []napcat.MessageSegment {
 	var segments []napcat.MessageSegment
-	// Unified QQ layout: @全体成员 (own line) / 【标题】 / 正文 / 时间戳
+	// Keep the mention with the header; a standalone newline can render as an empty top row in QQ.
 	if atAll {
 		segments = append(segments, napcat.AtSegment("all"))
-		segments = append(segments, napcat.TextSegment("\n"))
 	}
 	header := fmt.Sprintf("【%s|微博】\n", card.User.ScreenName)
 	segments = append(segments, napcat.TextSegment(header))
