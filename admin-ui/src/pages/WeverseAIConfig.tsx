@@ -25,7 +25,7 @@ export function WeverseAIConfig() {
   }
   return <section className="wv-card">
     <h3>AI 聊天整理</h3>
-    <p className="muted">实时消息继续使用 Weverse 翻译。以主帖为单位，结合主帖原文、图片/视频信息和同帖全部已转发历史（跨小时保留），合并该帖里监控到的成员回复粉丝、队友和自己的内容。这些成员连续一段时间没有新回复后，AI 翻译并对照原文逐句审校，再补发本次新增回复的完整中文对话，下方附总结和必要的梗解释。间隔按消息判断，不代表检测到了成员下线；历史仅作上下文，不重复逐条转发；AI 不分析图片或视频内容。</p>
+    <p className="muted">实时消息继续使用 Weverse 翻译。以主帖为单位，结合主帖原文、图片/视频信息和同帖全部已转发历史（跨小时保留），合并该帖里监控到的成员回复粉丝、队友和自己的内容。这些成员连续一段时间没有新回复后，AI 翻译并对照原文逐句审校，再补发整帖完整中文对话（标明本次新增数量），下方附总结和必要的梗解释。间隔按消息判断，不代表检测到了成员下线；主帖与已转发历史回复按时间逐条整理；AI 不分析图片或视频内容。</p>
     {error && <p role="alert" className="inline-error">{error}</p>}
     {message && <p role="status" className="wv-notice">{message}</p>}
     {settings && <>

@@ -60,7 +60,9 @@ func weverseEventBody(e weverse.Event) string {
 	}
 	for _, video := range e.Videos {
 		if video.URL == "" {
-			lines = append(lines, "（含视频，暂未取得播放文件，请打开原帖观看）")
+			lines = append(lines, "[视频]（播放文件暂不可用，请打开原帖观看）")
+		} else {
+			lines = append(lines, "[视频]（视频单独发送）")
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -97,6 +99,7 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 	}
 	defer history.Close()
 	go b.runWeverseAISummaryLoop(ctx, dir)
+	go b.runWeverseReportLoop(ctx, dir)
 	var state weverse.Runtime
 	if e := weverse.Read(dir, "state.json", &state); e != nil {
 		log.Printf("[Weverse] 无法读取去重状态: %v", e)
@@ -181,7 +184,9 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 								}
 							}
 						}
-						b.napcat.SendGroupMessage(s.GroupID, weverseMessageSegments(s, event))
+						for _, message := range weverseMessageGroups(s, event) {
+							b.napcat.SendGroupMessage(s.GroupID, message)
+						}
 						if err := history.Record([]weverse.Event{event}, s.ID); err != nil {
 							log.Printf("[Weverse] 无法保存已转发原文: %v", err)
 						}
@@ -225,10 +230,10 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface{} {
 	segments := []interface{}{}
 	if s.MentionsAll(e.MemberID) {
-		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
+		segments = append(segments, napcat.AtSegment("all"))
 	}
 	body := weverseEventBody(e)
-	if len(e.Images) > 0 {
+	if len(e.Images) > 0 || len(e.Videos) > 0 {
 		body += "\n\n"
 	}
 	segments = append(segments, napcat.TextSegment(body))
@@ -236,10 +241,7 @@ func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface
 		segments = append(segments, napcat.ImageSegment(image))
 	}
 	for _, video := range e.Videos {
-		if video.URL != "" {
-			segments = append(segments, napcat.VideoSegment(video.URL, video.CoverURL))
-		}
-		if video.URL == "" && video.CoverURL != "" {
+		if video.CoverURL != "" {
 			segments = append(segments, napcat.ImageSegment(video.CoverURL))
 		}
 	}
@@ -247,4 +249,15 @@ func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface
 		segments = append(segments, napcat.TextSegment("\n\n"+footer))
 	}
 	return segments
+}
+
+// QQ requires video to be sent alone. The card keeps its cover and placeholder.
+func weverseMessageGroups(s weverse.Subscription, e weverse.Event) [][]interface{} {
+	groups := [][]interface{}{weverseMessageSegments(s, e)}
+	for _, video := range e.Videos {
+		if video.URL != "" {
+			groups = append(groups, []interface{}{napcat.VideoSegment(video.URL, video.CoverURL)})
+		}
+	}
+	return groups
 }

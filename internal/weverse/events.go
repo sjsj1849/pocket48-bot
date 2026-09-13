@@ -13,31 +13,39 @@ import (
 )
 
 type Event struct {
-	ID                string            `json:"id"`
-	Kind              string            `json:"kind"`
-	CommunityID       int64             `json:"communityId"`
-	MemberID          string            `json:"memberId"`
-	Author            string            `json:"author"`
-	Body              string            `json:"body"`
-	ParentCommentID   string            `json:"parentCommentId,omitempty"`
-	ParentBody        string            `json:"parentBody,omitempty"`
-	ParentAuthor      string            `json:"parentAuthor,omitempty"`
-	ParentMemberID    string            `json:"parentMemberId,omitempty"`
-	ParentProfileType string            `json:"parentProfileType,omitempty"`
-	PostContext       *AIPostContext    `json:"postContext,omitempty"`
-	Translation       string            `json:"translation,omitempty"`
-	ParentTranslation string            `json:"parentTranslation,omitempty"`
-	TranslationError  string            `json:"translationError,omitempty"`
-	URL               string            `json:"url"`
-	Images            []string          `json:"images,omitempty"`
-	Videos            []VideoAttachment `json:"videos,omitempty"`
-	CoverURL          string            `json:"coverUrl,omitempty"`
-	LiveStartedAt     int64             `json:"liveStartedAt,omitempty"`
-	LiveEndedAt       int64             `json:"liveEndedAt,omitempty"`
-	LiveDuration      int64             `json:"liveDuration,omitempty"`
-	Time              int64             `json:"time"`
-	PostID            string            `json:"postId"`
-	CommentID         string            `json:"commentId,omitempty"`
+	CommentsAt       int64    `json:"commentsAt,omitempty"`
+	LikesAt          int64    `json:"likesAt,omitempty"`
+	PostComments     *int64   `json:"postComments,omitempty"`
+	PostLikes        *int64   `json:"postLikes,omitempty"`
+	MetricsAt        int64    `json:"metricsAt,omitempty"`
+	LiveParticipants []string `json:"liveParticipants,omitempty"`
+
+	ID                       string            `json:"id"`
+	Kind                     string            `json:"kind"`
+	CommunityID              int64             `json:"communityId"`
+	MemberID                 string            `json:"memberId"`
+	Author                   string            `json:"author"`
+	Body                     string            `json:"body"`
+	ParentCommentID          string            `json:"parentCommentId,omitempty"`
+	ParentBody               string            `json:"parentBody,omitempty"`
+	ParentAuthor             string            `json:"parentAuthor,omitempty"`
+	ParentMemberID           string            `json:"parentMemberId,omitempty"`
+	ParentContextUnavailable bool              `json:"parentContextUnavailable,omitempty"`
+	ParentProfileType        string            `json:"parentProfileType,omitempty"`
+	PostContext              *AIPostContext    `json:"postContext,omitempty"`
+	Translation              string            `json:"translation,omitempty"`
+	ParentTranslation        string            `json:"parentTranslation,omitempty"`
+	TranslationError         string            `json:"translationError,omitempty"`
+	URL                      string            `json:"url"`
+	Images                   []string          `json:"images,omitempty"`
+	Videos                   []VideoAttachment `json:"videos,omitempty"`
+	CoverURL                 string            `json:"coverUrl,omitempty"`
+	LiveStartedAt            int64             `json:"liveStartedAt,omitempty"`
+	LiveEndedAt              int64             `json:"liveEndedAt,omitempty"`
+	LiveDuration             int64             `json:"liveDuration,omitempty"`
+	Time                     int64             `json:"time"`
+	PostID                   string            `json:"postId"`
+	CommentID                string            `json:"commentId,omitempty"`
 }
 
 var tagRE = regexp.MustCompile(`<[^>]*>`)
@@ -57,6 +65,10 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 	}
 	ext := obj(p["extension"])
 	video := obj(ext["video"])
+	liveToVod, _ := video["liveToVod"].(bool)
+	if liveToVod && str(video["type"]) == "VOD" {
+		return Event{}, nil
+	}
 	kind := "post"
 	section := "artist"
 	if str(video["type"]) == "LIVE" {
@@ -65,6 +77,9 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 		}
 		kind = "live"
 		section = "live"
+	}
+	if p["postType"] == "MOMENT" || ext["moment"] != nil || ext["momentW1"] != nil {
+		kind = "moment"
 	}
 	body := plain(text(p, "plainBody", "body", "title"))
 	if body == "" {
@@ -79,10 +94,27 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 	}
 	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
 	e.Images = eventImages(p)
-	if kind == "post" {
+	if kind == "post" || kind == "moment" {
+		e.PostComments = optionalCount(p, "commentCount")
+		e.PostLikes = optionalCount(p, "emotionCount")
+		if e.PostComments != nil || e.PostLikes != nil {
+			e.MetricsAt = time.Now().UnixMilli()
+		}
+		if e.PostComments != nil {
+			e.CommentsAt = e.MetricsAt
+		}
+		if e.PostLikes != nil {
+			e.LikesAt = e.MetricsAt
+		}
 		e.Videos = eventVideos(p)
 	}
 	if kind == "live" {
+		e.LiveDuration = num(video["playTime"])
+		for _, raw := range list(p["liveParticipants"]) {
+			if id := text(obj(raw), "memberId", "id"); id != "" {
+				e.LiveParticipants = append(e.LiveParticipants, id)
+			}
+		}
 		e.LiveStartedAt = timestamp
 		if title := plain(text(obj(ext["mediaInfo"]), "title")); title != "" {
 			e.Body = title
@@ -244,7 +276,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				}
 			}
 		}
-		if !wantComments {
+		if !wantComments && !wantPosts {
 			continue
 		}
 		// seen=false avoids marking the user's notifications as read.
@@ -265,13 +297,30 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				continue
 			}
 			typ := strings.ToUpper(text(n, "activityType", "type"))
+			if wantPosts && strings.Contains(typ, "MOMENT") && !strings.Contains(typ, "COMMENT") {
+				var post Object
+				err := c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &post)
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				if err := addPost(post); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if !wantComments {
+				continue
+			}
 			if !strings.Contains(typ, "COMMENT") && !strings.Contains(typ, "REPLY") && commentID == "" {
 				continue
 			}
 			parent, ok := parents[postID]
 			if !ok {
 				if err := c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &parent); err != nil {
-					if errors.Is(err, ErrNotFound) {
+					if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 						continue
 					}
 					return nil, err
@@ -281,7 +330,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			if !seenPosts[postID] {
 				seenPosts[postID] = true
 				comments, err := c.pages(ctx, "/comment/v1.0/post-"+postID+"/artistComments?fieldSet=postArtistCommentsV1&sortType=LATEST&limit=100", "after", "createdAt", since)
-				if errors.Is(err, ErrNotFound) {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 					continue
 				}
 				if err != nil {
@@ -297,7 +346,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				seenComments[commentID] = true
 				var direct Object
 				err := c.call(ctx, "/comment/v1.0/comment-"+commentID+"?fieldSet=commentV1", true, &direct)
-				if errors.Is(err, ErrNotFound) {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 					continue
 				}
 				if err != nil {
@@ -307,7 +356,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 					return nil, err
 				}
 				replies, err := c.pages(ctx, "/comment/v1.0/comment-"+commentID+"/artistComments?fieldSet=commentArtistCommentsV1", "after", "createdAt", since)
-				if errors.Is(err, ErrNotFound) {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 					continue
 				}
 				if err != nil {
@@ -335,10 +384,10 @@ func Matches(s Subscription, e Event) bool {
 	if !s.Enabled || s.CommunityID != e.CommunityID {
 		return false
 	}
-	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_end" && e.Kind != "live_replay" {
+	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_end" && e.Kind != "live_replay" && e.Kind != "moment" {
 		return false
 	}
-	if (e.Kind == "post" && !s.Posts) || (e.Kind == "comment" && !s.Comments) || ((e.Kind == "live" || e.Kind == "live_end" || e.Kind == "live_replay") && !s.Live) {
+	if ((e.Kind == "post" || e.Kind == "moment") && !s.Posts) || (e.Kind == "comment" && !s.Comments) || ((e.Kind == "live" || e.Kind == "live_end" || e.Kind == "live_replay") && !s.Live) {
 		return false
 	}
 	if len(s.MemberIDs) == 0 {
@@ -361,9 +410,12 @@ func validShareURL(raw, slug string) bool {
 // sufficient to establish a baseline. Later scans cover the previous success
 // (with overlap). Fail visibly on an unbounded backlog rather than silently skip.
 func (c *Client) pages(ctx context.Context, ep, param, timeKey string, since time.Time) ([]any, error) {
+	return c.pagesLimit(ctx, ep, param, timeKey, since, 20)
+}
+func (c *Client) pagesLimit(ctx context.Context, ep, param, timeKey string, since time.Time, maxPages int) ([]any, error) {
 	result := []any{}
 	next := ""
-	for page := 0; page < 20; page++ {
+	for page := 0; page < maxPages; page++ {
 		request := ep
 		if next != "" {
 			request += "&" + param + "=" + url.QueryEscape(next)
@@ -416,6 +468,7 @@ func eventImages(p Object) []string {
 	for _, v := range list(obj(obj(p["extension"])["image"])["photos"]) {
 		add(obj(v))
 	}
+	add(obj(obj(obj(p["extension"])["momentW1"])["photo"]))
 	return images
 }
 
@@ -460,7 +513,7 @@ func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slu
 					cached, ok := commentParents[id]
 					if !ok {
 						if err := c.call(ctx, "/comment/v1.0/comment-"+id+"?fieldSet=commentV1", true, &cached); err != nil {
-							if !errors.Is(err, ErrNotFound) {
+							if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrForbidden) {
 								return err
 							}
 						}
@@ -484,6 +537,7 @@ func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slu
 			event.ParentAuthor = str(targetAuthor["profileName"])
 		}
 		event.ParentProfileType = str(targetAuthor["profileType"])
+		event.ParentContextUnavailable = str(relation["type"]) == "COMMENT" && event.ParentMemberID == "" && event.ParentBody == ""
 		event.PostContext = aiPostContext(parent, postID, slug, artistNames)
 		if name := artistNames[event.ParentMemberID]; name != "" {
 			event.ParentAuthor = name
@@ -495,6 +549,16 @@ func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slu
 			}
 			event.Author = artistNames[event.MemberID]
 			all[event.ID] = event
+		}
+	}
+	return nil
+}
+
+func optionalCount(o Object, key string) *int64 {
+	if value, ok := o[key]; ok && value != nil {
+		n := num(value)
+		if n >= 0 {
+			return &n
 		}
 	}
 	return nil

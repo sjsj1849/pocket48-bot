@@ -38,6 +38,14 @@ func eventVideos(p Object) []VideoAttachment {
 		}
 		items = append(items, VideoAttachment{ID: id, CoverURL: cover, URL: direct})
 	}
+	for _, key := range []string{"moment", "momentW1"} {
+		d := obj(obj(obj(p["extension"])[key])["video"])
+		id := str(d["videoId"])
+		if id != "" && !seen[id] {
+			items = append(items, VideoAttachment{ID: id, CoverURL: text(d, "thumb", "thumbnailUrl")})
+			seen[id] = true
+		}
+	}
 	return items
 }
 func (c *Client) ResolveEventVideos(ctx context.Context, e *Event) {
