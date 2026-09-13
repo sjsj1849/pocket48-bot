@@ -33,6 +33,7 @@ type Client struct {
 	HTTP        *http.Client
 	APIBase     string
 	AccountBase string
+	Artists     map[int64][]Member
 	mu          sync.Mutex
 }
 

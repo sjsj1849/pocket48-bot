@@ -867,6 +867,10 @@ func (b *Bot) signAllWeiboSuperTopics() (string, bool) {
 }
 
 func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []string) {
+	return b.fetchWeiboSuperCountAllBefore(time.Time{})
+}
+
+func (b *Bot) fetchWeiboSuperCountAllBefore(deadline time.Time) ([]monitor.WeiboSuperCountResult, []string) {
 	topics := b.getWeiboSuperCountTopics()
 	results := make([]monitor.WeiboSuperCountResult, 0, len(topics))
 	failed := make([]string, 0)
@@ -874,8 +878,11 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 	// 第一轮：从 App/Web API 拿数据
 	for oid, topic := range topics {
 		nameHint := strings.TrimSpace(topic.Name)
-		res, err := b.weiboMonitor.FetchSuperCountByOID(oid, nameHint)
+		res, err := fetchWeiboDailyCount(deadline, func() (*monitor.WeiboSuperCountResult, error) {
+			return b.weiboMonitor.FetchSuperCountByOID(oid, nameHint)
+		})
 		if err != nil {
+			log.Printf("[Weibo][Count] unavailable oid=%s name=%q: %v", oid, nameHint, err)
 			name := nameHint
 			if name == "" {
 				name = oid
@@ -928,11 +935,11 @@ func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []stri
 		}
 
 		// 签到回退：含"万"的拿精确排名
-		if !isRounded {
+		if !isRounded || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			continue
 		}
 		signRes, err := b.weiboMonitor.SignWeiboSuperTopic(r.OID)
-		if err != nil {
+		if err != nil || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			continue
 		}
 		if signRes.Rank > 0 && signRes.Rank != r.SignCount {
@@ -1797,9 +1804,9 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	// 实测：签到 ~0.4s/个，App API 拿数据 ~0.4s/个，合计约 1s/个
-	const timePerTopic = 1 * time.Second
-	const safetyBuffer = 5 * time.Second
+	// Web 采集含移动端补充，按每个超话 3 秒预算，并为失败重试预留时间。
+	const timePerTopic = 3 * time.Second
+	const safetyBuffer = 45 * time.Second
 
 	for range ticker.C {
 		if !b.cfg.WeiboSuperCountEnabled {
@@ -1812,9 +1819,9 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		now := time.Now().In(loc)
 		// 动态计算开始时间
 		neededDuration := time.Duration(numTopics)*timePerTopic + safetyBuffer
-		// 最早 23:55:00，最晚 23:59:50（留 10s 给报告生成和快照保存）
-		maxStart := 23*3600 + 59*60 + 50
-		minStart := 23*3600 + 55*60 + 0
+		// 提前启动并设置当日截止时间，避免将次日签到写进昨日快照。
+		maxStart := 23*3600 + 58*60 + 30
+		minStart := 23*3600 + 50*60 + 0
 		startSecond := maxStart - int(neededDuration.Seconds())
 		if startSecond < minStart {
 			startSecond = minStart
@@ -1832,7 +1839,8 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			continue
 		}
 
-		results, failed := b.fetchWeiboSuperCountAll()
+		deadline := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 45, 0, loc)
+		results, failed := b.fetchWeiboSuperCountAllBefore(deadline)
 		yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 		var signBaseline map[string]int
 		var likeBaseline map[string]int

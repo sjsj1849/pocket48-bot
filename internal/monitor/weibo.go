@@ -2570,6 +2570,7 @@ func (m *WeiboMonitor) fetchSuperCountByOIDViaWeb(oid string, nameHint string) (
 		}
 	}
 	if signCount <= 0 {
+		log.Printf("[Weibo][WebCount] sign label missing oid=%s name=%q labels=%q", baseID, name, labelTexts)
 		return nil, fmt.Errorf("未解析到签到人数")
 	}
 	res.SignCount = signCount

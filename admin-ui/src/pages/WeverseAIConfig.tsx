@@ -25,7 +25,7 @@ export function WeverseAIConfig() {
   }
   return <section className="wv-card">
     <h3>AI 聊天整理</h3>
-    <p className="muted">实时消息继续使用 Weverse 翻译。收集新回复和被回复的原文，连续一段时间没有新回复后，补发完整中文翻译，下方附对话总结和必要的梗解释。成员与粉丝的对话按成员分别整理；同一帖子里的成员间互动合并整理。间隔按消息判断，不代表检测到了成员下线；不补扫历史消息，AI 不分析图片内容。</p>
+    <p className="muted">实时消息继续使用 Weverse 翻译。以主帖为单位，结合主帖原文、图片/视频信息和同帖全部已转发历史（跨小时保留），合并该帖里监控到的成员回复粉丝、队友和自己的内容。这些成员连续一段时间没有新回复后，AI 翻译并对照原文逐句审校，再补发本次新增回复的完整中文对话，下方附总结和必要的梗解释。间隔按消息判断，不代表检测到了成员下线；历史仅作上下文，不重复逐条转发；AI 不分析图片或视频内容。</p>
     {error && <p role="alert" className="inline-error">{error}</p>}
     {message && <p role="status" className="wv-notice">{message}</p>}
     {settings && <>
@@ -39,7 +39,7 @@ export function WeverseAIConfig() {
       </div>
       <p className="muted">聊天原文将发送至上方 AI 接口。整理通知沿用订阅的群和 @全体规则；AI 请求在后台串行执行，失败后逐步延长重试间隔，不影响实时转发。</p>
       <button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? '保存中…' : '保存 AI 配置'}</button>
-      <p className="muted">收集中：{data?.active || 0} 段　待整理：{data?.pending || 0} 段{data?.lastSuccess && `　最近完成：${new Date(data.lastSuccess).toLocaleString()}`}</p>
+      <p className="muted">收集中：{data?.active || 0} 帖　待整理：{data?.pending || 0} 帖{data?.lastSuccess && `　最近完成：${new Date(data.lastSuccess).toLocaleString()}`}</p>
       {data?.error && <p className="inline-error">{data.error}</p>}
     </>}
   </section>
