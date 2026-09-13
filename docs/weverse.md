@@ -29,3 +29,6 @@ Hearts2Hearts 的公开社区 ID 是 235，官方目录当前列出 CARMEN、JIW
 自动测试：`go test ./internal/weverse ./internal/logic ./internal/admin`，以及 `node --test sidecar/weibo-auth/weverse-session.test.mjs`。
 
 公开目录实测：`WEVERSE_LIVE_TEST=1 go test ./internal/weverse -run TestLivePublicSearch -v`。这一测试不需要登录，不代表已完成真实发帖、回复及开播测试。
+
+
+回复提醒仅根据回复者身份筛选：回复者属于目标成员就转发，被回复者可以是粉丝、成员本人或其他成员。粉丝发出的回复不转发。提醒显示双方昵称，中文回复在前，原文分隔显示；接口账号标识保存在事件的 memberId / parentMemberId 字段。
