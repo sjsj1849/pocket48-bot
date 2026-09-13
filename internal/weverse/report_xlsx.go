@@ -24,7 +24,7 @@ func (r Report) XLSX() ([]byte, error) {
 		summary = append(summary, reportMemberRow(m))
 		row := []any{m.Name}
 		for _, target := range r.Members {
-			row = append(row, m.Teammates[target.ID])
+			row = append(row, interactionCell(m.ID, target.ID, m.Teammates[target.ID]))
 		}
 		matrix = append(matrix, row)
 	}
@@ -45,7 +45,7 @@ func (r Report) XLSX() ([]byte, error) {
 	for _, m := range r.Members {
 		row := []any{m.Name}
 		for _, target := range r.Members {
-			row = append(row, m.ReplyMembers[target.ID])
+			row = append(row, interactionCell(m.ID, target.ID, m.ReplyMembers[target.ID]))
 		}
 		direct = append(direct, row)
 	}
@@ -110,12 +110,29 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 			}
 			body.WriteString(`</row>`)
 		}
-		body.WriteString(`</sheetData></worksheet>`)
+		body.WriteString(`</sheetData>`)
+		if s.name == "成员汇总" {
+			body.WriteString(reportExcelExtrema(s.rows, 1, len(s.rows)-1, 1))
+		}
+		if s.name == "逐月成员数据" {
+			for start := 1; start < len(s.rows); start += len(rptMonthMembers(s.rows)) {
+				size := len(rptMonthMembers(s.rows))
+				if size == 0 {
+					break
+				}
+				end := start + size - 1
+				if end >= len(s.rows) {
+					end = len(s.rows) - 1
+				}
+				body.WriteString(reportExcelExtrema(s.rows, start, end, 2))
+			}
+		}
+		body.WriteString(`</worksheet>`)
 		if e := write(fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1), body.String()); e != nil {
 			return nil, e
 		}
 	}
-	for _, f := range []struct{ name, body string }{{"[Content_Types].xml", types + `</Types>`}, {"xl/workbook.xml", workbook + `</sheets></workbook>`}, {"xl/_rels/workbook.xml.rels", rels + `</Relationships>`}, {"_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`}} {
+	for _, f := range []struct{ name, body string }{{"[Content_Types].xml", types + `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`}, {"xl/workbook.xml", workbook + `</sheets></workbook>`}, {"xl/styles.xml", reportExcelStyles}, {"xl/_rels/workbook.xml.rels", rels + `<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`}, {"_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`}} {
 		if e := write(f.name, f.body); e != nil {
 			return nil, e
 		}
@@ -130,7 +147,7 @@ func reportColumns() []any {
 	return []any{"成员", "帖子总数", "帖子照片张数", "帖子累计评论", "帖子累计点赞", "回复总数", "回复粉丝", "回复其他成员", "回复自己", "被回复者未知", "视频数", "Moment已采集数", "直播次数", "队友帖下回复数", "已知直播时长秒", "有时长直播数", "确认单人直播时长秒", "确认单人直播数"}
 }
 func reportMemberRow(m MemberCount) []any {
-	return []any{m.Name, m.Posts, m.PostPhotos, EngagementText(m.PostComments, m.CommentPosts, m.Posts), EngagementText(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives, m.TeammateReplies, m.LiveSeconds, m.TimedLives, m.SoloLiveSeconds, m.SoloLives}
+	return []any{m.Name, m.Posts, m.PostPhotos, engagementExcelValue(m.PostComments, m.CommentPosts, m.Posts), engagementExcelValue(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives, m.TeammateReplies, knownDuration(m.LiveSeconds, m.TimedLives, "未取得时长"), m.TimedLives, knownDuration(m.SoloLiveSeconds, m.SoloLives, "未确认单人"), m.SoloLives}
 }
 func countValue(v *int64) any {
 	if v == nil {
@@ -143,4 +160,61 @@ func metricTime(ms int64) string {
 		return "未采集"
 	}
 	return time.UnixMilli(ms).In(ReportLocation).Format("2006-01-02 15:04:05")
+}
+
+func interactionCell(author, target string, count int) any {
+	if author == target {
+		return "/"
+	}
+	if count == 0 {
+		return ""
+	}
+	return count
+}
+
+func engagementExcelValue(value int64, known, posts int) any {
+	if known == posts {
+		return value
+	}
+	return EngagementText(value, known, posts)
+}
+
+// Each monthly block contains one row per member; derive the block size from its month key.
+func rptMonthMembers(rows [][]any) []int {
+	var members []int
+	if len(rows) < 2 {
+		return members
+	}
+	key := rows[1][0]
+	for i := 1; i < len(rows) && rows[i][0] == key; i++ {
+		members = append(members, i)
+	}
+	return members
+}
+func reportExcelExtrema(rows [][]any, start, end, firstColumn int) string {
+	if start >= len(rows) || end < start {
+		return ""
+	}
+	var out strings.Builder
+	for column := firstColumn; column < len(rows[0]); column++ {
+		letter := columnName(column)
+		rangeName := fmt.Sprintf("$%s$%d:$%s$%d", letter, start+1, letter, end+1)
+		cell := fmt.Sprintf("%s%d", letter, start+1)
+		fmt.Fprintf(&out, `<conditionalFormatting sqref="%s%d:%s%d">`, letter, start+1, letter, end+1)
+		for style, fn := range []string{"MAX", "MIN"} {
+			formula := fmt.Sprintf("AND(ISNUMBER(%s),COUNT(%s)&gt;1,MAX(%s)&lt;&gt;MIN(%s),%s=%s(%s))", cell, rangeName, rangeName, rangeName, cell, fn, rangeName)
+			fmt.Fprintf(&out, `<cfRule type="expression" dxfId="%d" priority="%d"><formula>%s</formula></cfRule>`, style, 1+(start*len(rows[0])+column)*2+style, formula)
+		}
+		out.WriteString(`</conditionalFormatting>`)
+	}
+	return out.String()
+}
+
+const reportExcelStyles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FF1D4ED8"/></font></dxf><dxf><font><b/><color rgb="FFC2410C"/></font></dxf></dxfs></styleSheet>`
+
+func knownDuration(seconds int64, count int, missing string) any {
+	if count == 0 {
+		return missing
+	}
+	return seconds
 }
