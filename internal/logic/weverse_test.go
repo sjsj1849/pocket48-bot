@@ -110,3 +110,52 @@ func TestWeverseMediaBeforeFooter(t *testing.T) {
 		}
 	}
 }
+
+func TestAIChunksPreserveStellaMentionRule(t *testing.T) {
+	s := weverse.Subscription{AtAll: true, AtAllMemberIDs: []string{"stella"}}
+	job := &weverse.AIBatch{MemberID: "ian", Author: "IAN", Entries: []weverse.AIEntry{{Body: "reply"}}, Result: strings.Repeat("中文", 2000)}
+	chunks := weverseAISegments(s, job)
+	if len(chunks) < 2 {
+		t.Fatal("long AI message not split")
+	}
+	for _, chunk := range chunks {
+		for _, segment := range chunk {
+			if segment.(napcat.MessageSegment).Type == "at" {
+				t.Fatal("IAN mentioned all")
+			}
+		}
+	}
+	job.MemberID = "stella"
+	chunks = weverseAISegments(s, job)
+	count := 0
+	for i, chunk := range chunks {
+		for _, segment := range chunk {
+			if segment.(napcat.MessageSegment).Type == "at" {
+				count++
+				if i != 0 {
+					t.Fatal("mention repeated in continuation")
+				}
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatal("STELLA missing mention")
+	}
+	job.MemberID = "ian"
+	job.MemberIDs = []string{"ian", "stella"}
+	if weverseAISegments(s, job)[0][0].(napcat.MessageSegment).Type != "at" {
+		t.Fatal("merged Stella replies missing mention")
+	}
+	job.MemberIDs = nil
+	cfg := weverse.Settings{Enabled: true, Subscriptions: []weverse.Subscription{{ID: "s", GroupID: 1, CommunityID: 235, Enabled: true, Comments: true}}}
+	job.SubscriptionID = "s"
+	job.GroupID = 1
+	job.CommunityID = 235
+	if _, ok := aiSubscription(cfg, job); !ok {
+		t.Fatal("valid subscription rejected")
+	}
+	cfg.Subscriptions[0].Comments = false
+	if _, ok := aiSubscription(cfg, job); ok {
+		t.Fatal("disabled replies still forwarded")
+	}
+}

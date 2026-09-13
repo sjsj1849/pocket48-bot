@@ -292,6 +292,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				event.ParentProfileType = str(targetAuthor["profileType"])
 				if name := artistNames[event.ParentMemberID]; name != "" {
 					event.ParentAuthor = name
+					event.ParentProfileType = "ARTIST"
 				}
 				if artist[event.MemberID] {
 					if share := str(obj(x)["shareUrl"]); validShareURL(share, slug) {

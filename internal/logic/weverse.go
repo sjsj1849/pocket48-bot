@@ -85,6 +85,7 @@ func formatWeverseEvent(e weverse.Event) string {
 }
 func (b *Bot) runWeverseLoop(ctx context.Context) {
 	dir := weverse.Dir(b.cfg.ConfigPath())
+	go b.runWeverseAISummaryLoop(ctx, dir)
 	var state weverse.Runtime
 	if e := weverse.Read(dir, "state.json", &state); e != nil {
 		log.Printf("[Weverse] 无法读取去重状态: %v", e)
@@ -161,6 +162,9 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 							}
 						}
 						b.napcat.SendGroupMessage(s.GroupID, weverseMessageSegments(s, event))
+						if err := weverse.CollectAI(dir, s, event, time.Now()); err != nil {
+							log.Printf("[Weverse AI] 无法保存聊天记录: %v", err)
+						}
 						weverse.MarkDelivered(&state, s, event)
 						if err = weverse.Write(dir, "state.json", state); err != nil {
 							status.Error = "消息已入队，但去重状态保存失败"
