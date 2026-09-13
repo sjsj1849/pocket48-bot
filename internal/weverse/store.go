@@ -15,19 +15,21 @@ import (
 // Weverse settings are separate from config.json so refreshed credentials and
 // monitoring cursors cannot be overwritten by other platform config saves.
 type Subscription struct {
-	ID            string   `json:"id"`
-	GroupID       int64    `json:"groupId"`
-	CommunityID   int64    `json:"communityId"`
-	CommunityName string   `json:"communityName"`
-	Slug          string   `json:"slug"`
-	MemberIDs     []string `json:"memberIds"`
-	MemberNames   []string `json:"memberNames"`
-	Posts         bool     `json:"posts"`
-	Comments      bool     `json:"comments"`
-	Live          bool     `json:"live"`
-	Translate     bool     `json:"translate"`
-	AtAll         bool     `json:"atAll"`
-	Enabled       bool     `json:"enabled"`
+	ID               string   `json:"id"`
+	GroupID          int64    `json:"groupId"`
+	CommunityID      int64    `json:"communityId"`
+	CommunityName    string   `json:"communityName"`
+	Slug             string   `json:"slug"`
+	MemberIDs        []string `json:"memberIds"`
+	MemberNames      []string `json:"memberNames"`
+	Posts            bool     `json:"posts"`
+	Comments         bool     `json:"comments"`
+	Live             bool     `json:"live"`
+	Translate        bool     `json:"translate"`
+	AtAll            bool     `json:"atAll"`
+	AtAllMemberIDs   []string `json:"atAllMemberIds,omitempty"`
+	AtAllMemberNames []string `json:"atAllMemberNames,omitempty"`
+	Enabled          bool     `json:"enabled"`
 }
 type Settings struct {
 	Enabled       bool           `json:"enabled"`
@@ -105,6 +107,14 @@ func SaveSettings(dir string, s Settings) error {
 		if len(v.MemberIDs) != len(v.MemberNames) {
 			return fmt.Errorf("成员配置不匹配")
 		}
+		if len(v.AtAllMemberIDs) != len(v.AtAllMemberNames) {
+			return fmt.Errorf("@全体成员的成员配置不匹配")
+		}
+		for _, id := range v.AtAllMemberIDs {
+			if !idRE.MatchString(id) {
+				return fmt.Errorf("@全体成员的成员标识无效")
+			}
+		}
 		for _, id := range v.MemberIDs {
 			if !idRE.MatchString(id) {
 				return fmt.Errorf("成员标识无效")
@@ -160,4 +170,19 @@ func sessionLock(ctx context.Context, dir string) (func(), error) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func (s Subscription) MentionsAll(memberID string) bool {
+	if !s.AtAll {
+		return false
+	}
+	if len(s.AtAllMemberIDs) == 0 {
+		return true
+	}
+	for _, id := range s.AtAllMemberIDs {
+		if id == memberID {
+			return true
+		}
+	}
+	return false
 }
