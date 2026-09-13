@@ -159,3 +159,22 @@ func TestAIChunksPreserveStellaMentionRule(t *testing.T) {
 		t.Fatal("disabled replies still forwarded")
 	}
 }
+
+func TestAIPostSummaryFooterAndContextDoNotMentionQuotedStella(t *testing.T) {
+	s := weverse.Subscription{AtAll: true, AtAllMemberIDs: []string{"stella"}}
+	job := &weverse.AIBatch{MemberID: "ian", Author: "IAN", PostContext: &weverse.AIPostContext{Author: "STELLA", MemberID: "stella", URL: "https://weverse.io/hearts2hearts/artist/p"}, Entries: []weverse.AIEntry{{Time: 100000}}, Result: "中文对话\n\n这段在聊什么：\n总结"}
+	chunks := weverseAISegments(s, job)
+	var text strings.Builder
+	for _, chunk := range chunks {
+		for _, v := range chunk {
+			segment := v.(napcat.MessageSegment)
+			if segment.Type == "at" {
+				t.Fatal("quoted root author caused mention")
+			}
+			text.WriteString(segment.Data["text"])
+		}
+	}
+	if !strings.HasSuffix(text.String(), "https://weverse.io/hearts2hearts/artist/p\n\n1970-01-01 08:01:40") {
+		t.Fatal("ambiguous post footer", text.String())
+	}
+}

@@ -58,6 +58,11 @@ func weverseEventBody(e weverse.Event) string {
 	if e.Translation == "" && e.ParentTranslation == "" && e.TranslationError != "" {
 		lines = append(lines, "（翻译暂不可用，已保留原文）")
 	}
+	for _, video := range e.Videos {
+		if video.URL == "" {
+			lines = append(lines, "（含视频，暂未取得播放文件，请打开原帖观看）")
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -85,6 +90,12 @@ func formatWeverseEvent(e weverse.Event) string {
 }
 func (b *Bot) runWeverseLoop(ctx context.Context) {
 	dir := weverse.Dir(b.cfg.ConfigPath())
+	history, historyErr := weverse.OpenHistory(dir)
+	if historyErr != nil {
+		log.Printf("[Weverse] 无法打开原文历史记录: %v", historyErr)
+		return
+	}
+	defer history.Close()
 	go b.runWeverseAISummaryLoop(ctx, dir)
 	var state weverse.Runtime
 	if e := weverse.Read(dir, "state.json", &state); e != nil {
@@ -108,6 +119,14 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 				ends, err = c.LiveEndEvents(cycle, &state, cfg, events, time.Now())
 				if err == nil {
 					events = append(events, ends...)
+				}
+			}
+			if err == nil {
+				err = history.Record(events, "")
+				for cid, members := range c.Artists {
+					if err == nil {
+						err = history.SaveMembers(cid, members)
+					}
 				}
 			}
 			status.LastCheck = time.Now().Format(time.RFC3339)
@@ -142,6 +161,7 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 						if cycle.Err() != nil {
 							break
 						}
+						c.ResolveEventVideos(cycle, &event)
 						if s.Translate {
 							if cached, ok := translated[event.ID]; ok {
 								event = cached
@@ -162,6 +182,9 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 							}
 						}
 						b.napcat.SendGroupMessage(s.GroupID, weverseMessageSegments(s, event))
+						if err := history.Record([]weverse.Event{event}, s.ID); err != nil {
+							log.Printf("[Weverse] 无法保存已转发原文: %v", err)
+						}
 						if err := weverse.CollectAI(dir, s, event, time.Now()); err != nil {
 							log.Printf("[Weverse AI] 无法保存聊天记录: %v", err)
 						}
@@ -211,6 +234,14 @@ func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface
 	segments = append(segments, napcat.TextSegment(body))
 	for _, image := range e.Images {
 		segments = append(segments, napcat.ImageSegment(image))
+	}
+	for _, video := range e.Videos {
+		if video.URL != "" {
+			segments = append(segments, napcat.VideoSegment(video.URL, video.CoverURL))
+		}
+		if video.URL == "" && video.CoverURL != "" {
+			segments = append(segments, napcat.ImageSegment(video.CoverURL))
+		}
 	}
 	if footer := weverseEventFooter(e); footer != "" {
 		segments = append(segments, napcat.TextSegment("\n\n"+footer))

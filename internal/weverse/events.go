@@ -13,29 +13,31 @@ import (
 )
 
 type Event struct {
-	ID                string   `json:"id"`
-	Kind              string   `json:"kind"`
-	CommunityID       int64    `json:"communityId"`
-	MemberID          string   `json:"memberId"`
-	Author            string   `json:"author"`
-	Body              string   `json:"body"`
-	ParentCommentID   string   `json:"parentCommentId,omitempty"`
-	ParentBody        string   `json:"parentBody,omitempty"`
-	ParentAuthor      string   `json:"parentAuthor,omitempty"`
-	ParentMemberID    string   `json:"parentMemberId,omitempty"`
-	ParentProfileType string   `json:"parentProfileType,omitempty"`
-	Translation       string   `json:"translation,omitempty"`
-	ParentTranslation string   `json:"parentTranslation,omitempty"`
-	TranslationError  string   `json:"translationError,omitempty"`
-	URL               string   `json:"url"`
-	Images            []string `json:"images,omitempty"`
-	CoverURL          string   `json:"coverUrl,omitempty"`
-	LiveStartedAt     int64    `json:"liveStartedAt,omitempty"`
-	LiveEndedAt       int64    `json:"liveEndedAt,omitempty"`
-	LiveDuration      int64    `json:"liveDuration,omitempty"`
-	Time              int64    `json:"time"`
-	PostID            string   `json:"postId"`
-	CommentID         string   `json:"commentId,omitempty"`
+	ID                string            `json:"id"`
+	Kind              string            `json:"kind"`
+	CommunityID       int64             `json:"communityId"`
+	MemberID          string            `json:"memberId"`
+	Author            string            `json:"author"`
+	Body              string            `json:"body"`
+	ParentCommentID   string            `json:"parentCommentId,omitempty"`
+	ParentBody        string            `json:"parentBody,omitempty"`
+	ParentAuthor      string            `json:"parentAuthor,omitempty"`
+	ParentMemberID    string            `json:"parentMemberId,omitempty"`
+	ParentProfileType string            `json:"parentProfileType,omitempty"`
+	PostContext       *AIPostContext    `json:"postContext,omitempty"`
+	Translation       string            `json:"translation,omitempty"`
+	ParentTranslation string            `json:"parentTranslation,omitempty"`
+	TranslationError  string            `json:"translationError,omitempty"`
+	URL               string            `json:"url"`
+	Images            []string          `json:"images,omitempty"`
+	Videos            []VideoAttachment `json:"videos,omitempty"`
+	CoverURL          string            `json:"coverUrl,omitempty"`
+	LiveStartedAt     int64             `json:"liveStartedAt,omitempty"`
+	LiveEndedAt       int64             `json:"liveEndedAt,omitempty"`
+	LiveDuration      int64             `json:"liveDuration,omitempty"`
+	Time              int64             `json:"time"`
+	PostID            string            `json:"postId"`
+	CommentID         string            `json:"commentId,omitempty"`
 }
 
 var tagRE = regexp.MustCompile(`<[^>]*>`)
@@ -77,6 +79,9 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 	}
 	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
 	e.Images = eventImages(p)
+	if kind == "post" {
+		e.Videos = eventVideos(p)
+	}
 	if kind == "live" {
 		e.LiveStartedAt = timestamp
 		if title := plain(text(obj(ext["mediaInfo"]), "title")); title != "" {
@@ -111,6 +116,7 @@ func eventFromComment(p Object, postID, slug string, cid int64, parentBody strin
 		event.ParentCommentID = str(obj(parent["data"])["commentId"])
 	}
 	event.Images = eventImages(p)
+	event.Videos = eventVideos(p)
 	return event, nil
 }
 
@@ -182,6 +188,10 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 		if err != nil {
 			return nil, err
 		}
+		if c.Artists == nil {
+			c.Artists = map[int64][]Member{}
+		}
+		c.Artists[cid] = members
 		artist := map[string]bool{}
 		artistNames := map[string]string{}
 		for _, m := range members {
@@ -246,63 +256,7 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 		parents := map[string]Object{}
 		commentParents := map[string]Object{}
 		addComments := func(items []any, postID, slug string, parent Object) error {
-			for _, x := range items {
-				item := obj(x)
-				// Check the actual author, not the notification type or text.
-				if !artist[text(obj(item["author"]), "memberId", "id")] {
-					continue
-				}
-				relation := obj(item["parent"])
-				target := obj(relation["data"])
-				switch str(relation["type"]) {
-				case "POST":
-					if text(obj(target["author"]), "memberId", "id") == "" {
-						target = parent
-					}
-				case "COMMENT":
-					id := str(target["commentId"])
-					if text(obj(target["author"]), "memberId", "id") == "" || str(obj(target["author"])["profileType"]) == "" {
-						if idRE.MatchString(id) {
-							cached, ok := commentParents[id]
-							if !ok {
-								if err := c.call(ctx, "/comment/v1.0/comment-"+id+"?fieldSet=commentV1", true, &cached); err != nil {
-									if !errors.Is(err, ErrNotFound) {
-										return err
-									}
-								}
-								commentParents[id] = cached
-							}
-							target = cached
-						}
-					}
-				default:
-					target = nil // Keep the member reply without guessing its context.
-				}
-				event, err := eventFromComment(item, postID, slug, cid, plain(text(target, "plainBody", "body")))
-				if err != nil {
-					return err
-				}
-				targetAuthor := obj(target["author"])
-				event.ParentBody = plain(text(target, "plainBody", "body"))
-				event.ParentMemberID = text(targetAuthor, "memberId", "id")
-				event.ParentAuthor = text(obj(targetAuthor["artistOfficialProfile"]), "officialName")
-				if event.ParentAuthor == "" {
-					event.ParentAuthor = str(targetAuthor["profileName"])
-				}
-				event.ParentProfileType = str(targetAuthor["profileType"])
-				if name := artistNames[event.ParentMemberID]; name != "" {
-					event.ParentAuthor = name
-					event.ParentProfileType = "ARTIST"
-				}
-				if artist[event.MemberID] {
-					if share := str(obj(x)["shareUrl"]); validShareURL(share, slug) {
-						event.URL = share
-					}
-					event.Author = artistNames[event.MemberID]
-					all[event.ID] = event
-				}
-			}
-			return nil
+			return c.addThreadComments(ctx, items, postID, slug, cid, parent, artistNames, commentParents, all)
 		}
 		for _, v := range notifications {
 			n := obj(v)
@@ -463,4 +417,85 @@ func eventImages(p Object) []string {
 		add(obj(v))
 	}
 	return images
+}
+
+// PostContext fetches the original post for pending batches written by older versions.
+func (c *Client) PostContext(ctx context.Context, postID, slug string, cid int64) (*AIPostContext, error) {
+	if !idRE.MatchString(postID) || !slugRE.MatchString(slug) {
+		return nil, fmt.Errorf("主帖标识无效")
+	}
+	members, err := c.Members(ctx, cid)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]string{}
+	for _, m := range members {
+		names[m.ID] = m.Name
+	}
+	var p Object
+	if err := c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &p); err != nil {
+		return nil, err
+	}
+	return aiPostContext(p, postID, slug, names), nil
+}
+
+func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slug string, cid int64, parent Object, artistNames map[string]string, commentParents map[string]Object, all map[string]Event) error {
+	for _, x := range items {
+		item := obj(x)
+		// Check the actual author, not the notification type or text.
+		if artistNames[text(obj(item["author"]), "memberId", "id")] == "" {
+			continue
+		}
+		relation := obj(item["parent"])
+		target := obj(relation["data"])
+		switch str(relation["type"]) {
+		case "POST":
+			if text(obj(target["author"]), "memberId", "id") == "" {
+				target = parent
+			}
+		case "COMMENT":
+			id := str(target["commentId"])
+			if text(obj(target["author"]), "memberId", "id") == "" || str(obj(target["author"])["profileType"]) == "" {
+				if idRE.MatchString(id) {
+					cached, ok := commentParents[id]
+					if !ok {
+						if err := c.call(ctx, "/comment/v1.0/comment-"+id+"?fieldSet=commentV1", true, &cached); err != nil {
+							if !errors.Is(err, ErrNotFound) {
+								return err
+							}
+						}
+						commentParents[id] = cached
+					}
+					target = cached
+				}
+			}
+		default:
+			target = nil // Keep the member reply without guessing its context.
+		}
+		event, err := eventFromComment(item, postID, slug, cid, plain(text(target, "plainBody", "body")))
+		if err != nil {
+			return err
+		}
+		targetAuthor := obj(target["author"])
+		event.ParentBody = plain(text(target, "plainBody", "body"))
+		event.ParentMemberID = text(targetAuthor, "memberId", "id")
+		event.ParentAuthor = text(obj(targetAuthor["artistOfficialProfile"]), "officialName")
+		if event.ParentAuthor == "" {
+			event.ParentAuthor = str(targetAuthor["profileName"])
+		}
+		event.ParentProfileType = str(targetAuthor["profileType"])
+		event.PostContext = aiPostContext(parent, postID, slug, artistNames)
+		if name := artistNames[event.ParentMemberID]; name != "" {
+			event.ParentAuthor = name
+			event.ParentProfileType = "ARTIST"
+		}
+		if artistNames[event.MemberID] != "" {
+			if share := str(obj(x)["shareUrl"]); validShareURL(share, slug) {
+				event.URL = share
+			}
+			event.Author = artistNames[event.MemberID]
+			all[event.ID] = event
+		}
+	}
+	return nil
 }

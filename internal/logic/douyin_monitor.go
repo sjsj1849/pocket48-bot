@@ -1515,7 +1515,6 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 	segments := make([]interface{}, 0, 12)
 	if item.AtAll {
 		segments = append(segments, napcat.AtSegment("all"))
-		segments = append(segments, napcat.TextSegment("\n"))
 	}
 	segments = append(segments, napcat.TextSegment(strings.Join(lines, "\n")+"\n"))
 	images := post.Images

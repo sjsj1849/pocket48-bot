@@ -6,6 +6,7 @@ import (
 	"log"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/weverse"
+	"strings"
 	"time"
 )
 
@@ -21,12 +22,28 @@ func aiSubscription(cfg weverse.Settings, job *weverse.AIBatch) (weverse.Subscri
 }
 
 func weverseAISegments(s weverse.Subscription, job *weverse.AIBatch) [][]interface{} {
-	text := []rune(fmt.Sprintf("【%s|Weverse】\nAI 聊天整理（%d 条回复）\n\n%s", job.Author, len(job.Entries), job.Result))
+	body := fmt.Sprintf("【%s|Weverse】\nAI 帖子整理（%d 条回复）\n\n%s", job.Author, len(job.Entries), job.Result)
+	if len(job.History) > 0 {
+		body = fmt.Sprintf("【%s|Weverse】\nAI 帖子整理（%d 条新回复，结合 %d 条历史回复）\n\n%s", job.Author, len(job.Entries), len(job.History), job.Result)
+	}
+	if job.PostContext != nil && job.PostContext.URL != "" {
+		var last int64
+		for _, entry := range job.Entries {
+			if entry.Time > last {
+				last = entry.Time
+			}
+		}
+		body += "\n\n" + weverseEventFooter(weverse.Event{URL: job.PostContext.URL, Time: last})
+	}
+	text := []rune(body)
 	var messages [][]interface{}
 	for len(text) > 0 {
 		n := len(text)
 		if n > 1800 {
 			n = 1800
+			if line := strings.LastIndex(string(text[:n]), "\n"); line > 0 {
+				n = len([]rune(string(text[:n])[:line+1]))
+			}
 		}
 		segments := []interface{}{}
 		mentionAll := false
@@ -77,7 +94,27 @@ func (b *Bot) runWeverseAISummaryLoop(ctx context.Context, dir string) {
 		}
 		if job.Result == "" {
 			callCtx, cancel := context.WithTimeout(ctx, ai.RequestTimeout())
-			job.Result, err = weverse.SummarizeAI(callCtx, ai, *job)
+			if history, openErr := weverse.OpenHistory(dir); openErr == nil {
+				past, readErr := history.ForwardedPost(job.SubscriptionID, job.CommunityID, job.PostID)
+				_ = history.Close()
+				err = readErr
+				job.History = weverse.AIHistory(past, job.Entries)
+			} else {
+				err = openErr
+			}
+			if err == nil && job.PostContext == nil {
+				if sub, ok := aiSubscription(cfg, job); ok {
+					client := weverse.NewClient(dir, cfg.ProxyURL)
+					job.PostContext, err = client.PostContext(callCtx, job.PostID, sub.Slug, job.CommunityID)
+					client.HTTP.CloseIdleConnections()
+				}
+			}
+			if err == nil {
+				err = weverse.SaveAIContext(dir, job)
+			}
+			if err == nil {
+				job.Result, err = weverse.SummarizeAI(callCtx, ai, *job)
+			}
 			cancel()
 			if ctx.Err() != nil {
 				return
