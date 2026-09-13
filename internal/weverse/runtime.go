@@ -87,7 +87,10 @@ func (c *Client) TranslateEvent(ctx context.Context, e *Event) {
 		return result, nil
 	}
 	var err error
-	if e.Kind == "comment" {
+	e.TranslationError = ""
+	if e.Body == "" {
+		e.Translation = ""
+	} else if e.Kind == "comment" {
 		e.Translation, err = translate("comment", e.CommentID)
 	} else {
 		e.Translation, err = translate("post", e.PostID)

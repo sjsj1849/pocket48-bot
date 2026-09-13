@@ -207,9 +207,14 @@ func TestEventsChangedNotificationAndNestedReplies(t *testing.T) {
 		case "/post/v1.0/post-1-2":
 			respond(w, Object{"body": "fan post"})
 		case "/comment/v1.0/post-1-2/artistComments":
-			respond(w, Object{"data": []any{comment("first")}})
+			respond(w, Object{"data": []any{
+				comment("first"),
+				Object{"commentId": "peer", "author": artist, "body": "reply to another member", "parent": Object{"type": "POST", "data": Object{"author": Object{"memberId": "jiwoo", "profileName": "JIWOO", "profileType": "ARTIST"}}}},
+				Object{"commentId": "self", "author": artist, "body": "member supplement", "parent": Object{"type": "POST", "data": Object{"author": artist}}},
+				Object{"commentId": "fan-reply", "author": Object{"memberId": "fan", "profileType": "FAN"}, "body": "fan reply", "parent": Object{"type": "COMMENT", "data": Object{"commentId": "first", "author": artist}}},
+			}})
 		case "/comment/v1.0/comment-fan":
-			respond(w, Object{"commentId": "fan", "author": Object{"memberId": "fan"}, "body": "잘 지내?", "createdAt": now})
+			respond(w, Object{"commentId": "fan", "author": Object{"memberId": "fan", "profileType": "FAN", "profileName": "粉丝昵称"}, "body": "잘 지내?", "createdAt": now})
 		case "/comment/v1.0/comment-fan/artistComments":
 			items := []any{comment("first")}
 			if revision.Load() > 0 {
@@ -223,15 +228,30 @@ func TestEventsChangedNotificationAndNestedReplies(t *testing.T) {
 	})
 	mustWrite(t, c.Dir, "settings.json", Settings{Subscriptions: []Subscription{{ID: "s", CommunityID: 235, Slug: "hearts2hearts", Comments: true, Enabled: true}}})
 	first, err := c.Events(context.Background())
-	if err != nil || len(first) != 1 {
+	if err != nil || len(first) != 3 {
 		t.Fatalf("%v %v", first, err)
 	}
-	if first[0].ParentCommentID != "fan" || first[0].ParentBody != "잘 지내?" || first[0].Body != "안녕\n하트" {
+	foundFanReply, foundSelf, foundPeer := false, false, false
+	for _, e := range first {
+		if e.CommentID == "first" {
+			foundFanReply = e.ParentCommentID == "fan" && e.ParentBody == "잘 지내?" && e.Body == "안녕\n하트"
+		}
+		if e.CommentID == "peer" {
+			foundPeer = e.ParentAuthor == "JIWOO"
+		}
+		if e.CommentID == "self" {
+			foundSelf = true
+		}
+		if e.MemberID != "carmen" {
+			t.Fatal("fan-authored reply forwarded", e)
+		}
+	}
+	if !foundFanReply || !foundSelf || !foundPeer {
 		t.Fatal(first)
 	}
 	revision.Store(1)
 	second, err := c.Events(context.Background())
-	if err != nil || len(second) != 2 {
+	if err != nil || len(second) != 4 {
 		t.Fatalf("new reply in same notification missed: %v %v", second, err)
 	}
 }

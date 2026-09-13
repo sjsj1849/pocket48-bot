@@ -22,21 +22,38 @@ func formatWeverseEvent(e weverse.Event) string {
 	if e.Kind == "live" {
 		lines = append(lines, "已开播")
 	}
-	if e.ParentBody != "" {
-		lines = append(lines, "原文上下文：", e.ParentBody)
-		if e.ParentTranslation != "" {
-			lines = append(lines, "中文（机器翻译）：", e.ParentTranslation)
+
+	author := strings.TrimSpace(e.Author)
+	if author == "" {
+		author = "成员"
+	}
+	fan := strings.TrimSpace(e.ParentAuthor)
+	if fan == "" {
+		fan = "原帖"
+	}
+	say := func(name, body string) {
+		if body != "" {
+			lines = append(lines, name+"："+body)
 		}
-		lines = append(lines, "回复：")
 	}
-	if e.Body != "" {
-		lines = append(lines, e.Body)
+	if e.Translation != "" || e.ParentTranslation != "" {
+		lines = append(lines, "", "中文")
+		say(author, e.Translation)
+		if e.Translation == "" && e.Body != "" {
+			say(author, "（译文暂不可用，请看下方原文）")
+		}
+		say(fan, e.ParentTranslation)
+		if e.ParentTranslation == "" && e.ParentBody != "" {
+			say(fan, "（译文暂不可用，请看下方原文）")
+		}
+		lines = append(lines, "", "────────", "原文")
 	}
-	if e.Translation != "" {
-		lines = append(lines, "中文（机器翻译）：", e.Translation)
-	} else if e.TranslationError != "" {
+	say(author, e.Body)
+	say(fan, e.ParentBody)
+	if e.Translation == "" && e.ParentTranslation == "" && e.TranslationError != "" {
 		lines = append(lines, "（翻译暂不可用，已保留原文）")
 	}
+	lines = append(lines, "", "────────")
 	lines = append(lines, e.URL)
 	if e.Time > 0 {
 		loc, _ := time.LoadLocation("Asia/Shanghai")
