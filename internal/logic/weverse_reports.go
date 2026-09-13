@@ -21,12 +21,45 @@ func WeverseReportHTML(r weverse.Report) string {
 	}
 	header := `<tr><th>成员</th><th>帖子</th><th>帖内照片</th><th>累计评论</th><th>累计点赞</th><th>回复</th><th>粉丝</th><th>队友</th><th>自己</th><th>未知</th><th>视频</th><th>Moment</th><th>直播</th></tr>`
 	table := func(members []weverse.MemberCount) {
+		rows := make([][]reportMetricCell, len(members))
+		for i, m := range members {
+			rows[i] = []reportMetricCell{metric(int64(m.Posts)), metric(int64(m.PostPhotos)), {Text: weverse.EngagementText(m.PostComments, m.CommentPosts, m.Posts), Value: m.PostComments, Known: m.CommentPosts == m.Posts}, {Text: weverse.EngagementText(m.PostLikes, m.LikePosts, m.Posts), Value: m.PostLikes, Known: m.LikePosts == m.Posts}, metric(int64(m.Replies)), metric(int64(m.FanReplies)), metric(int64(m.MemberReplies)), metric(int64(m.SelfReplies)), metric(int64(m.UnknownReplies)), metric(int64(m.Videos)), {Text: fmt.Sprintf("%d*", m.Moments), Value: int64(m.Moments), Known: true}, metric(int64(m.Lives))}
+		}
 		body.WriteString(`<table><thead>` + header + `</thead><tbody>`)
-		for _, m := range members {
-			fmt.Fprintf(&body, `<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d*</td><td>%d</td></tr>`, html.EscapeString(m.Name), m.Posts, m.PostPhotos, weverse.EngagementText(m.PostComments, m.CommentPosts, m.Posts), weverse.EngagementText(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives)
+		for i, m := range members {
+			fmt.Fprintf(&body, `<tr><td>%s</td>`, html.EscapeString(m.Name))
+			for column, cell := range rows[i] {
+				min, max, found := int64(0), int64(0), false
+				for _, row := range rows {
+					value := row[column]
+					if !value.Known {
+						continue
+					}
+					if !found || value.Value < min {
+						min = value.Value
+					}
+					if !found || value.Value > max {
+						max = value.Value
+					}
+					found = true
+				}
+				class, title := "", ""
+				if cell.Known && found && min != max {
+					if cell.Value == max {
+						class = "metric-max"
+						title = "本列最高（含并列）"
+					} else if cell.Value == min {
+						class = "metric-min"
+						title = "本列最低（含并列）"
+					}
+				}
+				fmt.Fprintf(&body, `<td class="%s" title="%s">%s</td>`, class, title, html.EscapeString(cell.Text))
+			}
+			body.WriteString(`</tr>`)
 		}
 		body.WriteString(`</tbody></table>`)
 	}
+	body.WriteString(`<p class="note"><span class="metric-max">蓝色：本列最高</span>　<span class="metric-min">橙色：本列最低</span>；并列均标注，整列相同不标注；缺失或部分互动值不参与比较。</p>`)
 	table(r.Members)
 	for _, month := range r.Months {
 		fmt.Fprintf(&body, `<h2>%s · 逐月对照</h2>`, html.EscapeString(month.Month))
@@ -37,31 +70,38 @@ func WeverseReportHTML(r weverse.Report) string {
 		}
 		table(month.Members)
 	}
-	body.WriteString(`<h2>直接回复了哪位成员</h2><ul>`)
-	for _, m := range r.Members {
-		var parts []string
-		for _, target := range r.Members {
-			if count := m.ReplyMembers[target.ID]; count > 0 {
-				parts = append(parts, fmt.Sprintf("%s：%d", target.Name, count))
+	matrix := func(title, axis string, direct bool) {
+		fmt.Fprintf(&body, `<h2>%s</h2><p class="note">行：回复者；列：%s。/ 表示自己，空白表示已采集记录中没有互动。</p><table class="interaction-matrix"><thead><tr><th>回复者 ↓ / %s →</th>`, title, axis, axis)
+		for _, m := range r.Members {
+			fmt.Fprintf(&body, `<th>%s</th>`, html.EscapeString(m.Name))
+		}
+		body.WriteString(`</tr></thead><tbody>`)
+		for _, m := range r.Members {
+			fmt.Fprintf(&body, `<tr><th scope="row">%s</th>`, html.EscapeString(m.Name))
+			for _, target := range r.Members {
+				text := ""
+				class := ""
+				if m.ID == target.ID {
+					text = "/"
+					class = "matrix-self"
+				} else {
+					count := m.Teammates[target.ID]
+					if direct {
+						count = m.ReplyMembers[target.ID]
+					}
+					if count > 0 {
+						text = fmt.Sprint(count)
+					}
+				}
+				fmt.Fprintf(&body, `<td class="%s">%s</td>`, class, text)
 			}
+			body.WriteString(`</tr>`)
 		}
-		if len(parts) > 0 {
-			fmt.Fprintf(&body, `<li>%s → %s</li>`, html.EscapeString(m.Name), html.EscapeString(strings.Join(parts, "；")))
-		}
+		body.WriteString(`</tbody></table>`)
 	}
-	body.WriteString(`</ul><h2>在哪位队友的帖子下回复</h2><ul>`)
-	for _, m := range r.Members {
-		var parts []string
-		for _, target := range r.Members {
-			if count := m.Teammates[target.ID]; count > 0 {
-				parts = append(parts, fmt.Sprintf("%s：%d", target.Name, count))
-			}
-		}
-		if len(parts) > 0 {
-			fmt.Fprintf(&body, `<li>%s → %s</li>`, html.EscapeString(m.Name), html.EscapeString(strings.Join(parts, "；")))
-		}
-	}
-	body.WriteString(`</ul><h2>直播时长</h2><table><tr><th>成员</th><th>已知直播时长 / 有时长场次</th><th>已确认单人直播时长 / 场次</th></tr>`)
+	matrix("直接回复了哪位成员", "被回复成员", true)
+	matrix("在哪位队友的帖子下回复", "主帖作者", false)
+	body.WriteString(`<h2>直播时长</h2><table><tr><th>成员</th><th>已知直播时长 / 有时长场次</th><th>已确认单人直播时长 / 场次</th></tr>`)
 	for _, m := range r.Members {
 		total, solo := "未取得时长", "未确认单人"
 		if m.TimedLives > 0 {
@@ -70,10 +110,46 @@ func WeverseReportHTML(r weverse.Report) string {
 		if m.SoloLives > 0 {
 			solo = fmt.Sprintf("%d分%d秒 / %d场", m.SoloLiveSeconds/60, m.SoloLiveSeconds%60, m.SoloLives)
 		}
-		fmt.Fprintf(&body, `<tr><td>%s</td><td>%s</td><td>%s</td></tr>`, html.EscapeString(m.Name), total, solo)
+		durationClass := func(seconds int64, solo bool) string {
+			min, max, found := int64(0), int64(0), false
+			for _, row := range r.Members {
+				value, count := row.LiveSeconds, row.TimedLives
+				if solo {
+					value, count = row.SoloLiveSeconds, row.SoloLives
+				}
+				if count == 0 {
+					continue
+				}
+				if !found || value < min {
+					min = value
+				}
+				if !found || value > max {
+					max = value
+				}
+				found = true
+			}
+			if min == max {
+				return ""
+			}
+			if seconds == max {
+				return "metric-max"
+			}
+			if seconds == min {
+				return "metric-min"
+			}
+			return ""
+		}
+		totalClass, soloClass := "", ""
+		if m.TimedLives > 0 {
+			totalClass = durationClass(m.LiveSeconds, false)
+		}
+		if m.SoloLives > 0 {
+			soloClass = durationClass(m.SoloLiveSeconds, true)
+		}
+		fmt.Fprintf(&body, `<tr><td>%s</td><td class="%s">%s</td><td class="%s">%s</td></tr>`, html.EscapeString(m.Name), totalClass, total, soloClass, solo)
 	}
 	body.WriteString(`</table>`)
-	return fmt.Sprintf(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f7fb;color:#172033;margin:0;padding:16px}#report-card{max-width:880px;margin:auto;background:white;padding:20px}h1{font-size:23px}h2{font-size:17px;margin:24px 0 12px}table{width:100%%;border-collapse:collapse;font-size:11px}th,td{padding:9px 4px;border-bottom:1px solid #e7ebf1;text-align:right}th{background:#edf4ff}td:first-child,th:first-child{text-align:left}tr:nth-child(even){background:#f8fafc}.note{font-size:12px;line-height:1.8;color:#667085;white-space:pre-line}ul{line-height:1.8;font-size:13px}</style></head><body><article id="report-card"><h1>%s · %s</h1><p class="note">%s 至 %s（北京时间） · %d 位成员
+	return fmt.Sprintf(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f7fb;color:#172033;margin:0;padding:16px}#report-card{max-width:880px;margin:auto;background:white;padding:20px}h1{font-size:23px}h2{font-size:17px;margin:24px 0 12px}table{width:100%%;border-collapse:collapse;font-size:11px}th,td{padding:9px 4px;border-bottom:1px solid #e7ebf1;text-align:right}th{background:#edf4ff}td:first-child,th:first-child{text-align:left}tr:nth-child(even){background:#f8fafc}.metric-max{color:#1d4ed8;background:#eff6ff;font-weight:800}.metric-min{color:#c2410c;background:#fff7ed;font-weight:800}.interaction-matrix{table-layout:fixed}.interaction-matrix th,.interaction-matrix td{text-align:center;border:1px solid #dce3ee;height:25px}.interaction-matrix th:first-child{width:130px;text-align:left}.interaction-matrix .matrix-self{color:#8994a5;background:#eef1f5}.note{font-size:12px;line-height:1.8;color:#667085;white-space:pre-line}ul{line-height:1.8;font-size:13px}</style></head><body><article id="report-card"><h1>%s · %s</h1><p class="note">%s 至 %s（北京时间） · %d 位成员
 * Moment 为已采集数量；历史可能过期。整张图中各月均采用同一统计口径。</p>%s<h2>统计范围</h2><p class="note">%s</p><p class="note">Excel 含逐月成员数据、直接回复矩阵、队友主帖矩阵、活动原文和累计互动采集时间。</p></article></body></html>`, html.EscapeString(r.Community), html.EscapeString(r.DisplayTitle()), r.Period.Start.Format("2006-01-02"), r.Period.End.Add(-time.Second).Format("2006-01-02"), len(r.Members), body.String(), html.EscapeString(r.CoverageNote()))
 }
 func SendWeverseReport(cfg *config.Config, r weverse.Report) error {
@@ -216,4 +292,14 @@ func renderWeverseReportPNG(body string) ([]byte, error) {
 		return nil, fmt.Errorf("Weverse 报表图片为空")
 	}
 	return data, err
+}
+
+type reportMetricCell struct {
+	Text  string
+	Value int64
+	Known bool
+}
+
+func metric(value int64) reportMetricCell {
+	return reportMetricCell{Text: fmt.Sprint(value), Value: value, Known: true}
 }
