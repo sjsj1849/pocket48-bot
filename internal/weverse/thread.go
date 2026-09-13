@@ -10,20 +10,32 @@ import (
 // ThreadEvents reads the root and all visible artist replies, without changing
 // realtime cursors or marking the user's notifications as read.
 func (c *Client) ThreadEvents(ctx context.Context, cid int64, slug, postID string) ([]Event, error) {
+	return c.threadEvents(ctx, cid, slug, postID, nil, time.UnixMilli(1), time.Time{})
+}
+func (c *Client) threadEvents(ctx context.Context, cid int64, slug, postID string, post Object, since, end time.Time) ([]Event, error) {
 	if !idRE.MatchString(postID) || !slugRE.MatchString(slug) {
 		return nil, fmt.Errorf("帖子标识无效")
 	}
-	members, err := c.Members(ctx, cid)
-	if err != nil {
-		return nil, err
+	members := c.Artists[cid]
+	var err error
+	if len(members) == 0 {
+		members, err = c.Members(ctx, cid)
+		if err != nil {
+			return nil, err
+		}
+		if c.Artists == nil {
+			c.Artists = map[int64][]Member{}
+		}
+		c.Artists[cid] = members
 	}
 	names := map[string]string{}
 	for _, m := range members {
 		names[m.ID] = m.Name
 	}
-	var post Object
-	if err = c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &post); err != nil {
-		return nil, err
+	if post == nil {
+		if err = c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &post); err != nil {
+			return nil, err
+		}
 	}
 	// Verify the fetched root belongs to the requested community when supplied.
 	if actual := num(post["communityId"]); actual != 0 && actual != cid {
@@ -39,11 +51,18 @@ func (c *Client) ThreadEvents(ctx context.Context, cid int64, slug, postID strin
 		root.PostContext = aiPostContext(post, postID, slug, names)
 		all[root.ID] = root
 	}
-	items, err := c.pages(ctx, "/comment/v1.0/post-"+postID+"/artistComments?fieldSet=postArtistCommentsV1&sortType=LATEST&limit=100", "after", "createdAt", time.UnixMilli(1))
+	items, err := c.pages(ctx, "/comment/v1.0/post-"+postID+"/artistComments?fieldSet=postArtistCommentsV1&sortType=LATEST&limit=100", "after", "createdAt", since)
 	if err != nil {
 		return nil, err
 	}
-	if err = c.addThreadComments(ctx, items, postID, slug, cid, post, names, map[string]Object{}, all); err != nil {
+	filtered := []any{}
+	for _, raw := range items {
+		ts := num(obj(raw)["createdAt"])
+		if ts >= since.UnixMilli() && (end.IsZero() || ts < end.UnixMilli()) {
+			filtered = append(filtered, raw)
+		}
+	}
+	if err = c.addThreadComments(ctx, filtered, postID, slug, cid, post, names, map[string]Object{}, all); err != nil {
 		return nil, err
 	}
 	result := []Event{}

@@ -65,6 +65,30 @@ func (h *History) Record(events []Event, forwardedSubscription string) error {
 			e.Videos[i].URL = ""
 			e.Videos[i].Error = ""
 		}
+		// Partial API payloads must not erase previously observed engagement counts.
+		var oldJSON string
+		if err := tx.QueryRow("SELECT original FROM events WHERE community_id=? AND event_id=?", e.CommunityID, e.ID).Scan(&oldJSON); err == nil {
+			var old Event
+			if json.Unmarshal([]byte(oldJSON), &old) == nil {
+				if e.PostComments == nil {
+					e.PostComments = old.PostComments
+					e.CommentsAt = old.CommentsAt
+				}
+				if e.PostLikes == nil {
+					e.PostLikes = old.PostLikes
+					e.LikesAt = old.LikesAt
+				}
+				if e.MetricsAt == 0 {
+					e.MetricsAt = old.MetricsAt
+				}
+				if e.LiveDuration == 0 {
+					e.LiveDuration = old.LiveDuration
+				}
+				if len(e.LiveParticipants) == 0 {
+					e.LiveParticipants = old.LiveParticipants
+				}
+			}
+		}
 		original, err := json.Marshal(e)
 		if err != nil {
 			return err
@@ -72,6 +96,27 @@ func (h *History) Record(events []Event, forwardedSubscription string) error {
 		_, err = tx.Exec(`INSERT INTO events(community_id,event_id,post_id,kind,member_id,event_time,original) VALUES(?,?,?,?,?,?,?) ON CONFLICT(community_id,event_id) DO UPDATE SET original=excluded.original`, e.CommunityID, e.ID, e.PostID, e.Kind, e.MemberID, e.Time, string(original))
 		if err != nil {
 			return err
+		}
+		// An ending/replay enriches the original start, including cross-month lives.
+		if (e.Kind == "live_end" || e.Kind == "live_replay") && e.LiveDuration > 0 {
+			var original string
+			if err := tx.QueryRow("SELECT original FROM events WHERE community_id=? AND event_id=?", e.CommunityID, "live:"+e.PostID).Scan(&original); err == nil {
+				var start Event
+				if json.Unmarshal([]byte(original), &start) == nil {
+					start.LiveDuration = e.LiveDuration
+					start.LiveEndedAt = e.LiveEndedAt
+					if len(e.LiveParticipants) > 0 {
+						start.LiveParticipants = e.LiveParticipants
+					}
+					b, err := json.Marshal(start)
+					if err != nil {
+						return err
+					}
+					if _, err = tx.Exec("UPDATE events SET original=? WHERE community_id=? AND event_id=?", string(b), e.CommunityID, start.ID); err != nil {
+						return err
+					}
+				}
+			}
 		}
 		if e.Author != "" {
 			if _, err = tx.Exec(`INSERT INTO members VALUES(?,?,?) ON CONFLICT(community_id,member_id) DO UPDATE SET name=excluded.name`, e.CommunityID, e.MemberID, e.Author); err != nil {

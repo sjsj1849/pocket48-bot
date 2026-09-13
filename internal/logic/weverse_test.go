@@ -178,3 +178,31 @@ func TestAIPostSummaryFooterAndContextDoNotMentionQuotedStella(t *testing.T) {
 		t.Fatal("ambiguous post footer", text.String())
 	}
 }
+
+func TestWeverseVideoCardAndStandaloneVideoRespectQQConstraint(t *testing.T) {
+	e := weverse.Event{Kind: "post", MemberID: "yeon", Author: "YE-ON", Body: "☘️💌🩷", URL: "https://weverse.io/hearts2hearts/artist/1-180305534", Time: 1789312206000, Videos: []weverse.VideoAttachment{{ID: "3-3005881", CoverURL: "https://example.com/cover.jpg", URL: "https://example.com/video.mp4"}}}
+	messages := weverseMessageGroups(weverse.Subscription{}, e)
+	if len(messages) != 2 || len(messages[1]) != 1 {
+		t.Fatal("video not standalone", messages)
+	}
+	texts := ""
+	cover := false
+	for _, raw := range messages[0] {
+		segment := raw.(napcat.MessageSegment)
+		if segment.Type == "video" {
+			t.Fatal("QQ card contains video")
+		}
+		if segment.Type == "image" {
+			cover = true
+		}
+		if segment.Type == "text" {
+			texts += segment.Data["text"]
+		}
+	}
+	if !cover || !strings.Contains(texts, "[视频]") || !strings.Contains(texts, e.URL) {
+		t.Fatal("card lost cover, placeholder or URL", texts)
+	}
+	if messages[1][0].(napcat.MessageSegment).Type != "video" {
+		t.Fatal("standalone message is not video")
+	}
+}

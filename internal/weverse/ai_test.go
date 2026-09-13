@@ -279,13 +279,13 @@ func TestAISummaryReviewsDraftAgainstOriginalBeforeSending(t *testing.T) {
 			}
 			translation = "头发漂亮吧"
 		}
-		content, _ := json.Marshal(map[string]any{"postChinese": translation, "translations": []map[string]string{{"id": "r1", "replyChinese": "好呀"}}, "summary": "成员分享自己的发型，回应粉丝。"})
+		content, _ := json.Marshal(map[string]any{"postChinese": translation, "translations": []map[string]string{{"id": "r1", "replyChinese": "历史对话"}, {"id": "r2", "replyChinese": "好呀"}}, "summary": "成员分享自己的发型，回应粉丝。"})
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": string(content)}, "finish_reason": "stop"}}})
 	}))
 	defer server.Close()
 	batch := AIBatch{History: []AIEntry{{ID: "historic", PostID: "p", Author: "IAN", Body: "历史原文"}}, PostID: "p", CommunityID: 235, PostContext: &AIPostContext{PostID: "p", Author: "IAN", Body: "머리이뿌죠"}, Entries: []AIEntry{{ID: "one", PostID: "p", Author: "IAN", Body: "ㄱㄱ"}}}
 	result, err := SummarizeAI(context.Background(), AISettings{BaseURL: server.URL, Model: "test"}, batch)
-	if err != nil || requests != 2 || strings.Contains(result, "有点乱") || !strings.Contains(result, "头发漂亮吧") {
+	if err != nil || requests != 2 || strings.Contains(result, "有点乱") || !strings.Contains(result, "头发漂亮吧") || !strings.Contains(result, "IAN：历史对话") {
 		t.Fatal("unreviewed draft sent", result, err, requests)
 	}
 	batch.Entries[0].PostID = "different"

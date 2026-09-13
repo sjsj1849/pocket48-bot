@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { WeverseAIConfig } from './WeverseAIConfig'
+import { WeverseReportConfig } from './WeverseReportConfig'
 
 type Subscription = { id: string; groupId: number; communityId: number; communityName: string; slug: string; memberIds: string[]; memberNames: string[]; posts: boolean; comments: boolean; live: boolean; translate: boolean; atAll: boolean; atAllMemberIds?: string[]; atAllMemberNames?: string[]; enabled: boolean }
 type Settings = { enabled: boolean; pollSeconds: number; proxyUrl?: string; subscriptions: Subscription[] }
@@ -93,6 +94,7 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
       {data?.status.lastCheck && <p className="muted">最近检查：{new Date(data.status.lastCheck).toLocaleString()}　{data.status.error || '正常'}</p>}
     </section>
     <WeverseAIConfig />
+    <WeverseReportConfig />
     <section className="wv-card">
       <h3>搜索团体与成员</h3>
       <p className="muted">支持团体英文名、韩文名、成员官方名，以及 Weverse 社区链接。可输入 Hearts2Hearts、H2H 或 CARMEN。</p>

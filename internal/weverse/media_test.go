@@ -40,3 +40,20 @@ func TestUploadedVideoAttachmentsAndPlayableFormat(t *testing.T) {
 		t.Fatal("wrong suitable video format", source, err)
 	}
 }
+
+func TestLiveReplayBackfillCountsOneStartAndNotOrdinaryUploadedVideo(t *testing.T) {
+	p := Object{"postId": "1-123", "author": Object{"memberId": "a"}, "publishedAt": float64(1000), "extension": Object{"video": Object{"type": "VOD", "liveToVod": true, "onAirStartAt": float64(500)}}}
+	e, err := historicalLive(p, "hearts2hearts", 235)
+	if err != nil || e.Kind != "live" || e.ID != "live:1-123" || e.Time != 500 {
+		t.Fatal(e, err)
+	}
+	ordinary, err := eventFromPost(p, "hearts2hearts", 235)
+	if err != nil || ordinary.ID != "" {
+		t.Fatal("live replay also counted as a normal post")
+	}
+	p["extension"] = Object{"video": Object{"type": "VOD", "liveToVod": false}}
+	e, err = historicalLive(p, "hearts2hearts", 235)
+	if err != nil || e.ID != "" {
+		t.Fatal("ordinary video counted as live")
+	}
+}

@@ -215,6 +215,8 @@ func (s *Server) pruneSessionsLocked() {
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/api/weverse/reports", "/api/weverse/reports/preview", "/api/weverse/reports/download", "/api/weverse/reports/send", "/api/weverse/reports/backfill":
+		s.handleWeverseReports(w, r)
 	case "/api/weverse/ai":
 		s.handleWeverseAI(w, r)
 	case "/api/weverse/settings", "/api/weverse/search", "/api/weverse/members", "/api/weverse/browser", "/api/weverse/preview":

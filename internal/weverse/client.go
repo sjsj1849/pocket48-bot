@@ -176,7 +176,10 @@ func (c *Client) call(ctx context.Context, ep string, auth bool, out any) error 
 			}
 			continue
 		}
-		if code == 401 || code == 403 {
+		if code == 403 {
+			return ErrForbidden
+		}
+		if code == 401 {
 			return ErrLogin
 		}
 		if code == 404 || code == 410 {
@@ -215,3 +218,5 @@ func text(m Object, keys ...string) string {
 	}
 	return ""
 }
+
+var ErrForbidden = errors.New("该历史记录访问权限不足")

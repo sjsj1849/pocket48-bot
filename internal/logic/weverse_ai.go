@@ -24,7 +24,7 @@ func aiSubscription(cfg weverse.Settings, job *weverse.AIBatch) (weverse.Subscri
 func weverseAISegments(s weverse.Subscription, job *weverse.AIBatch) [][]interface{} {
 	body := fmt.Sprintf("【%s|Weverse】\nAI 帖子整理（%d 条回复）\n\n%s", job.Author, len(job.Entries), job.Result)
 	if len(job.History) > 0 {
-		body = fmt.Sprintf("【%s|Weverse】\nAI 帖子整理（%d 条新回复，结合 %d 条历史回复）\n\n%s", job.Author, len(job.Entries), len(job.History), job.Result)
+		body = fmt.Sprintf("【%s|Weverse】\nAI 帖子整理（共 %d 条回复，本次新增 %d 条）\n\n%s", job.Author, len(weverse.AIConversation(*job)), len(job.Entries), job.Result)
 	}
 	if job.PostContext != nil && job.PostContext.URL != "" {
 		var last int64
@@ -53,7 +53,7 @@ func weverseAISegments(s weverse.Subscription, job *weverse.AIBatch) [][]interfa
 			}
 		}
 		if len(messages) == 0 && mentionAll {
-			segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
+			segments = append(segments, napcat.AtSegment("all"))
 		}
 		segments = append(segments, napcat.TextSegment(string(text[:n])))
 		messages = append(messages, segments)
