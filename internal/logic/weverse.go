@@ -10,21 +10,8 @@ import (
 	"time"
 )
 
-func formatWeverseEvent(e weverse.Event) string {
-	label := "动态"
-	if e.Kind == "comment" {
-		label = "回复"
-	}
-	if e.Kind == "live" {
-		label = "直播"
-	}
-	if e.Kind == "live_replay" {
-		label = "直播回放"
-	}
-	if e.Kind == "live_end" {
-		label = "直播结束"
-	}
-	lines := []string{fmt.Sprintf("【%s|Weverse%s】", e.Author, label)}
+func weverseEventBody(e weverse.Event) string {
+	lines := []string{fmt.Sprintf("【%s|Weverse】", e.Author)}
 	if e.Kind == "live" {
 		lines = append(lines, "已开播")
 	}
@@ -51,47 +38,50 @@ func formatWeverseEvent(e weverse.Event) string {
 			lines = append(lines, name+"："+body)
 		}
 	}
+
 	if e.Translation != "" || e.ParentTranslation != "" {
-		lines = append(lines, "", "中文")
-		say(author, e.Translation)
-		if e.Translation == "" && e.Body != "" {
-			say(author, "（译文暂不可用，请看下方原文）")
-		}
 		say(fan, e.ParentTranslation)
 		if e.ParentTranslation == "" && e.ParentBody != "" {
-			say(fan, "（译文暂不可用，请看下方原文）")
+			say(fan, "（译文暂不可用，原文见下）")
 		}
-		lines = append(lines, "", "────────", "原文")
+		say(author, e.Translation)
+		if e.Translation == "" && e.Body != "" {
+			say(author, "（译文暂不可用，原文见下）")
+		}
+		lines = append(lines, "")
+		say(fan+"（原文）", e.ParentBody)
+		say(author+"（原文）", e.Body)
+	} else {
+		say(fan, e.ParentBody)
+		say(author, e.Body)
 	}
-	say(author, e.Body)
-	say(fan, e.ParentBody)
 	if e.Translation == "" && e.ParentTranslation == "" && e.TranslationError != "" {
 		lines = append(lines, "（翻译暂不可用，已保留原文）")
 	}
-	lines = append(lines, "", "────────")
-	lines = append(lines, e.URL)
+	return strings.Join(lines, "\n")
+}
+
+func weverseEventFooter(e weverse.Event) string {
+	parts := []string{}
+	if e.URL != "" {
+		parts = append(parts, e.URL)
+	}
 	if e.Time > 0 {
-		loc, _ := time.LoadLocation("Asia/Shanghai")
-		if loc == nil {
+		loc, err := time.LoadLocation("Asia/Shanghai")
+		if err != nil {
 			loc = time.FixedZone("CST", 8*3600)
 		}
-		timeText := time.UnixMilli(e.Time).In(loc).Format("2006-01-02 15:04:05")
-		if e.Kind == "live" {
-			timeText = "开播时间：" + timeText
-		}
-		if e.Kind == "live_replay" {
-			timeText = "检测到回放：" + timeText
-		}
-		if e.Kind == "live_end" {
-			if e.LiveEndedAt > 0 {
-				timeText = "结束时间：" + timeText
-			} else {
-				timeText = "检测到结束：" + timeText
-			}
-		}
-		lines = append(lines, timeText)
+		parts = append(parts, time.UnixMilli(e.Time).In(loc).Format("2006-01-02 15:04:05"))
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(parts, "\n\n")
+}
+
+func formatWeverseEvent(e weverse.Event) string {
+	body, footer := weverseEventBody(e), weverseEventFooter(e)
+	if footer != "" {
+		return body + "\n\n" + footer
+	}
+	return body
 }
 func (b *Bot) runWeverseLoop(ctx context.Context) {
 	dir := weverse.Dir(b.cfg.ConfigPath())
@@ -210,9 +200,16 @@ func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface
 	if s.MentionsAll(e.MemberID) {
 		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
-	segments = append(segments, napcat.TextSegment(formatWeverseEvent(e)))
+	body := weverseEventBody(e)
+	if len(e.Images) > 0 {
+		body += "\n\n"
+	}
+	segments = append(segments, napcat.TextSegment(body))
 	for _, image := range e.Images {
 		segments = append(segments, napcat.ImageSegment(image))
+	}
+	if footer := weverseEventFooter(e); footer != "" {
+		segments = append(segments, napcat.TextSegment("\n\n"+footer))
 	}
 	return segments
 }
