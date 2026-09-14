@@ -20,9 +20,10 @@ func weverseEventBody(e weverse.Event) string {
 	}
 	if e.Kind == "live_end" {
 		lines = append(lines, "直播已结束")
-		if e.LiveDuration > 0 {
-			lines = append(lines, "直播时长："+formatDouyinDuration(time.Duration(e.LiveDuration)*time.Second))
-		}
+	}
+
+	if (e.Kind == "live_end" || e.Kind == "live_replay") && e.LiveDuration > 0 {
+		lines = append(lines, "直播时长："+formatDouyinDuration(time.Duration(e.LiveDuration)*time.Second))
 	}
 
 	author := strings.TrimSpace(e.Author)
@@ -230,7 +231,7 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 func weverseMessageSegments(s weverse.Subscription, e weverse.Event) []interface{} {
 	segments := []interface{}{}
 	if s.MentionsAll(e.MemberID) {
-		segments = append(segments, napcat.AtSegment("all"))
+		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
 	body := weverseEventBody(e)
 	if len(e.Images) > 0 || len(e.Videos) > 0 {

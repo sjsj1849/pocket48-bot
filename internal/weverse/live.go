@@ -113,7 +113,9 @@ func (c *Client) LiveEndEvents(ctx context.Context, state *Runtime, cfg Settings
 			replay.ID = "live_replay:" + replay.PostID
 			replay.Time = now.UnixMilli()
 			replay.LiveEndedAt = 0
-			replay.LiveDuration = num(video["playTime"])
+			if duration := num(video["playTime"]); duration > 0 {
+				replay.LiveDuration = duration
+			}
 			media := obj(obj(post["extension"])["mediaInfo"])
 			if title := plain(text(media, "title")); title != "" {
 				if replay.Body != title {

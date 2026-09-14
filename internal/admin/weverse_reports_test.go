@@ -48,3 +48,36 @@ func TestWeverseReportPanelDoesNotExposeSMTPSecretsAndExportsWorkbook(t *testing
 		t.Fatal("invalid period accepted")
 	}
 }
+
+func TestWeverseWeeklyPreviewAndDownload(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{opts: Options{ConfigPath: cfg}}
+	h, err := weverse.OpenHistory(weverse.Dir(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.SaveMembers(235, []weverse.Member{{ID: "a", Name: "A"}})
+	h.Close()
+	for _, path := range []string{"preview", "download"} {
+		response := httptest.NewRecorder()
+		s.handleWeverseReports(response, httptest.NewRequest(http.MethodGet, "/api/weverse/reports/"+path+"?kind=weekly&date=2027-01-01", nil))
+		if response.Code != 200 {
+			t.Fatal(response.Code, response.Body.String())
+		}
+		if path == "preview" && !strings.Contains(response.Body.String(), "weekly-2026-12-28") {
+			t.Fatal(response.Body.String())
+		}
+		if path == "download" && !strings.Contains(response.Header().Get("Content-Disposition"), "weekly-2026-12-28.xlsx") {
+			t.Fatal(response.Header())
+		}
+	}
+	response := httptest.NewRecorder()
+	s.handleWeverseReports(response, httptest.NewRequest(http.MethodGet, "/api/weverse/reports/preview?kind=weekly&date=2026-02-30", nil))
+	if response.Code != 400 {
+		t.Fatal(response.Code)
+	}
+}

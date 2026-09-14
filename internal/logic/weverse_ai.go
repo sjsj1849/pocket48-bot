@@ -53,7 +53,7 @@ func weverseAISegments(s weverse.Subscription, job *weverse.AIBatch) [][]interfa
 			}
 		}
 		if len(messages) == 0 && mentionAll {
-			segments = append(segments, napcat.AtSegment("all"))
+			segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 		}
 		segments = append(segments, napcat.TextSegment(string(text[:n])))
 		messages = append(messages, segments)

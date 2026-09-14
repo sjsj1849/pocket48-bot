@@ -15,9 +15,11 @@ type Community struct {
 	Members []string `json:"members"`
 }
 type Member struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Image string `json:"image,omitempty"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Image              string `json:"image,omitempty"`
+	latestMomentPostID string
+	latestMomentAt     int64
 }
 type catalogCache struct {
 	At    time.Time   `json:"at"`
@@ -115,7 +117,8 @@ func (c *Client) Members(ctx context.Context, id int64) ([]Member, error) {
 			if name == "" {
 				return nil, fmt.Errorf("成员名称格式已变更")
 			}
-			result = append(result, Member{ID: id, Name: name, Image: image})
+			latest := obj(x["artistLatestMoment"])
+			result = append(result, Member{ID: id, Name: name, Image: image, latestMomentPostID: str(latest["postId"]), latestMomentAt: num(latest["publishedAt"])})
 		}
 	}
 	return result, nil

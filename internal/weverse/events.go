@@ -78,7 +78,7 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 		kind = "live"
 		section = "live"
 	}
-	if p["postType"] == "MOMENT" || ext["moment"] != nil || ext["momentW1"] != nil {
+	if strings.HasPrefix(str(p["postType"]), "MOMENT") || ext["moment"] != nil || ext["momentW1"] != nil {
 		kind = "moment"
 	}
 	body := plain(text(p, "plainBody", "body", "title"))
@@ -93,6 +93,9 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 		timestamp = num(video["onAirStartAt"])
 	}
 	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
+	if kind == "moment" {
+		e.URL = "https://weverse.io/" + slug + "/moment/" + e.MemberID + "/post/" + id
+	}
 	e.Images = eventImages(p)
 	if kind == "post" || kind == "moment" {
 		e.PostComments = optionalCount(p, "commentCount")
@@ -256,6 +259,27 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			}
 			for _, p := range posts {
 				if err := addPost(p); err != nil {
+					return nil, err
+				}
+			}
+			// The official artist directory exposes current Moments independently
+			// of the notification feed, which may omit an artist's notification.
+			for _, member := range members {
+				id := member.latestMomentPostID
+				if !idRE.MatchString(id) || (!since.IsZero() && member.latestMomentAt > 0 && member.latestMomentAt < since.UnixMilli()) {
+					continue
+				}
+				if _, ok := all["moment:"+id]; ok {
+					continue
+				}
+				var post Object
+				if err := c.call(ctx, "/post/v1.0/post-"+id+"?fieldSet=postV1", true, &post); err != nil {
+					if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
+						continue
+					}
+					return nil, err
+				}
+				if err := addPost(post); err != nil {
 					return nil, err
 				}
 			}
