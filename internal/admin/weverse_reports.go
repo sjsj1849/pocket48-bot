@@ -68,7 +68,12 @@ func (s *Server) handleWeverseReports(w http.ResponseWriter, r *http.Request) {
 	}
 	year, _ := strconv.Atoi(r.URL.Query().Get("year"))
 	month, _ := strconv.Atoi(r.URL.Query().Get("month"))
-	period, e := weverse.NewReportPeriod(r.URL.Query().Get("kind"), year, month)
+	var period weverse.ReportPeriod
+	if r.URL.Query().Get("kind") == "weekly" {
+		period, e = weverse.NewWeeklyReportPeriod(r.URL.Query().Get("date"))
+	} else {
+		period, e = weverse.NewReportPeriod(r.URL.Query().Get("kind"), year, month)
+	}
 	if e != nil {
 		fail(e)
 		return

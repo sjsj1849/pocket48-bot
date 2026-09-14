@@ -9,14 +9,16 @@ import (
 )
 
 type ReportSettings struct {
-	Enabled       bool   `json:"enabled"`
-	Monthly       bool   `json:"monthly"`
-	FirstHalf     bool   `json:"firstHalf"`
-	Annual        bool   `json:"annual"`
-	SendTime      string `json:"sendTime"`
-	CommunityID   int64  `json:"communityId"`
-	CommunityName string `json:"communityName"`
-	EnabledAt     string `json:"enabledAt,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	Weekly          bool   `json:"weekly"`
+	WeeklyEnabledAt string `json:"weeklyEnabledAt,omitempty"`
+	Monthly         bool   `json:"monthly"`
+	FirstHalf       bool   `json:"firstHalf"`
+	Annual          bool   `json:"annual"`
+	SendTime        string `json:"sendTime"`
+	CommunityID     int64  `json:"communityId"`
+	CommunityName   string `json:"communityName"`
+	EnabledAt       string `json:"enabledAt,omitempty"`
 }
 
 func LoadReportSettings(dir string) (ReportSettings, error) {
@@ -36,6 +38,10 @@ func SaveReportSettings(dir string, s ReportSettings) error {
 		return e
 	}
 	s.EnabledAt = old.EnabledAt
+	s.WeeklyEnabledAt = old.WeeklyEnabledAt
+	if s.Enabled && s.Weekly && (s.WeeklyEnabledAt == "" || !old.Enabled || !old.Weekly) {
+		s.WeeklyEnabledAt = time.Now().Format(time.RFC3339)
+	}
 	if s.Enabled && (s.EnabledAt == "" || !old.Enabled) {
 		s.EnabledAt = time.Now().Format(time.RFC3339)
 	}
@@ -81,6 +87,22 @@ func NewReportPeriod(kind string, year, month int) (ReportPeriod, error) {
 	}
 	return p, nil
 }
+
+// NewWeeklyReportPeriod accepts any date within a week and normalizes it to
+// Monday 00:00 through the following Monday 00:00 in Beijing time.
+func NewWeeklyReportPeriod(date string) (ReportPeriod, error) {
+	day, err := time.ParseInLocation("2006-01-02", date, ReportLocation)
+	if err != nil || day.Year() < 2025 || day.Year() > 2100 {
+		return ReportPeriod{}, fmt.Errorf("周报日期应为 2025–2100 年内的 YYYY-MM-DD")
+	}
+	offset := (int(day.Weekday()) + 6) % 7
+	start := day.AddDate(0, 0, -offset)
+	end := start.AddDate(0, 0, 7)
+	return ReportPeriod{Kind: "weekly", Key: "weekly-" + start.Format("2006-01-02"),
+		Title: fmt.Sprintf("%s 至 %s 周报", start.Format("2006-01-02"), end.AddDate(0, 0, -1).Format("2006-01-02")),
+		Start: start, End: end}, nil
+}
+
 func DueReportPeriods(s ReportSettings, now time.Time) []ReportPeriod {
 	if !s.Enabled {
 		return nil
@@ -103,10 +125,29 @@ func DueReportPeriods(s ReportSettings, now time.Time) []ReportPeriod {
 	}
 	half, _ := NewReportPeriod("firstHalf", hy, 1)
 	annual, _ := NewReportPeriod("annual", now.Year()-1, 1)
-	for _, p := range []ReportPeriod{monthly, half, annual} {
-		on := p.Kind == "monthly" && s.Monthly || p.Kind == "firstHalf" && s.FirstHalf || p.Kind == "annual" && s.Annual
+	thisWeek, weeklyErr := NewWeeklyReportPeriod(now.Format("2006-01-02"))
+	periods := []ReportPeriod{monthly, half, annual}
+	if weeklyErr == nil {
+		weekly, err := NewWeeklyReportPeriod(thisWeek.Start.AddDate(0, 0, -7).Format("2006-01-02"))
+		if err == nil {
+			periods = append([]ReportPeriod{weekly}, periods...)
+		}
+	}
+	for _, p := range periods {
+		on := p.Kind == "weekly" && s.Weekly || p.Kind == "monthly" && s.Monthly || p.Kind == "firstHalf" && s.FirstHalf || p.Kind == "annual" && s.Annual
 		due := p.End.Add(time.Duration(clock.Hour())*time.Hour + time.Duration(clock.Minute())*time.Minute)
-		if on && !due.Before(enabled) && !now.Before(due) {
+		periodEnabled := enabled
+		if p.Kind == "weekly" {
+			// Adding weekly reports must not immediately back-send a completed week.
+			weeklyEnabled, err := time.Parse(time.RFC3339, s.WeeklyEnabledAt)
+			if err != nil {
+				continue
+			}
+			if weeklyEnabled.After(periodEnabled) {
+				periodEnabled = weeklyEnabled
+			}
+		}
+		if on && !due.Before(periodEnabled) && !now.Before(due) {
 			out = append(out, p)
 		}
 	}
@@ -292,7 +333,7 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 	}
 	sort.Slice(r.Events, func(i, j int) bool { return r.Events[i].Time < r.Events[j].Time })
 	sort.Slice(r.TeammateReplies, func(i, j int) bool { return r.TeammateReplies[i].Time < r.TeammateReplies[j].Time })
-	if p.Kind != "monthly" {
+	if p.Kind == "firstHalf" || p.Kind == "annual" {
 		for start := p.Start; start.Before(p.End); start = start.AddDate(0, 1, 0) {
 			sub, _ := NewReportPeriod("monthly", start.Year(), int(start.Month()))
 			month := AggregateReport(s, sub, append([]Member(nil), members...), events)
