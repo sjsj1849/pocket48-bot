@@ -11,9 +11,9 @@ test('login uses foreground form; valid OTP is submitted once', async () => {
  let stage='email', lastFields=0, submits=0
  const page={url:()=> 'https://x.com/i/jf/onboarding/web',bringToFront:async()=>{},goto:async()=>{},waitForTimeout:async()=>{},
   locator:selector=>({
-   count:async()=>selector.includes('password') || selector.includes('role=')?0:1,
+   count:async()=>selector.includes('password') || selector.includes('role=') || selector.includes('type="tel"')?0:1,
    innerText:async()=>stage==='code'?'Enter your verification code':'Email or username',
-   last:()=>({fill:async value=>{lastFields++;assert.equal(value,stage==='email'?'test@example.com':'123456')}}),
+   last:()=>({waitFor:async()=>{},fill:async value=>{lastFields++;assert.equal(value,stage==='email'?'test@example.com':'123456')}}),
   }),
   getByRole:()=>({last:()=>({click:async()=>{submits++;stage=stage==='email'?'code':'done'}})}),
  }
@@ -35,10 +35,22 @@ test('phone verification selects China before submitting the national number', a
  const field={count:async()=>1,fill:async value=>{assert(selected);assert.equal(value,'13800138000')}}
  const country={count:async()=>1,last:()=>({locator:()=>({evaluateAll:async()=>[{value:'US',text:'United States +1'},{value:'CN',text:'China +86'}]}),selectOption:async value=>{assert.equal(value,'CN');selected=true}})}
  const page={url:()=> 'https://x.com/i/jf/onboarding/web',bringToFront:async()=>{},waitForTimeout:async()=>{},
- locator:selector=>selector==='body'?{innerText:async()=> submitted?'Enter verification code sent by SMS':'Enter phone number +1'}:selector.includes('role=')?{count:async()=>0}:selector==='select:visible'?country:selector.includes('password')?{count:async()=>0}:{last:()=>field},
+ locator:selector=>selector==='body'?{innerText:async()=> submitted?'Enter verification code sent by SMS':'Enter phone number +1'}:selector.includes('role=')?{count:async()=>0}:selector==='select:visible'?country:selector.includes('password')?{count:async()=>0}:{count:async()=>1,last:()=>field},
  getByRole:()=>({last:()=>({click:async()=>{submitted=true}})}),
  }
  const context={pages:()=>[page],cookies:async()=>[]}
  assert.equal((await handleXLogin(context,'resume',{phone:'+8613800138000'})).stage,'awaiting_sms_code')
  assert(submitted)
+})
+
+test('account confirmation can switch to password without submitting a phone number', async()=> {
+ let switched=false,authenticated=false
+ const page={url:()=> 'https://x.com/i/jf/onboarding/web',bringToFront:async()=>{},waitForTimeout:async()=>{},
+ locator:selector=>selector==='body'?{innerText:async()=> 'Confirm your account'}:selector.includes('role=')?{count:async()=>0}:{count:async()=>selector.includes('type="tel"')?0:switched?1:0,nth:()=>({evaluate:async()=>true,fill:async value=>assert.equal(value,'fixture-password')}),last:()=>({fill:async value=>assert.equal(value,'fixture-password')})},
+ getByText:()=>({count:async()=>1,last:()=>({click:async()=>{switched=true}})}),
+ getByRole:(_role,options)=>options.name.source==='^Use password$'?({count:async()=>1,last:()=>({click:async()=>{switched=true}})}):({last:()=>({click:async()=>{authenticated=true}})}),
+ }
+ const context={pages:()=>[page],cookies:async()=>authenticated?[{domain:'.x.com',name:'auth_token',value:'auth'},{domain:'.x.com',name:'ct0',value:'csrf'}]:[]}
+ assert.equal((await handleXLogin(context,'resume',{password:'fixture-password'})).stage,'authenticated')
+ assert(switched)
 })

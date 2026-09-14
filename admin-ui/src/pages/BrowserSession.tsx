@@ -69,7 +69,18 @@ export function BrowserSession() {
     if (rfb.current) rfb.current.scaleViewport = !fit
   }
   function scrollRemote(direction: 'up' | 'down') {
-    rfb.current?.sendKey(direction === 'up' ? 0xff55 : 0xff56, direction === 'up' ? 'PageUp' : 'PageDown')
+    const canvas = screen.current?.querySelector('canvas')
+    if (!canvas || !connected) return
+    const rect = canvas.getBoundingClientRect()
+    // Send real VNC wheel input over the page body, rather than PageDown to a field.
+    for (let step = 0; step < 6; step++) {
+      canvas.dispatchEvent(new WheelEvent('wheel', {
+        clientX: rect.left + rect.width * .5,
+        clientY: rect.top + rect.height * .6,
+        deltaY: direction === 'down' ? 120 : -120,
+        buttons: 0, bubbles: true, cancelable: true,
+      }))
+    }
   }
   function fullscreen() { void screen.current?.requestFullscreen?.() }
   async function xAction(action: 'open' | 'sync') {
@@ -91,7 +102,7 @@ export function BrowserSession() {
       {xMessage ? <p role="status">{xMessage}</p> : null}
       {xLoginMessage ? <p role="status">{xLoginMessage}</p> : null}
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '浏览器连接失败'}</div> : null}
-      <section className="browser-toolbar browser-navigation"><div><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('up')}>向上翻页</button><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('down')}>向下翻页</button><button className="secondary-button" disabled={!connected} onClick={changeFit}>{fit ? '原始大小' : '适应窗口'}</button></div><p>鼠标滚轮可滚动网页；手机可用翻页按钮。原始大小模式可拖动桌面的滚动条。</p></section>
+      <section className="browser-toolbar browser-navigation"><div><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('up')}>向上翻页</button><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('down')}>向下翻页</button><button className="secondary-button" disabled={!connected} onClick={changeFit}>{fit ? '原始大小' : '适应窗口'}</button></div><p>鼠标滚轮可滚动网页；手机可用翻页按钮滚动当前弹窗，输入框保持原样。原始大小模式可拖动桌面的滚动条。</p></section>
       <section className="browser-canvas" ref={screen}><div className="browser-placeholder"><div className="browser-symbol"><Monitor size={28} /></div><strong>{status?.available ? '浏览器桌面已就绪' : '等待浏览器侧卡启动'}</strong><p>{status?.available ? '打开会话后可直接扫码或拖动验证滑块' : 'Bot 启动统一浏览器侧卡后，这里会自动检测到会话'}</p>{status?.available ? <button className="primary-button" onClick={() => void connect()}><MousePointer2 size={16} />打开交互会话</button> : null}</div></section>
     </main>
   )
