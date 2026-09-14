@@ -16,7 +16,7 @@ type workbookSheet struct {
 
 func (r Report) XLSX() ([]byte, error) {
 	summary := [][]any{reportColumns()}
-	matrix := [][]any{{"回复成员 / 主帖成员"}}
+	matrix := [][]any{{"       主帖作者\n回复者"}}
 	for _, m := range r.Members {
 		matrix[0] = append(matrix[0], m.Name)
 	}
@@ -38,7 +38,7 @@ func (r Report) XLSX() ([]byte, error) {
 		activity = append(activity, []any{e.Author, kind, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.PostID, e.CommentID, e.Body, e.ParentAuthor, e.ParentBody, len(e.Images), len(e.Videos), e.URL, e.ParentMemberID, e.ParentProfileType, countValue(e.PostComments), countValue(e.PostLikes), metricTime(e.MetricsAt), e.LiveDuration, metricTime(e.CommentsAt), metricTime(e.LikesAt)})
 	}
 	notes := [][]any{{"统计说明", "内容"}, {"社区", r.Community}, {"报表", r.DisplayTitle()}, {"开始（含）", r.Period.Start.Format(time.RFC3339)}, {"结束（不含）", r.Period.End.Format(time.RFC3339)}, {"完整覆盖", fmt.Sprint(r.Complete)}, {"口径与采集范围", r.CoverageNote()}}
-	direct := [][]any{{"回复成员 / 直接被回复成员"}}
+	direct := [][]any{{"       被回复成员\n回复者"}}
 	for _, m := range r.Members {
 		direct[0] = append(direct[0], m.Name)
 	}
@@ -99,13 +99,22 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 			fmt.Fprintf(&body, `<row r="%d">`, j+1)
 			for k, v := range row {
 				cell := fmt.Sprintf("%s%d", columnName(k), j+1)
+				style := ""
+				if s.name == "队友帖回复矩阵" || s.name == "直接回复成员矩阵" {
+					if j == k && j > 0 {
+						style = ` s="1"`
+					}
+					if j == 0 && k == 0 {
+						style = ` s="2"`
+					}
+				}
 				switch value := v.(type) {
 				case int:
-					fmt.Fprintf(&body, `<c r="%s"><v>%d</v></c>`, cell, value)
+					fmt.Fprintf(&body, `<c r="%s"%s><v>%d</v></c>`, cell, style, value)
 				case int64:
-					fmt.Fprintf(&body, `<c r="%s"><v>%d</v></c>`, cell, value)
+					fmt.Fprintf(&body, `<c r="%s"%s><v>%d</v></c>`, cell, style, value)
 				default:
-					fmt.Fprintf(&body, `<c r="%s" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>`, cell, xmlText(fmt.Sprint(v)))
+					fmt.Fprintf(&body, `<c r="%s"%s t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>`, cell, style, xmlText(fmt.Sprint(v)))
 				}
 			}
 			body.WriteString(`</row>`)
@@ -164,7 +173,7 @@ func metricTime(ms int64) string {
 
 func interactionCell(author, target string, count int) any {
 	if author == target {
-		return "/"
+		return ""
 	}
 	if count == 0 {
 		return ""
@@ -210,7 +219,7 @@ func reportExcelExtrema(rows [][]any, start, end, firstColumn int) string {
 	return out.String()
 }
 
-const reportExcelStyles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FF1D4ED8"/></font></dxf><dxf><font><b/><color rgb="FFC2410C"/></font></dxf></dxfs></styleSheet>`
+const reportExcelStyles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="2"><border/><border diagonalDown="1"><diagonal style="thin"><color rgb="FF8994A5"/></diagonal></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FF1D4ED8"/></font></dxf><dxf><font><b/><color rgb="FFC2410C"/></font></dxf></dxfs></styleSheet>`
 
 func knownDuration(seconds int64, count int, missing string) any {
 	if count == 0 {
