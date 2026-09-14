@@ -46,7 +46,14 @@ func (s *Server) handleBrowserX(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		var session xBrowserSession
 		_ = weverse.Read(dir, "session.json", &session)
-		writeJSON(w, http.StatusOK, map[string]any{"sessionConfigured": validXBrowserSession(session), "updatedAt": session.UpdatedAt})
+		var login struct {
+			Phase       string `json:"phase"`
+			Message     string `json:"message"`
+			LastCheck   int64  `json:"lastCheck"`
+			NextRetryAt int64  `json:"nextRetryAt"`
+		}
+		_ = weverse.Read(dir, "login-status.json", &login)
+		writeJSON(w, http.StatusOK, map[string]any{"sessionConfigured": validXBrowserSession(session), "updatedAt": session.UpdatedAt, "loginStatus": login})
 		return
 	}
 	if r.Method != http.MethodPost {
