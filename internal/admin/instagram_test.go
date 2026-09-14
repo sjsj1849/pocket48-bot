@@ -35,3 +35,14 @@ func TestWeversePostPasswordsRedacted(t *testing.T) {
 		t.Fatal("password leaked")
 	}
 }
+
+func TestInstagramRequestStatusSurvivesSessionChanges(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	_ = instagram.Write(dir, "request-state.json", map[string]any{"requests": []float64{float64(now.Add(-2 * time.Hour).Unix()), float64(now.Unix())}, "blockedUntil": float64(now.Add(time.Minute).Unix()), "reason": "rate_limit"})
+	_ = instagram.Write(dir, "session.json", map[string]any{"cookies": map[string]string{"sessionid": "different-secret"}})
+	state := instagramRequestStatus(dir)
+	if state["requestsLastHour"] != 1 || state["nextRetryAt"] == "" {
+		t.Fatal(state)
+	}
+}

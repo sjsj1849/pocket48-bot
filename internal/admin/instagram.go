@@ -26,7 +26,7 @@ func (s *Server) handleInstagram(w http.ResponseWriter, r *http.Request) {
 			_ = instagram.Read(dir, "session.json", &session)
 			var status instagram.Status
 			_ = instagram.Read(dir, "status.json", &status)
-			writeJSON(w, 200, map[string]any{"settings": cfg, "sessionConfigured": session.Cookies["sessionid"] != "", "sessionUsername": session.Username, "status": status})
+			writeJSON(w, 200, map[string]any{"settings": cfg, "sessionConfigured": session.Cookies["sessionid"] != "", "sessionUsername": session.Username, "status": status, "requestState": instagramRequestStatus(dir), "browser": instagramBrowserStatus(dir), "feedProbe": instagramProbeStatus(dir)})
 			return
 		}
 		if r.Method != http.MethodPut {
@@ -189,6 +189,9 @@ func instagramService(configPath string, now time.Time) *serviceState {
 		card.StatusText = "扫描异常"
 		if status.ErrorCode == "login_required" || status.ErrorCode == "invalid_session" {
 			card.StatusText = "需登录"
+		} else if status.ErrorCode == "cooldown" {
+			card.Status = "attention"
+			card.StatusText = "冷却中"
 		} else if status.ErrorCode == "rate_limit" {
 			card.StatusText = "限流重试中"
 		}
@@ -207,4 +210,48 @@ func instagramService(configPath string, now time.Time) *serviceState {
 	}
 	card.LastEvent = fmt.Sprintf("扫描完成：%d 条帖子，%d 个订阅；新内容 %d 条已入推送队列", status.Events, count, status.Forwarded)
 	return card
+}
+
+func instagramRequestStatus(dir string) map[string]any {
+	var state struct {
+		Requests     []float64 `json:"requests"`
+		BlockedUntil float64   `json:"blockedUntil"`
+		Reason       string    `json:"reason"`
+	}
+	_ = instagram.Read(dir, "request-state.json", &state)
+	count := 0
+	now := float64(time.Now().Unix())
+	for _, stamp := range state.Requests {
+		if stamp > now-3600 {
+			count++
+		}
+	}
+	retry := ""
+	if state.BlockedUntil > now {
+		retry = time.Unix(int64(state.BlockedUntil), 0).Format(time.RFC3339)
+	}
+	return map[string]any{"requestsLastHour": count, "nextRetryAt": retry, "reason": state.Reason}
+}
+func instagramBrowserStatus(dir string) map[string]any {
+	var state struct {
+		Configured bool   `json:"configured"`
+		Pending    bool   `json:"pending"`
+		UpdatedAt  int64  `json:"updatedAt"`
+		Error      string `json:"error"`
+	}
+	_ = instagram.Read(dir, "browser-status.json", &state)
+	return map[string]any{"configured": state.Configured, "pending": state.Pending, "updatedAt": state.UpdatedAt, "error": state.Error}
+}
+
+func instagramProbeStatus(dir string) map[string]any {
+	var p struct {
+		Pending     bool   `json:"pending"`
+		Success     bool   `json:"success"`
+		Username    string `json:"username"`
+		Error       string `json:"error"`
+		NextRetryAt string `json:"nextRetryAt"`
+		Events      int    `json:"events"`
+	}
+	_ = instagram.Read(dir, "probe-state.json", &p)
+	return map[string]any{"pending": p.Pending, "success": p.Success, "username": p.Username, "error": p.Error, "nextRetryAt": p.NextRetryAt, "events": p.Events}
 }

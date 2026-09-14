@@ -8,7 +8,7 @@
 
 现有配置页新增 Instagram 栏：运行开关、60–3600 秒检查间隔（默认 300 秒）、HTTP/SOCKS 代理、精确账号搜索（@用户名或主页链接）、按 QQ 群订阅、帖子/Reels/Story 开关、@全体和只读预览。总览一直显示服务入口；启用后显示实际扫描结果和最近活动。
 
-在自己的浏览器登录 Instagram，导出 instagram.com 的 Cookie JSON 或 Cookie 请求头，使用配置栏的“验证并导入登录态”。至少需要 sessionid 和 csrftoken。服务器通过 test_login 验证成功后才替换会话，失败保留旧会话。API 不返回 Cookie，工作进程通过 stdin 接收候选，会话 JSON 原子写入、0600 权限、跨进程互斥。成功采集时保存响应更新的 Cookie，不使用密码或不可信 pickle。会话仍可能失效，需要再次导入。Story 和私密账号需登录且拥有查看资格。
+在自己的浏览器登录 Instagram，导出 instagram.com 的 Cookie JSON 或 Cookie 请求头，使用配置栏的“验证并导入登录态”。至少需要 sessionid 和 csrftoken。服务器通过 test_login 验证成功后才替换会话，失败保留旧会话。API 不返回 Cookie，工作进程通过 stdin 接收候选，会话 JSON 原子写入、0600 权限、跨进程互斥。成功采集时保存响应更新的 Cookie，不使用密码或不可信 pickle。可在配置栏导入到内置浏览器，并自动同步浏览器 Cookie 的变化；会话仍可能失效，届时需要重新登录。Story 和私密账号需登录且拥有查看资格。
 
 ## 转发和恢复
 
@@ -34,3 +34,20 @@ Go 测试覆盖基线、持久去重、新增内容类型、账号变更、时�
 Instaloader 4.15.3 的 from_username 仍访问 web_profile_info，本服务器该路径返回 429。已登录时先使用库内 TopSearchResults 精确用户名查找，再由 Profile 的 GraphQL 元数据和 get_posts 读取；成功解析的稳定 ID 原子缓存，后续跳过搜索，加载元数据并检查 ID 和用户名一致，避免账号改名误读。关闭 iphone_support 和额外高清头像查询，使用帖子已提供的图片/视频 URL。Instaloader date_utc 是不带时区的 UTC 日期，统一显式设 UTC 再转毫秒，避免服务器时区导致偏移。
 
 真实读取在少量验证后收到 HTTP 401 + “Please wait a few minutes before you try again”；这种响应也识别为 rate_limit，暂缓重试，不当作空列表或密码错误。有效会话保持私有存储，无凭据入库提交。
+
+
+## 跨查询限流和帖子替代接口
+
+所有采集器 Instagram HTTP 请求（含搜索、登录验证、帖子、Reels、Story）在发出之前记账。账号目录内的 `request-state.json` 保存近一小时请求、Instaloader 各查询类型的时间戳、冷却截止时间和连续限流次数；与会话共用进程锁，原子写入 0600。时间戳使用 epoch，重启进程/服务、重新登录、清除或导入 Cookie 都不清空预算。默认至少间隔 2 秒，并限制每分钟 12 次、每 10 分钟 60 次；这只是本地保守预算，不代表平台公开配额。
+
+HTTP 429 或 401/403 带“wait a few minutes”会冻结所有采集请求，初次 15 分钟，重复失败逐次延长，最多 6 小时，同时尊重响应中的秒数 Retry-After。冷却时立即返回截止时间，不持续占用工作进程，也不会换接口绕过冷却。面板显示近一小时请求数和下一次允许请求时间。
+
+借鉴 [Instaloader issue #2689](https://github.com/instaloader/instaloader/issues/2689) 验证 `/api/v1/feed/user/<uid>/`，保留相册、图片、视频和分页游标，并校验作者或合作作者 UID；响应结构改变或分页不完整时明确报错。GraphQL 硬错误可以回退；平台限流则保存下次尝试 v1 的偏好，先等冷却结束。此路径是社区方案，不能保证始终可用。
+
+本服务器真实 v1 三次只读验证（分别遵守 15、30 分钟冷却）均收到“稍后再试”，目前尚未验证成功，第三次后保存 60 分钟冷却并停止自动验证。`probe-state.json` 保存待验证目标、次数和下一次重试；BOT 即使监控关闭也会在冷却后继续该明确安排的只读验证，最多三次实际尝试，不转发历史 QQ 消息。结果保留并显示在配置页。
+
+## 内置浏览器同步
+
+配置栏支持“导入到内置浏览器”“同步浏览器登录态”“打开 Instagram 浏览器”和刷新状态。启动浏览器时可从已验证的采集器会话恢复 Cookie；浏览器持久状态随侧卡存储。定时及 Instagram 响应后的同步只读取本地 Cookie，不自动访问平台保活。
+
+浏览器 Cookie 变化先写入私有 `browser-candidate.json`，通过登录验证后才替换采集器已验证会话；冷却期间暂存，验证失败保留旧会话，拒绝的候选不会阻塞正常采集。浏览器退出登录也不覆盖旧采集器会话。导入或同步不会清除冷却，亦不人为延长 Cookie 的平台有效期。Instagram 标签页受后台清理保护，不能被抖音采集当作主标签页使用。
