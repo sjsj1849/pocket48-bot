@@ -251,6 +251,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRestart(w, r)
 	case "/api/browser/status":
 		s.handleBrowserStatus(w, r)
+	case "/api/browser/x":
+		s.handleBrowserX(w, r)
 	case "/api/browser/session":
 		s.handleBrowserSession(w, r)
 	case "/api/browser/ws":
