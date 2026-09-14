@@ -2,7 +2,7 @@ const fs = require('fs'), path = require('path'), crypto = require('crypto');
 const WebSocket = require('../weibo-auth/node_modules/ws');
 const root = path.resolve(__dirname, '../..');
 const cmd = process.argv[2];
-if (!['x_panel_resume', 'x_panel_login', 'x_panel_verify', 'x_panel_sync'].includes(cmd)) process.exit(2);
+if (!['x_panel_password', 'x_panel_diagnose', 'x_panel_resume', 'x_panel_login', 'x_panel_verify', 'x_panel_sync'].includes(cmd)) process.exit(2);
 const endpoint = JSON.parse(fs.readFileSync(path.join(root, 'storage/browser-sidecar.json'), 'utf8'));
 if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) process.exit(2);
 const id = crypto.randomUUID();

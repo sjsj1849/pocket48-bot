@@ -15,12 +15,25 @@ async function loginPage(context) {
   const pages = context.pages().filter(page => { try { return ['x.com', 'twitter.com'].includes(new URL(page.url()).hostname) } catch { return false } })
   return pages.at(-1) || await context.newPage()
 }
+async function passwordField(scope) {
+  const fields=scope.locator('input[type="password"]:visible')
+  for(let index=0;index<await fields.count();index++) {
+    const field=fields.nth(index)
+    const real=await field.evaluate(element=> {
+      const rect=element.getBoundingClientRect()
+      return rect.width>=80 && rect.height>=18 && getComputedStyle(element).opacity!=='0' && !element.closest('[aria-hidden="true"]')
+    })
+    if(real)return field
+  }
+  return null
+}
 async function inspect(context, page) {
   if (await loggedIn(context)) return { stage: 'authenticated' }
   const body = await page.locator('body').innerText()
   if (/verification code|confirmation code|enter.{0,30}code|验证码|验证代码/i.test(body)) return { stage: phoneVerificationPages.has(page) || /text message|sms|短信/i.test(body) ? 'awaiting_sms_code' : 'awaiting_code' }
+  if (await (await foreground(page)).locator('input[type="tel"]:visible').count()) return { stage: 'needs_phone' }
   if (/phone number|手机号|电话号码/i.test(body) && !/phone number or username/i.test(body)) return { stage: 'needs_phone' }
-  if (await page.locator('input[type="password"]:visible').count()) return { stage: 'awaiting_password' }
+  if (await passwordField(await foreground(page))) return { stage: 'awaiting_password' }
   if (/phone number or username|enter your.{0,20}username|输入.{0,10}用户名/i.test(body)) return { stage: 'needs_username' }
   return { stage: 'browser_verification_required' }
 }
@@ -30,9 +43,12 @@ export async function handleXLogin(context, action, input) {
   if (await loggedIn(context)) return { stage: 'authenticated' }
   const page = await loginPage(context)
   await page.bringToFront()
-  if (action === 'start') {
+  if (action === 'start' || action === 'password') {
     if (!input.email || !input.password) throw new Error('missing login input')
     await page.goto('https://x.com/i/jf/onboarding/web', { waitUntil: 'domcontentloaded', timeout: 25000 })
+    // The page initially renders a background form before mounting the modal.
+    // Wait for the modal field so an early fill cannot go into that background.
+    await page.locator('[role="dialog"]:visible input[autocomplete*="username"], [aria-modal="true"]:visible input[autocomplete*="username"]').last().waitFor({state:'visible',timeout:15000})
     // Background forms can also be visible: scope to the active login dialog.
     const scope = await foreground(page)
     await scope.locator('input[autocomplete*="username"]:visible').last().fill(input.email, { timeout: 10000 })
@@ -57,18 +73,29 @@ export async function handleXLogin(context, action, input) {
   } else if (action !== 'resume') {
     throw new Error('invalid login action')
   }
-  if (await page.locator('input[type="password"]:visible').count()) {
+  if (['resume', 'password'].includes(action) && input.password) {
     const scope = await foreground(page)
-    await scope.locator('input[type="password"]:visible').last().fill(input.password)
+    const switchButton = scope.getByRole('button', { name: /^Use password$/i })
+    if (await switchButton.count()) {
+      await switchButton.last().click({timeout:10000})
+      await page.waitForTimeout(5000)
+    }
+  }
+  const scope = await foreground(page)
+  const password = await passwordField(scope)
+  if (password) {
+    const username = scope.locator('input[autocomplete*="username"]:visible')
+    if (input.email && await username.count()) await username.last().fill(input.email)
+    await password.fill(input.password)
     await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
     await page.waitForTimeout(3000)
   }
   const state = await inspect(context, page)
   if (state.stage !== 'needs_phone' || !/^\+86\d{11}$/.test(input.phone || '')) return state
-  const scope = await foreground(page)
-  const field = scope.locator('input[type="tel"]:visible, input[name*="phone"]:visible').last()
+  const phoneScope = await foreground(page)
+  const field = phoneScope.locator('input[type="tel"]:visible, input[name*="phone"]:visible').last()
   if (!await field.count()) return state
-  const country = scope.locator('select:visible')
+  const country = phoneScope.locator('select:visible')
   let national = false
   if (await country.count()) {
     const options = await country.last().locator('option').evaluateAll(options => options.map(o => ({value:o.value, text:o.textContent})))
@@ -77,21 +104,21 @@ export async function handleXLogin(context, action, input) {
     await country.last().selectOption(china.value)
     national = true
   } else {
-    const picker = scope.getByRole('combobox')
+    const picker = phoneScope.getByRole('combobox')
     if (await picker.count()) {
       await picker.last().click()
       const option = page.getByRole('option', { name: /China.*\+86|\+86.*China|中国/i })
       if (!await option.count()) return { stage: 'needs_phone_country_selection' }
       await option.last().click()
       national = true
-    } else if (/\+1\b/.test(await scope.innerText())) {
+    } else if (/\+1\b/.test(await phoneScope.innerText())) {
       // Never submit a Chinese number while an unknown country widget still says +1.
       return { stage: 'needs_phone_country_selection' }
     }
   }
   await field.fill(national ? input.phone.slice(3) : input.phone)
   phoneVerificationPages.add(page)
-  await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
+  await phoneScope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
   await page.waitForTimeout(3000)
   return await inspect(context, page)
 }

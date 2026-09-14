@@ -1,3 +1,4 @@
+import { trackXLogin, diagnoseXLogin } from './x-diagnostics.mjs';
 import { newBackgroundPage } from './background-page.mjs';
 import { handleWeversePanel } from './weverse-session.mjs';
 import { handleXPanel } from './x-session.mjs';
@@ -557,6 +558,8 @@ async function startBrowser() {
     await fs.chmod(profileDir, 0o700).catch(() => {});
 
     const chromiumArgs = [
+      '--window-size=1280,720',
+      '--window-position=0,0',
       '--disable-dev-shm-usage',
       '--autoplay-policy=user-gesture-required',
       // Reduce external protocol / app-handler noise (Open xdg-open? dialogs).
@@ -582,7 +585,8 @@ async function startBrowser() {
     }
     const launchOptions = {
       headless: settings.headless,
-      viewport: { width: 1280, height: 720 },
+      // Headful content must fit inside the Xvfb desktop after Chromium's toolbar.
+      viewport: settings.headless ? { width: 1280, height: 720 } : null,
       args: chromiumArgs,
     };
     // Optional proxy for XHS IP-risk bypass (BROWSER_PROXY_SERVER / proxyServer).
@@ -593,7 +597,9 @@ async function startBrowser() {
     }
     context = await launchPersistentBrowser(profileDir, launchOptions);
     // Close accidental popups (deep-link fallout).
+    for (const existing of context.pages()) trackXLogin(existing);
     context.on('page', (p) => {
+      trackXLogin(p);
       p.on('dialog', async (dialog) => {
         try { await dialog.dismiss(); } catch {}
       });
@@ -3516,6 +3522,12 @@ wss.on('connection', (socket) => {
         return;
       }
       switch (cmd) {
+        case 'x_panel_diagnose': {
+          const result = await diagnoseXLogin(context);
+          socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, ...result }));
+          break;
+        }
+        case 'x_panel_password':
         case 'x_panel_resume':
         case 'x_panel_login':
         case 'x_panel_verify': {
@@ -3529,10 +3541,13 @@ wss.on('connection', (socket) => {
               if (Date.now() - verification.createdAt > 8 * 60_000) throw new Error('expired local code');
               input.code = verification.code;
             }
-            const result = await handleXLogin(context, cmd.endsWith('_verify') ? 'verify' : cmd.endsWith('_resume') ? 'resume' : 'start', input);
+            const result = await handleXLogin(context, cmd.endsWith('_verify') ? 'verify' : cmd.endsWith('_resume') ? 'resume' : cmd.endsWith('_password') ? 'password' : 'start', input);
             socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, ...result }));
-          } catch {
-            socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, stage: 'browser_error' }));
+          } catch (error) {
+            const message = String(error?.message || '');
+            const operation = message.match(/^([A-Za-z]+\.[A-Za-z]+):/)?.[1] || 'unknown';
+            const reason = /Timeout/i.test(message) ? 'timeout' : /strict mode violation/i.test(message) ? 'ambiguous_target' : /not visible/i.test(message) ? 'hidden_target' : 'browser_error';
+            socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, stage: 'browser_error', operation, reason }));
           }
           break;
         }
