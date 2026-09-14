@@ -1,4 +1,5 @@
 import { handleWeversePanel } from './weverse-session.mjs';
+import { handleXPanel } from './x-session.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -584,7 +585,7 @@ async function startBrowser() {
     // Optional proxy for XHS IP-risk bypass (BROWSER_PROXY_SERVER / proxyServer).
     const proxyServer = String(settings.proxyServer || '').trim();
     if (proxyServer) {
-      launchOptions.proxy = { server: proxyServer };
+      launchOptions.proxy = { server: proxyServer, bypass: 'x.com,.x.com,twitter.com,.twitter.com,twimg.com,.twimg.com' };
       log(`browser proxy enabled: ${proxyServer}`);
     }
     context = await launchPersistentBrowser(profileDir, launchOptions);
@@ -651,7 +652,7 @@ async function startBrowser() {
         if (p !== page && !p.isClosed()) {
           const u = pageUrlSafe(p);
           // Keep nothing at cold start except the primary page; dedicated tabs open lazily.
-          if (!/im\.douyin\.com|xiaohongshu\.com\/explore|\/login|captcha|verify|passport\./i.test(u)) {
+          if (!/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(u) && !/im\.douyin\.com|xiaohongshu\.com\/explore|\/login|captcha|verify|passport\./i.test(u)) {
             await p.close().catch(() => {});
           }
         }
@@ -760,6 +761,7 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     if (keep.has(p) || p.isClosed()) continue;
     const url = pageUrlSafe(p);
     if (/^https:\/\/(?:[^/]+\.)?weverse\.io(?:\/|$)/i.test(url)) continue;
+    if (/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(url)) continue;
 
     // Protect IM / passport / QR even if our ref was lost after restart churn.
     if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan|website-login|captcha|verify/i.test(url)) continue;
@@ -3511,6 +3513,17 @@ wss.on('connection', (socket) => {
         return;
       }
       switch (cmd) {
+        case 'x_panel_open':
+        case 'x_panel_sync': {
+          try {
+            await startBrowser();
+            const result = await handleXPanel(context, cmd.endsWith('_open') ? 'open' : 'sync');
+            socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, ...result }));
+          } catch {
+            socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, error: 'X 浏览器操作失败，请在下方浏览器重试' }));
+          }
+          break;
+        }
         case 'weverse_panel_open':
         case 'weverse_panel_sync': {
           try {

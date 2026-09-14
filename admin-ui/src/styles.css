@@ -398,3 +398,8 @@ h1, .sidebar-brand > span { font-family: 'Newsreader Variable', Georgia, serif; 
  .service-uptime { display: block; grid-column: 2 / -1; }
  .service-detail { grid-template-columns: 1fr; padding: 0 14px 12px 34px; gap: 5px; }
 }
+.browser-toolbar.x-browser-auth { flex-wrap: wrap; justify-content: flex-start; }
+.browser-toolbar.x-browser-auth > div { flex: 0 1 auto; flex-wrap: wrap; min-width: 0; }
+.x-browser-auth button, .x-browser-auth .status-pill { flex-shrink: 0; white-space: nowrap; }
+.browser-toolbar.x-browser-auth .secondary-button { width: auto; min-width: 110px; padding: 0 14px; font-size: 13px; }
+.x-browser-auth > p { flex: 1 1 240px; margin: 0; font-size: 12px; line-height: 1.6; }
