@@ -2,6 +2,7 @@ import { trackXLogin, diagnoseXLogin } from './x-diagnostics.mjs';
 import { newBackgroundPage } from './background-page.mjs';
 import { handleWeversePanel } from './weverse-session.mjs';
 import { handleXPanel } from './x-session.mjs';
+import { createXSessionStore } from './x-session-store.mjs';
 import { handleXLogin } from './x-login.mjs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
@@ -28,6 +29,7 @@ const requestedPort = Number(args.wsPort || 0);
 
 let context;
 let browserStartPromise;
+let xSessionStore;
 let page;
 let douyinPage;
 let douyinIMPage;
@@ -648,6 +650,8 @@ async function startBrowser() {
     });
     await restoreStorageState();
     await seedConfiguredCookies();
+    xSessionStore = createXSessionStore(context, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', 'storage', 'x'));
+    await xSessionStore.restore().catch(() => {});
     page = context.pages().find(p => !/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(p.url())) || await newBackgroundPage(context);
     page.setDefaultTimeout(15_000);
     page.on('dialog', async (dialog) => {
@@ -3501,6 +3505,8 @@ async function shutdown() {
   clearInterval(douyinContactSyncTimer);
   clearInterval(browserHousekeepTimer);
   stopDouyinIM();
+  xSessionStore?.stop();
+  await xSessionStore?.sync().catch(() => {});
   try {
     if (douyinContactPersistTimer) await persistDouyinContacts();
     await persistStorageState();
@@ -3551,11 +3557,22 @@ wss.on('connection', (socket) => {
           }
           break;
         }
+        case 'x_panel_import': {
+          try {
+            await startBrowser();
+            const result = await xSessionStore.restore(true);
+            socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, ...result }));
+          } catch {
+            socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, error: 'X 登录态导入失败' }));
+          }
+          break;
+        }
         case 'x_panel_open':
         case 'x_panel_sync': {
           try {
             await startBrowser();
             const result = await handleXPanel(context, cmd.endsWith('_open') ? 'open' : 'sync');
+            if (result.session) await xSessionStore.sync();
             socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, ...result }));
           } catch {
             socket.send(JSON.stringify({ type: 'x_panel_result', requestId: command.requestId, error: 'X 浏览器操作失败，请在下方浏览器重试' }));
