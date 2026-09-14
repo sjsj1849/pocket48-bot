@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 const tracked = new WeakSet()
 const events = []
 const pathFor = raw => {
@@ -6,10 +8,17 @@ const pathFor = raw => {
 export function trackXLogin(page) {
   if (tracked.has(page)) return
   tracked.add(page)
-  const remember = value => {events.push({time:Date.now(),...value});if(events.length>30)events.shift()}
+  const remember = value => {value.time=Date.now();events.push(value);if(events.length>30)events.shift()}
   page.on('response', async response => {
     const path=pathFor(response.url());if(!path)return
     const event={path,status:response.status()};remember(event)
+    if (path.endsWith('/actions/finish_knowledge_check')) {
+      try {
+        const body=await response.body()
+        if(body.toString('utf8').includes('Sorry, you are not allowed to log in at this time.')) event.loginError='login_temporarily_blocked'
+        if(body.length<=65536) await fs.writeFile(fileURLToPath(new URL('../../storage/x/knowledge-response.bin', import.meta.url)),body,{mode:0o600})
+      }catch{}
+    }
     if (response.status()>=400) {
       try {
         const data=await response.json()
@@ -32,4 +41,8 @@ export async function diagnoseXLogin(context) {
     return {height:innerHeight,width:innerWidth,fields,buttons,errors:{wrongInformation:/incorrect|doesn.t match|not match|couldn.t find|not found|不正确|不匹配/i.test(text),retry:/something went wrong|try again|出错|重试/i.test(text)}}
   })
   return {stage:'diagnosed',...dom,network:events.filter(e=>Date.now()-e.time<10*60_000)}
+}
+
+export function xLoginFailure(since) {
+  return [...events].reverse().find(event=>event.time>=since && event.loginError)?.loginError || null
 }

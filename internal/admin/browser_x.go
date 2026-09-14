@@ -119,6 +119,7 @@ func (s *Server) handleBrowserX(w http.ResponseWriter, r *http.Request) {
 				fail("保存 X 登录态失败")
 				return
 			}
+			_ = weverse.Write(dir, "login-status.json", map[string]any{"phase": "authenticated", "message": "X 登录态已保存；监控采集仍需进一步验证。", "lastCheck": time.Now().UnixMilli()})
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return

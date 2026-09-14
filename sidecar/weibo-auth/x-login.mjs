@@ -1,3 +1,4 @@
+import { xLoginFailure } from './x-diagnostics.mjs'
 import { xSessionFromCookies } from './x-session.mjs'
 
 const phoneVerificationPages = new WeakSet()
@@ -40,6 +41,7 @@ async function inspect(context, page) {
 
 // Only private local worker commands call this; input is never logged or returned.
 export async function handleXLogin(context, action, input) {
+  const attemptStarted=Date.now()
   if (await loggedIn(context)) return { stage: 'authenticated' }
   const page = await loginPage(context)
   await page.bringToFront()
@@ -90,6 +92,8 @@ export async function handleXLogin(context, action, input) {
     await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
     await page.waitForTimeout(3000)
   }
+  const failure=xLoginFailure(attemptStarted)
+  if(failure)return {stage:failure}
   const state = await inspect(context, page)
   if (state.stage !== 'needs_phone' || !/^\+86\d{11}$/.test(input.phone || '')) return state
   const phoneScope = await foreground(page)
@@ -111,14 +115,24 @@ export async function handleXLogin(context, action, input) {
       if (!await option.count()) return { stage: 'needs_phone_country_selection' }
       await option.last().click()
       national = true
-    } else if (/\+1\b/.test(await phoneScope.innerText())) {
-      // Never submit a Chinese number while an unknown country widget still says +1.
-      return { stage: 'needs_phone_country_selection' }
+    } else if (await phoneScope.getByText(/^\+86$/).count()) {
+      national = true
+    } else if (await phoneScope.getByText(/^\+1$/).count()) {
+      const prefix = phoneScope.getByText(/^\+1$/)
+      if (!await prefix.count()) return { stage: 'needs_phone_country_selection' }
+      await prefix.last().click({timeout:10000})
+      const search = page.getByPlaceholder('Search', {exact:true})
+      await search.fill('China', {timeout:10000})
+      await page.getByText('China', {exact:true}).last().click({timeout:10000})
+      await search.waitFor({state:'hidden',timeout:10000})
+      if (!await phoneScope.getByText(/^\+86$/).count()) return { stage: 'needs_phone_country_selection' }
+      national = true
     }
   }
   await field.fill(national ? input.phone.slice(3) : input.phone)
   phoneVerificationPages.add(page)
   await phoneScope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
   await page.waitForTimeout(3000)
-  return await inspect(context, page)
+  const phoneFailure=xLoginFailure(attemptStarted)
+  return phoneFailure ? {stage:phoneFailure} : await inspect(context, page)
 }
