@@ -4,6 +4,7 @@ import { newBackgroundPage } from './background-page.mjs';
 import { handleWeversePanel } from './weverse-session.mjs';
 import { handleXPanel } from './x-session.mjs';
 import { createXSessionStore } from './x-session-store.mjs';
+import { createInstagramSessionStore } from './instagram-session-store.mjs';
 import { handleXLogin } from './x-login.mjs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
@@ -31,6 +32,7 @@ const requestedPort = Number(args.wsPort || 0);
 let context;
 let browserStartPromise;
 let xSessionStore;
+let instagramSessionStore;
 let page;
 let douyinPage;
 let douyinIMPage;
@@ -655,7 +657,9 @@ async function startBrowser() {
     await seedConfiguredCookies();
     xSessionStore = createXSessionStore(context, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', 'storage', 'x'));
     await xSessionStore.restore().catch(() => {});
-    page = context.pages().find(p => !/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(p.url())) || await newBackgroundPage(context);
+    instagramSessionStore = createInstagramSessionStore(context, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', 'storage', 'instagram'));
+    await instagramSessionStore.restore().catch(() => {});
+    page = context.pages().find(p => !/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com|instagram\.com)(?:\/|$)/i.test(p.url())) || await newBackgroundPage(context);
     page.setDefaultTimeout(15_000);
     page.on('dialog', async (dialog) => {
       try { await dialog.dismiss(); } catch {}
@@ -779,6 +783,7 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     if (/^https:\/\/(?:[^/]+\.)?weverse\.io(?:\/|$)/i.test(url)) continue;
     if (/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(url)) continue;
 
+    if (/^https:\/\/(?:www\.)?instagram\.com(?:\/|$)/i.test(url)) continue;
     // Protect IM / passport / QR even if our ref was lost after restart churn.
     if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan|website-login|captcha|verify/i.test(url)) continue;
     // Protect ALL xhs pages when pruning from scan loop (login/captcha safety).
@@ -3522,6 +3527,8 @@ async function shutdown() {
   clearInterval(douyinContactSyncTimer);
   clearInterval(browserHousekeepTimer);
   stopDouyinIM();
+  instagramSessionStore?.stop();
+  await instagramSessionStore?.sync().catch(() => {});
   xSessionStore?.stop();
   await xSessionStore?.sync().catch(() => {});
   try {
@@ -3571,6 +3578,19 @@ wss.on('connection', (socket) => {
             const operation = message.match(/^([A-Za-z]+\.[A-Za-z]+):/)?.[1] || 'unknown';
             const reason = /Timeout/i.test(message) ? 'timeout' : /strict mode violation/i.test(message) ? 'ambiguous_target' : /not visible/i.test(message) ? 'hidden_target' : 'browser_error';
             socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, stage: 'browser_error', operation, reason }));
+          }
+          break;
+        }
+        case 'instagram_panel_import':
+        case 'instagram_panel_sync':
+        case 'instagram_panel_open': {
+          try {
+            await startBrowser();
+            const result = cmd.endsWith('_import') ? await instagramSessionStore.restore(true) : cmd.endsWith('_open') ? await instagramSessionStore.open() : await instagramSessionStore.sync(true);
+            if (cmd.endsWith('_import') || cmd.endsWith('_sync')) await persistStorageState({ force: true, reason: 'instagram_panel' });
+            socket.send(JSON.stringify({ type:'instagram_panel_result', requestId:command.requestId, ...result }));
+          } catch {
+            socket.send(JSON.stringify({ type:'instagram_panel_result', requestId:command.requestId, error:'Instagram 浏览器操作失败' }));
           }
           break;
         }

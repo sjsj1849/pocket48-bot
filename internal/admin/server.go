@@ -221,6 +221,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleWeversePostPasswords(w, r)
 	case "/api/weverse/ai":
 		s.handleWeverseAI(w, r)
+	case "/api/instagram/browser":
+		s.handleInstagramBrowser(w, r)
 	case "/api/instagram/settings", "/api/instagram/search", "/api/instagram/preview", "/api/instagram/session":
 		s.handleInstagram(w, r)
 	case "/api/x/settings", "/api/x/search", "/api/x/preview":

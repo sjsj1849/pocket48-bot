@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"pocket48-bot/internal/instagram"
 	"pocket48-bot/internal/napcat"
 	"strconv"
@@ -114,6 +116,23 @@ func (b *Bot) runInstagramLoop(ctx context.Context) {
 			status.LastCheck = time.Now().Format(time.RFC3339)
 			_ = instagram.Write(dir, "status.json", status)
 		}
+		if err == nil {
+			var probe struct {
+				Pending     bool   `json:"pending"`
+				Username    string `json:"username"`
+				UserID      string `json:"userId"`
+				NextRetryAt string `json:"nextRetryAt"`
+			}
+			if instagram.Read(dir, "probe-state.json", &probe) == nil && probe.Pending {
+				next, _ := time.Parse(time.RFC3339, probe.NextRetryAt)
+				if !next.After(time.Now()) {
+					_, _ = (instagram.Client{Dir: dir, ProxyURL: cfg.ProxyURL}).Call(ctx, map[string]any{"operation": "feed_probe", "username": probe.Username, "userId": probe.UserID, "limit": 2})
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "browser-candidate.json")); statErr == nil {
+				_, _ = (instagram.Client{Dir: dir, ProxyURL: cfg.ProxyURL}).Call(ctx, map[string]any{"operation": "session_browser_apply"})
+			}
+		}
 		if err == nil && cfg.Enabled {
 			client := instagram.Client{Dir: dir, ProxyURL: cfg.ProxyURL}
 			results := map[string][]instagram.Event{}
@@ -121,6 +140,7 @@ func (b *Bot) runInstagramLoop(ctx context.Context) {
 			failures := map[string]error{}
 			status.Error = ""
 			status.ErrorCode = ""
+			status.NextRetryAt = ""
 			status.Events = 0
 			status.Forwarded = 0
 			status.Targets = map[string]string{}
@@ -138,7 +158,11 @@ func (b *Bot) runInstagramLoop(ctx context.Context) {
 						e = fmt.Errorf("账号编号发生变化，请重新保存订阅")
 					}
 					if e == nil {
-						events, e = client.Collect(ctx, sub, 100, instagram.ScanSince(state.Subscriptions[sub.ID]))
+						limit := 100
+						if !state.Subscriptions[sub.ID].Ready {
+							limit = 10
+						}
+						events, e = client.Collect(ctx, sub, limit, instagram.ScanSince(state.Subscriptions[sub.ID]))
 					}
 					if ce, ok := e.(*instagram.Error); ok && ce.Code == "scan_incomplete" {
 						events, e = client.Collect(ctx, sub, 500, instagram.ScanSince(state.Subscriptions[sub.ID]))
@@ -194,6 +218,7 @@ func (b *Bot) runInstagramLoop(ctx context.Context) {
 					status.Error = "@" + sub.Username + "：" + e.Error()
 					if ce, ok := e.(*instagram.Error); ok {
 						status.ErrorCode = ce.Code
+						status.NextRetryAt = ce.NextRetryAt
 					}
 				} else {
 					status.Targets[sub.ID] = "正常"

@@ -72,6 +72,42 @@ class CollectorTests(unittest.TestCase):
                     c.execute({'operation': 'session_import', 'cookies': 'sessionid=a; csrftoken=b'}, Path(directory))
             self.assertEqual(p.read_text(), 'old-private-session')
 
+    def test_browser_candidate_validation_preserves_good_session(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            old = {'username': 'me', 'cookies': {'sessionid': 'good', 'csrftoken': 'csrf'}}
+            c.write_private(directory / 'session.json', old)
+            c.write_private(directory / 'browser-candidate.json', {'cookies': {'sessionid': 'new', 'csrftoken': 'new-csrf'}})
+            with patch.object(c.instaloader, 'Instaloader') as constructor:
+                constructor.return_value.test_login.return_value = None
+                constructor.return_value.context.save_session.return_value = old['cookies']
+                with self.assertRaises(c.Failure):
+                    c.execute({'operation': 'session_browser_apply'}, directory)
+                self.assertEqual(json.loads((directory / 'session.json').read_text()), old)
+                self.assertTrue(json.loads((directory / 'browser-candidate.json').read_text())['rejected'])
+                with patch.object(c, 'resolve_profile') as profile:
+                    profile.return_value = SimpleNamespace(userid=42, username='artist', full_name='Artist', _node={'profile_pic_url':'https://cdn/avatar'}, is_private=False)
+                    c.execute({'operation': 'lookup', 'query': 'artist'}, directory)
+                    profile.assert_called_once()
+
+    def test_browser_candidate_success_and_clear_keep_rate_state(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            c.write_private(directory / 'browser-candidate.json', {'cookies': {'sessionid': 'new', 'csrftoken': 'new-csrf'}})
+            rate = {'requests': [c.time.time()], 'builtin': {}, 'failureStreak': 2}
+            c.write_private(directory / 'request-state.json', rate)
+            with patch.object(c.instaloader, 'Instaloader') as constructor:
+                loader = constructor.return_value
+                loader.test_login.return_value = 'me'
+                loader.context.save_session.return_value = {'sessionid': 'new', 'csrftoken': 'new-csrf'}
+                c.execute({'operation': 'session_browser_apply'}, directory)
+            self.assertFalse((directory / 'browser-candidate.json').exists())
+            self.assertEqual(json.loads((directory / 'session.json').read_text())['cookies']['sessionid'], 'new')
+            c.execute({'operation': 'session_clear'}, directory)
+            self.assertEqual(json.loads((directory / 'request-state.json').read_text()), rate)
+
     def test_password_login_saves_only_session(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(c.instaloader, 'Instaloader') as constructor:

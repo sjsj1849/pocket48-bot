@@ -63,6 +63,7 @@ type Settings struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 }
 type Status struct {
+	NextRetryAt string            `json:"nextRetryAt,omitempty"`
 	LastCheck   string            `json:"lastCheck"`
 	LastSuccess string            `json:"lastSuccess"`
 	StartedAt   string            `json:"startedAt"`

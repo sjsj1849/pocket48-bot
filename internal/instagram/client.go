@@ -18,10 +18,15 @@ type Response struct {
 	Username          string  `json:"username"`
 	SessionConfigured bool    `json:"sessionConfigured"`
 }
-type Error struct{ Code string }
+type Error struct {
+	Code        string
+	NextRetryAt string
+}
 
 func (e *Error) Error() string {
 	switch e.Code {
+	case "cooldown":
+		return "Instagram 正在冷却，下一次允许请求：" + e.NextRetryAt
 	case "login_blocked":
 		return "Instagram 拒绝了服务器登录请求，请在自己的浏览器登录并导入 Cookie"
 	case "bad_credentials":
@@ -93,7 +98,8 @@ func (c Client) Call(ctx context.Context, request map[string]any) (Response, err
 		OK    bool     `json:"ok"`
 		Data  Response `json:"data"`
 		Error struct {
-			Code string `json:"code"`
+			Code        string `json:"code"`
+			NextRetryAt string `json:"nextRetryAt"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(out.Bytes(), &envelope) != nil {
@@ -103,7 +109,7 @@ func (c Client) Call(ctx context.Context, request map[string]any) (Response, err
 		return Response{}, fmt.Errorf("Instagram 采集模块未返回有效响应")
 	}
 	if !envelope.OK {
-		return Response{}, &Error{Code: envelope.Error.Code}
+		return Response{}, &Error{Code: envelope.Error.Code, NextRetryAt: envelope.Error.NextRetryAt}
 	}
 	if err != nil {
 		return Response{}, fmt.Errorf("Instagram 采集进程异常退出")

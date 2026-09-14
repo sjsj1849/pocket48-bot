@@ -12,19 +12,14 @@ import tempfile
 import time
 
 import instaloader
+from persistent_rate import PersistentLimiter, RateBlocked
+from feed_v1 import user_posts_v1, FeedError
 
 
 class Failure(Exception):
     def __init__(self, code):
         self.code = code
 
-
-class BoundedRateController(instaloader.RateController):
-    def sleep(self, secs):
-        # Let the Go scheduler back off instead of blocking a worker for minutes.
-        if secs > 10:
-            raise Failure("rate_limit")
-        super().sleep(secs)
 
 
 def username(raw):
@@ -173,107 +168,179 @@ def execute(request, directory):
     with open(directory / "session.lock", "a") as lock:
         os.chmod(lock.name, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        operation = request.get("operation")
-        if operation == "session_clear":
-            path.unlink(missing_ok=True)
-            (directory / "pending-2fa.json").unlink(missing_ok=True)
-            return {"sessionConfigured": False}
-        loader = instaloader.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
-                                       request_timeout=20, rate_controller=BoundedRateController, iphone_support=False)
-        proxy = request.get("proxyURL")
-        login = ""
-        if proxy:
-            os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = proxy
-        if operation in ("session_login", "session_2fa"):
-            pending_path = directory / "pending-2fa.json"
-            if operation == "session_login":
-                name = login_identifier(request.get("username"))
-                password = request.get("password", "")
-                if not isinstance(password, str) or not password or len(password) > 1024:
-                    raise Failure("bad_credentials")
-                try:
-                    loader.login(name, password)
-                except instaloader.exceptions.TwoFactorAuthRequiredException:
-                    session, user, identifier = loader.context.two_factor_auth_pending
-                    write_private(pending_path, {"username": user, "cookies": session.cookies.get_dict(), "identifier": identifier, "expires": time.time() + 600})
-                    raise Failure("two_factor_required")
-            else:
-                if not pending_path.exists():
-                    raise Failure("two_factor_expired")
-                pending = json.loads(pending_path.read_text())
-                if pending.get("expires", 0) < time.time():
-                    pending_path.unlink(missing_ok=True)
-                    raise Failure("two_factor_expired")
-                code = request.get("code", "")
-                if not re.fullmatch(r"[0-9]{6,8}", code):
-                    raise Failure("bad_credentials")
-                loader.context.load_session(login_identifier(pending["username"]), pending["cookies"])
-                if proxy:
-                    loader.context._session.proxies.update({"http": proxy, "https": proxy})
-                loader.context.two_factor_auth_pending = (loader.context._session, pending["username"], pending["identifier"])
-                loader.two_factor_login(code)
-            login = loader.context.username
-            if "@" in login or login.startswith("+") or login.isdigit():
-                login = loader.test_login()
-                if not login:
-                    raise Failure("login_blocked")
-            login = username(login)
-            loader.context.username = login
-            write_session(path, loader.context, login)
-            pending_path.unlink(missing_ok=True)
-            return {"username": login, "sessionConfigured": True}
-        if operation == "session_import":
-            loader.context.load_session("imported", parse_cookies(request.get("cookies", "")))
-        elif path.exists():
-            if path.stat().st_mode & 0o077:
-                raise Failure("insecure_session_permissions")
-            session = json.loads(path.read_text())
-            login = username(session["username"])
-            loader.context.load_session(login, session["cookies"])
-        if proxy:
-            loader.context._session.proxies.update({"http": proxy, "https": proxy})
-        if operation in ("session_import", "session_check"):
-            if operation == "session_check" and not login:
-                raise Failure("login_required")
-            verified = loader.test_login()
-            if not verified:
-                raise Failure("login_required")
-            login = username(verified)
-            loader.context.username = login
-            write_session(path, loader.context, login)
-            return {"username": login, "sessionConfigured": True}
-        if operation not in ("lookup", "timeline"):
-            raise Failure("invalid_request")
-        name = username(request.get("query") if operation == "lookup" else request.get("username"))
-        profile = resolve_profile(loader.context, name, directory)
-        author = profile_data(profile)
-        if operation == "lookup":
-            result = {"user": author}
-        else:
-            if profile.is_private and not login:
-                raise Failure("login_required")
-            limit = min(max(int(request.get("limit", 100)), 1), 500)
-            since = request.get("since") or {}
-            events = []
-            if request.get("posts", True):
-                events.extend(scan_posts(profile.get_posts(), author, limit, max(int(since.get("post", 0)), 0)))
-            if request.get("reels", True):
-                events.extend(scan_posts(profile.get_reels(), author, limit, max(int(since.get("reel", 0)), 0), "reel"))
-            if request.get("stories"):
-                if not login:
+        limiter = PersistentLimiter(directory)
+        with limiter.transport():
+            operation = request.get("operation")
+            if operation == "session_clear":
+                path.unlink(missing_ok=True)
+                (directory / "pending-2fa.json").unlink(missing_ok=True)
+                (directory / "browser-candidate.json").unlink(missing_ok=True)
+                return {"sessionConfigured": False}
+            loader = instaloader.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
+                                           request_timeout=20, rate_controller=limiter.controller, iphone_support=False)
+            proxy = request.get("proxyURL")
+            login = ""
+            if proxy:
+                os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = proxy
+            if operation in ("session_login", "session_2fa"):
+                pending_path = directory / "pending-2fa.json"
+                if operation == "session_login":
+                    name = login_identifier(request.get("username"))
+                    password = request.get("password", "")
+                    if not isinstance(password, str) or not password or len(password) > 1024:
+                        raise Failure("bad_credentials")
+                    try:
+                        loader.login(name, password)
+                    except instaloader.exceptions.TwoFactorAuthRequiredException:
+                        session, user, identifier = loader.context.two_factor_auth_pending
+                        write_private(pending_path, {"username": user, "cookies": session.cookies.get_dict(), "identifier": identifier, "expires": time.time() + 600})
+                        raise Failure("two_factor_required")
+                else:
+                    if not pending_path.exists():
+                        raise Failure("two_factor_expired")
+                    pending = json.loads(pending_path.read_text())
+                    if pending.get("expires", 0) < time.time():
+                        pending_path.unlink(missing_ok=True)
+                        raise Failure("two_factor_expired")
+                    code = request.get("code", "")
+                    if not re.fullmatch(r"[0-9]{6,8}", code):
+                        raise Failure("bad_credentials")
+                    loader.context.load_session(login_identifier(pending["username"]), pending["cookies"])
+                    if proxy:
+                        loader.context._session.proxies.update({"http": proxy, "https": proxy})
+                    loader.context.two_factor_auth_pending = (loader.context._session, pending["username"], pending["identifier"])
+                    loader.two_factor_login(code)
+                login = loader.context.username
+                if "@" in login or login.startswith("+") or login.isdigit():
+                    login = loader.test_login()
+                    if not login:
+                        raise Failure("login_blocked")
+                login = username(login)
+                loader.context.username = login
+                write_session(path, loader.context, login)
+                pending_path.unlink(missing_ok=True)
+                return {"username": login, "sessionConfigured": True}
+            candidate_path=directory / "browser-candidate.json"
+            browser_apply=operation=="session_browser_apply" or (operation in ("lookup","timeline","session_check") and candidate_path.exists())
+            candidate=None
+            if browser_apply and operation != "session_browser_apply":
+                pending=json.loads(candidate_path.read_text())
+                if pending.get("rejected"): browser_apply=False
+            if browser_apply:
+                if not candidate_path.exists():
+                    existing=json.loads(path.read_text()) if path.exists() else {}
+                    return {"username":existing.get("username",""),"sessionConfigured":bool(existing.get("cookies",{}).get("sessionid"))}
+                candidate=json.loads(candidate_path.read_text())
+                if candidate.get("rejected"): raise Failure("login_required")
+                loader.context.load_session("imported",parse_cookies(json.dumps(candidate.get("cookies",{}))))
+            elif operation == "session_import":
+                loader.context.load_session("imported", parse_cookies(request.get("cookies", "")))
+            elif path.exists():
+                if path.stat().st_mode & 0o077:
+                    raise Failure("insecure_session_permissions")
+                session = json.loads(path.read_text())
+                login = username(session["username"])
+                loader.context.load_session(login, session["cookies"])
+            if proxy:
+                loader.context._session.proxies.update({"http": proxy, "https": proxy})
+            if operation in ("session_import", "session_check", "session_browser_apply") or browser_apply:
+                if operation == "session_check" and not login and not browser_apply:
                     raise Failure("login_required")
-                for story in loader.get_stories(userids=[profile.userid]):
-                    events.extend(story_data(item, author) for item in story.get_items())
-            # Feed and Reels can expose the same media; canonicalize by media ID.
-            dedup = {}
-            for event in events:
-                key = ("story" if event["kind"] == "story" else "post", event["id"])
-                if key not in dedup or event["kind"] == "reel":
-                    dedup[key] = event
-            result = {"user": author, "events": list(dedup.values())}
-        if login:
-            write_session(path, loader.context, login)
-        return result
+                verified = loader.test_login()
+                if not verified:
+                    if browser_apply:
+                        candidate["rejected"]=True
+                        write_private(candidate_path,candidate)
+                        write_private(directory/"browser-status.json",{"configured":True,"pending":False,"error":"浏览器登录态验证失败，已保留原会话"})
+                    raise Failure("login_required")
+                login = username(verified)
+                loader.context.username = login
+                write_session(path, loader.context, login)
+                if browser_apply:
+                    candidate_path.unlink(missing_ok=True)
+                    write_private(directory/"browser-status.json",{"configured":True,"pending":False,"updatedAt":int(time.time()*1000)})
+                if operation in ("session_import","session_check","session_browser_apply"):
+                    return {"username": login, "sessionConfigured": True}
+            if operation not in ("lookup", "timeline", "feed_probe"):
+                raise Failure("invalid_request")
+            name = username(request.get("query") if operation == "lookup" else request.get("username"))
+            if operation == "feed_probe":
+                if not login: raise Failure("login_required")
+                user_id = str(request.get("userId", ""))
+                if not user_id.isdigit(): raise Failure("user_unavailable")
+                # Probe the replacement independently of the currently broken profile query.
+                author = {"id":user_id,"username":name,"name":name,"avatar":"","protected":False}
+                probe_path=directory/"probe-state.json"
+                previous=json.loads(probe_path.read_text()) if probe_path.exists() else {}
+                attempts=previous.get("attempts",0)
+                before=len(limiter.state["requests"])
+                try:
+                    events=scan_posts(user_posts_v1(loader,user_id,name),author,min(5,int(request.get("limit",1))),0)
+                    write_session(path,loader.context,login)
+                    preference_path=directory/"feed-api.json"
+                    preference=json.loads(preference_path.read_text()) if preference_path.exists() else {}
+                    preference[name]="v1";write_private(preference_path,preference)
+                    write_private(probe_path,{"pending":False,"success":True,"username":name,"userId":user_id,"events":len(events),"attempts":attempts+1,"checkedAt":time.time()})
+                    return {"user":author,"events":events,"feedAPI":"v1"}
+                except RateBlocked as error:
+                    if len(limiter.state["requests"])>before: attempts+=1
+                    write_private(probe_path,{"pending":attempts<3,"success":False,"username":name,"userId":user_id,"attempts":attempts,"nextRetryAt":error.retry_at,"error":"正在冷却，等待下一次只读验证" if attempts<3 else "三次验证均受平台限制，已暂停只读验证"})
+                    raise
+                except FeedError as error:
+                    write_private(probe_path,{"pending":False,"success":False,"username":name,"userId":user_id,"attempts":attempts+1,"error":error.code})
+                    raise
+            profile = resolve_profile(loader.context, name, directory)
+            author = profile_data(profile)
+            if operation == "lookup":
+                result = {"user": author}
+            else:
+                if profile.is_private and not login:
+                    raise Failure("login_required")
+                limit = min(max(int(request.get("limit", 100)), 1), 500)
+                since = request.get("since") or {}
+                events = []
+                if request.get("posts", True):
+                    preference_path = directory / "feed-api.json"
+                    preference = json.loads(preference_path.read_text()) if preference_path.exists() else {}
+                    use_v1 = login and (preference.get(name) in ("v1","v1-pending"))
+                    if use_v1:
+                        items = user_posts_v1(loader,profile.userid,name)
+                    else:
+                        items = None
+                    try:
+                        if items is None: items=profile.get_posts()
+                        events.extend(scan_posts(items, author, limit, max(int(since.get("post", 0)), 0)))
+                    except RateBlocked:
+                        # On the next allowed scan, test v1 instead of retrying the
+                        # same failing timeline doc_id forever. Never bypass cooldown.
+                        if login and not use_v1:
+                            preference[name]="v1-pending";write_private(preference_path,preference)
+                        raise
+                    except instaloader.exceptions.ConnectionException as error:
+                        # Hard API failure can use the alternate; a real cooldown (RateBlocked)
+                        # is never bypassed by changing endpoints.
+                        if not login or not any(x in str(error) for x in ("400", "401", "403")): raise
+                        events.extend(scan_posts(user_posts_v1(loader,profile.userid,name),author,limit,max(int(since.get("post",0)),0)))
+                        preference[name]="v1"
+                        write_private(preference_path,preference)
+                if request.get("reels", True):
+                    events.extend(scan_posts(profile.get_reels(), author, limit, max(int(since.get("reel", 0)), 0), "reel"))
+                if request.get("stories"):
+                    if not login:
+                        raise Failure("login_required")
+                    for story in loader.get_stories(userids=[profile.userid]):
+                        events.extend(story_data(item, author) for item in story.get_items())
+                # Feed and Reels can expose the same media; canonicalize by media ID.
+                dedup = {}
+                for event in events:
+                    key = ("story" if event["kind"] == "story" else "post", event["id"])
+                    if key not in dedup or event["kind"] == "reel":
+                        dedup[key] = event
+                result = {"user": author, "events": list(dedup.values())}
+            if login:
+                write_session(path, loader.context, login)
+            if operation == "timeline": limiter.success()
+            return result
 
 
 def main():
@@ -286,6 +353,10 @@ def main():
         with contextlib.redirect_stdout(open(os.devnull, "w")), contextlib.redirect_stderr(open(os.devnull, "w")):
             result = execute(request, Path(args.storage_dir))
         output = {"ok": True, "data": result}
+    except RateBlocked as error:
+        output = {"ok": False, "error": {"code": error.code, "nextRetryAt": error.retry_at, "reason": error.reason}}
+    except FeedError as error:
+        output = {"ok": False, "error": {"code": error.code}}
     except Failure as error:
         output = {"ok": False, "error": {"code": error.code}}
     except instaloader.exceptions.TooManyRequestsException:
