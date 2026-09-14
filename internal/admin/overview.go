@@ -317,6 +317,9 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		card.Uptime = uptime
 		states = append(states, *card)
 	}
+	igCard := instagramService(flags.ConfigPath, time.Now())
+	igCard.Uptime = uptime
+	states = append(states, *igCard)
 	card := xService(flags.ConfigPath, time.Now())
 	card.Uptime = uptime
 	states = append(states, *card)
@@ -342,7 +345,7 @@ func parseActivity(lines []string, limit int) []activityItem {
 		}
 		level := "info"
 		switch {
-		case strings.Contains(line, "error"), strings.Contains(line, "失败"), strings.Contains(line, "异常"):
+		case strings.Contains(line, "error"), strings.Contains(line, "[Instagram] 新帖子") || strings.Contains(line, "失败"), strings.Contains(line, "异常"):
 			level = "error"
 		case strings.Contains(line, "warning"), strings.Contains(line, "待验证"), strings.Contains(line, "⚠"):
 			level = "warning"
@@ -358,7 +361,7 @@ func interestingLog(line string) bool {
 	if strings.Contains(line, "resolved room") || strings.Contains(line, "Checking for UID") || strings.Contains(line, "active live discovery") {
 		return false
 	}
-	return strings.Contains(line, "connected") || strings.Contains(line, "Connected") || strings.Contains(line, "status=") || strings.Contains(line, "Sending group message") || strings.Contains(line, "ordered message processed") || strings.Contains(line, "error") || strings.Contains(line, "失败") || strings.Contains(line, "异常")
+	return strings.Contains(line, "connected") || strings.Contains(line, "Connected") || strings.Contains(line, "status=") || strings.Contains(line, "Sending group message") || strings.Contains(line, "ordered message processed") || strings.Contains(line, "error") || strings.Contains(line, "[Instagram] 新帖子") || strings.Contains(line, "失败") || strings.Contains(line, "异常")
 }
 
 func logTime(line string) string {
@@ -692,7 +695,7 @@ func overviewActivity(lines []string, services []serviceState, limit int) []acti
 	// Keep the latest actual Weverse scan visible even when other platforms emit
 	// enough heartbeat messages to fill the recent log window.
 	for _, card := range services {
-		if (card.ID != "weverse" && card.ID != "x") || card.LastTime == "—" {
+		if (card.ID != "weverse" && card.ID != "x" && card.ID != "instagram") || card.LastTime == "—" {
 			continue
 		}
 		level := "success"

@@ -242,6 +242,20 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			}
 		}
 		addPost := func(p any) error {
+			id := text(obj(p), "postId", "id")
+			if idRE.MatchString(id) {
+				ep, e := c.withPostPassword("/post/v1.0/post-" + id + "?fieldSet=postV1")
+				if e != nil {
+					return e
+				}
+				if strings.Contains(ep, "lockPassword=") {
+					var full Object
+					if e = c.call(ctx, ep, true, &full); e != nil {
+						return e
+					}
+					p = full
+				}
+			}
 			event, err := eventFromPost(obj(p), s.Slug, cid)
 			if err != nil {
 				return err

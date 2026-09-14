@@ -1053,6 +1053,7 @@ func (b *Bot) Start() error {
 	defer stopWeverse()
 	go b.runWeverseLoop(weverseCtx)
 	go b.runXLoop(weverseCtx)
+	go b.runInstagramLoop(weverseCtx)
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()

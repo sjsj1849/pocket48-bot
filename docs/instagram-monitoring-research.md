@@ -1,6 +1,6 @@
 # Instagram 监控选型（2026-09-15）
 
-结论：可以接入现有 BOT。建议以 Instaloader 的 Python 模块为采集器，沿用 X 的独立采集进程、订阅存储、游标、OneBot 媒体投递和面板健康状态。现阶段已完成源码/文档调研，尚未安装或开启 Instagram 转发；没有用真实 Instagram 登录态验证。
+结论：可以接入现有 BOT。建议以 Instaloader 的 Python 模块为采集器，沿用 X 的独立采集进程、订阅存储、游标、OneBot 媒体投递和面板健康状态。后续已安装并接入 BOT，配置栏和服务总览见 [接入说明](instagram-integration.md)。真实未登录请求收到 429；尚未提供 Instagram 登录态，所以默认关闭，真实登录及内容采集待验证。
 
 ## 候选项目
 
