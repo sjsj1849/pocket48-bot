@@ -20,10 +20,17 @@
 
 Go 测试覆盖基线、持久去重、新增内容类型、账号变更、时间游标、QQ 媒体与 footer/@全体布局、面板会话脱敏。Python 测试覆盖混合相册顺序、Cookie 域名筛选、置顶和分页溢出、失败导入保留会话。
 
-真实服务器对 @hearts2hearts 做未登录 Profile 请求，Instagram 返回 HTTP 429；已映射为 rate_limit，失败不是空列表。目前没有 Instagram 登录态，不能声称完成真实登录、Feed/Reels/Story 或 QQ 端实际投递验证。监控默认关闭，待导入用户登录态和添加账号后启用。Instagram 直播不在本轮范围。
+真实服务器对 @hearts2hearts 做未登录 Profile 请求，Instagram 返回 HTTP 429；已映射为 rate_limit，失败不是空列表。后续用户导入 Cookie 已通过 test_login，账号精确搜索和一条普通多图帖子实际读取成功；Reels/Story 和 QQ 端实际投递仍待验证。监控默认关闭，待添加账号后启用。Instagram 直播不在本轮范围。
 
 ## 账号密码和二次验证
 
 配置栏同时支持用户名、邮箱或手机号/密码直接登录、六至八位二次验证码。密码只存在于本次请求和进程内存，不写会话文件；只有登录成功后才原子替换现有会话。2FA 待验证信息（不含密码）以 0600 保存，十分钟过期，成功或清除会话时删除。Instagram 安全 checkpoint 必须由账号本人在浏览器完成，完成后可导入 Cookie。当前服务器实际账号密码登录未成功，显示“服务器登录被拒绝”，不将其当作账号已登录。
 
-服务器浏览器也尝试打开官方 accounts/login 表单，等待后未获得可操作的登录表单（TimeoutError）。用户名和手机号直接登录均返回 LoginException，尚无成功会话；不能把这个结果认定为密码错误。后续需在账号本人浏览器完成正常登录/安全验证后，通过配置栏导入 Cookie，再做真实采集验证。
+服务器浏览器也尝试打开官方 accounts/login 表单，等待后未获得可操作的登录表单（TimeoutError）。用户名和手机号直接登录均返回 LoginException，当时尚无成功会话；不能把这个结果认定为密码错误。后续已通过用户 Cookie 验证登录。
+
+
+## 已登录资料查询修复
+
+Instaloader 4.15.3 的 from_username 仍访问 web_profile_info，本服务器该路径返回 429。已登录时先使用库内 TopSearchResults 精确用户名查找，再由 Profile 的 GraphQL 元数据和 get_posts 读取；成功解析的稳定 ID 原子缓存，后续跳过搜索，加载元数据并检查 ID 和用户名一致，避免账号改名误读。关闭 iphone_support 和额外高清头像查询，使用帖子已提供的图片/视频 URL。Instaloader date_utc 是不带时区的 UTC 日期，统一显式设 UTC 再转毫秒，避免服务器时区导致偏移。
+
+真实读取在少量验证后收到 HTTP 401 + “Please wait a few minutes before you try again”；这种响应也识别为 rate_limit，暂缓重试，不当作空列表或密码错误。有效会话保持私有存储，无凭据入库提交。

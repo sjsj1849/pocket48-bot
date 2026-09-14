@@ -1,6 +1,7 @@
 """Read-only Instaloader bridge. Secrets arrive on stdin and stay in private JSON."""
 import argparse
 import contextlib
+import datetime
 import fcntl
 import json
 import os
@@ -80,10 +81,39 @@ def write_session(path, context, login):
     write_private(path, {"username": login, "cookies": context.save_session()})
 
 
+def resolve_profile(context, name, directory=None):
+    # web_profile_info can return 429 even with a valid session. Authenticated
+    # search provides the stable ID; the Profile then loads metadata via GraphQL.
+    if context.is_logged_in:
+        cache_path = directory / "profile-cache.json" if directory else None
+        cache = json.loads(cache_path.read_text()) if cache_path and cache_path.exists() else {}
+        cached_id = cache.get(name)
+        if isinstance(cached_id, str) and cached_id.isdigit():
+            profile = instaloader.Profile(context, {"id": cached_id, "username": name})
+            profile._obtain_metadata()
+            if str(profile.userid) != cached_id or profile.username.lower() != name:
+                raise Failure("user_unavailable")
+            return profile
+        for profile in instaloader.TopSearchResults(context, name).get_profiles():
+            if profile.username.lower() == name.lower():
+                if cache_path:
+                    cache[name] = str(profile.userid)
+                    write_private(cache_path, cache)
+                return profile
+        raise Failure("user_unavailable")
+    return instaloader.Profile.from_username(context, name)
+
+
 def profile_data(profile):
     return {"id": str(profile.userid), "username": profile.username,
-            "name": profile.full_name or profile.username, "avatar": profile.profile_pic_url,
+            "name": profile.full_name or profile.username, "avatar": profile._node.get("profile_pic_url") or profile._node.get("profile_pic_url_hd") or "",
             "protected": profile.is_private}
+
+
+def timestamp_ms(value):
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return int(value.timestamp() * 1000)
 
 
 def post_data(post, author, forced_kind=None):
@@ -103,7 +133,7 @@ def post_data(post, author, forced_kind=None):
             media.append({"kind": "image", "url": cover})
     return {"id": str(post.mediaid), "kind": kind, "author": author,
             "body": post.caption or "", "url": "https://www.instagram.com/p/" + post.shortcode + "/",
-            "time": int(post.date_utc.timestamp() * 1000), "media": media, "mediaOrderKnown": True}
+            "time": timestamp_ms(post.date_utc), "media": media, "mediaOrderKnown": True}
 
 
 def story_data(item, author):
@@ -113,7 +143,7 @@ def story_data(item, author):
                  "variants": [{"url": item.video_url, "bitrate": 1}] if item.video_url else []}
     return {"id": str(item.mediaid), "kind": "story", "author": author, "body": "",
             "url": f'https://www.instagram.com/stories/{author["username"]}/{item.mediaid}/',
-            "time": int(item.date_utc.timestamp() * 1000), "media": [media], "mediaOrderKnown": True}
+            "time": timestamp_ms(item.date_utc), "media": [media], "mediaOrderKnown": True}
 
 
 def scan_posts(iterator, author, limit, since, forced=None):
@@ -125,7 +155,7 @@ def scan_posts(iterator, author, limit, since, forced=None):
             if since and old < 4:
                 raise Failure("scan_incomplete")
             break
-        stamp = int(post.date_utc.timestamp() * 1000)
+        stamp = timestamp_ms(post.date_utc)
         if since and stamp < since:
             old += 1
             # Profile may pin up to three old posts ahead of recent ones.
@@ -149,7 +179,7 @@ def execute(request, directory):
             (directory / "pending-2fa.json").unlink(missing_ok=True)
             return {"sessionConfigured": False}
         loader = instaloader.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
-                                       request_timeout=20, rate_controller=BoundedRateController)
+                                       request_timeout=20, rate_controller=BoundedRateController, iphone_support=False)
         proxy = request.get("proxyURL")
         login = ""
         if proxy:
@@ -215,7 +245,7 @@ def execute(request, directory):
         if operation not in ("lookup", "timeline"):
             raise Failure("invalid_request")
         name = username(request.get("query") if operation == "lookup" else request.get("username"))
-        profile = instaloader.Profile.from_username(loader.context, name)
+        profile = resolve_profile(loader.context, name, directory)
         author = profile_data(profile)
         if operation == "lookup":
             result = {"user": author}
@@ -266,14 +296,14 @@ def main():
         output = {"ok": False, "error": {"code": "two_factor_required"}}
     except (instaloader.exceptions.LoginRequiredException, instaloader.exceptions.LoginException) as error:
         message = str(error).lower()
-        code = "rate_limit" if "429" in message or "too many requests" in message else "checkpoint_required" if "checkpoint" in message else "bad_credentials" if "does not exist" in message else "login_blocked"
+        code = "rate_limit" if "429" in message or "too many requests" in message or "wait a few minutes" in message else "checkpoint_required" if "checkpoint" in message else "bad_credentials" if "does not exist" in message else "login_blocked"
         output = {"ok": False, "error": {"code": code}}
     except instaloader.exceptions.ProfileNotExistsException:
         output = {"ok": False, "error": {"code": "user_unavailable"}}
     except instaloader.exceptions.ConnectionException as error:
         # Instaloader may wrap HTTP 429 as a generic ConnectionException.
         message = str(error).lower()
-        code = "rate_limit" if "429" in message or "too many requests" in message else "login_required" if any(s in message for s in ("login_required", "login required", "challenge_required", "checkpoint_required")) else "account_unavailable"
+        code = "rate_limit" if "429" in message or "too many requests" in message or "wait a few minutes" in message else "login_required" if any(s in message for s in ("login_required", "login required", "challenge_required", "checkpoint_required")) else "account_unavailable"
         output = {"ok": False, "error": {"code": code}}
     except instaloader.exceptions.PrivateProfileNotFollowedException:
         output = {"ok": False, "error": {"code": "access_denied"}}
