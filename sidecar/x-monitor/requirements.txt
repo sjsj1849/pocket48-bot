@@ -1,0 +1,2 @@
+# Source revision audited on 2026-09-14; includes bounded account waits.
+twscrape[curl] @ git+https://github.com/vladkens/twscrape.git@55ac729f39fbbe46e316746a55627a9ed920112c

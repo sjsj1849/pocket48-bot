@@ -21,10 +21,22 @@ export function BrowserSession() {
   const [xBusy, setXBusy] = useState(false)
   const [xMessage, setXMessage] = useState('')
   const [xConfigured, setXConfigured] = useState(false)
+  const [xLoginMessage, setXLoginMessage] = useState('')
   const [quality, setQuality] = useState<QualityMode>('smooth')
   const load = useCallback(async () => { try { setStatus(await api<BrowserStatus>('browser/status')); setError(null) } catch (reason) { setError(reason) } }, [])
   useEffect(() => { void load(); return () => rfb.current?.disconnect() }, [load])
-  useEffect(() => { void api<{sessionConfigured: boolean}>('browser/x').then(value => setXConfigured(value.sessionConfigured)).catch(() => {}) }, [])
+  useEffect(() => {
+    let mounted = true
+    async function refreshX() {
+      try {
+        const value = await api<{sessionConfigured: boolean; loginStatus?: {message: string}}>('browser/x')
+        if (mounted) { setXConfigured(value.sessionConfigured); setXLoginMessage(value.loginStatus?.message || '') }
+      } catch {}
+    }
+    void refreshX()
+    const timer = window.setInterval(() => void refreshX(), 10000)
+    return () => { mounted = false; window.clearInterval(timer) }
+  }, [])
   async function connect() {
     if (!screen.current) return
     setConnecting(true); setError(null)
@@ -67,6 +79,7 @@ export function BrowserSession() {
       <section className="browser-toolbar"><div><Monitor size={17} /><span>{status?.message || '正在检查浏览器桌面'}</span>{status?.display ? <code>{status.display}</code> : null}</div><div><div className="quality-control" aria-label="画面质量"><button className={quality === 'smooth' ? 'active' : ''} onClick={() => changeQuality('smooth')}>流畅</button><button className={quality === 'sharp' ? 'active' : ''} onClick={() => changeQuality('sharp')}>清晰</button></div><button className="secondary-button" onClick={() => void connect()} disabled={!status?.available || connecting}><MousePointer2 size={16} />{connecting ? '连接中…' : rfb.current ? '重新连接' : '打开会话'}</button><button className="icon-button" onClick={fullscreen} title="全屏" aria-label="全屏"><Expand size={18} /></button></div></section>
       <section className="browser-toolbar x-browser-auth"><div><button className="primary-button" disabled={!status?.available || xBusy || connecting} onClick={() => void xAction('open')}>X 登录</button><button className="secondary-button" disabled={!status?.available || xBusy} onClick={() => void xAction('sync')}>同步 X 登录态</button><span className={`status-pill ${xConfigured ? 'healthy' : 'attention'}`}>{xConfigured ? '会话已保存' : '等待登录'}</span></div><p>在下方网页完成邮箱验证码验证，登录后保存会话供监控使用。</p></section>
       {xMessage ? <p role="status">{xMessage}</p> : null}
+      {xLoginMessage ? <p role="status">{xLoginMessage}</p> : null}
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '浏览器连接失败'}</div> : null}
       <section className="browser-canvas" ref={screen}><div className="browser-placeholder"><div className="browser-symbol"><Monitor size={28} /></div><strong>{status?.available ? '浏览器桌面已就绪' : '等待浏览器侧卡启动'}</strong><p>{status?.available ? '打开会话后可直接扫码或拖动验证滑块' : 'Bot 启动统一浏览器侧卡后，这里会自动检测到会话'}</p>{status?.available ? <button className="primary-button" onClick={() => void connect()}><MousePointer2 size={16} />打开交互会话</button> : null}</div></section>
     </main>

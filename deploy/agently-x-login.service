@@ -1,0 +1,21 @@
+[Unit]
+Description=Recover mailbox access and log in to X using email verification
+After=network-online.target pocket48-bot.service
+Wants=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/pocket48-bot
+Environment=PATH=/www/server/nodejs/v18.20.8/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /root/pocket48-bot/sidecar/x-monitor/login-worker.py
+Restart=on-failure
+RestartSec=120
+UMask=0077
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

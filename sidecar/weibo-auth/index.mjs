@@ -1,5 +1,7 @@
 import { handleWeversePanel } from './weverse-session.mjs';
 import { handleXPanel } from './x-session.mjs';
+import { handleXLogin } from './x-login.mjs';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -3513,6 +3515,25 @@ wss.on('connection', (socket) => {
         return;
       }
       switch (cmd) {
+        case 'x_panel_login':
+        case 'x_panel_verify': {
+          try {
+            await startBrowser();
+            const privateDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..', 'storage', 'x');
+            if ((await fs.stat(path.join(privateDir, 'login-input.json'))).mode & 0o077) throw new Error('insecure login input');
+            const input = JSON.parse(await fs.readFile(path.join(privateDir, 'login-input.json'), 'utf8'));
+            if (cmd === 'x_panel_verify') {
+              const verification = JSON.parse(await fs.readFile(path.join(privateDir, 'login-code.json'), 'utf8'));
+              if (Date.now() - verification.createdAt > 8 * 60_000) throw new Error('expired local code');
+              input.code = verification.code;
+            }
+            const result = await handleXLogin(context, cmd.endsWith('_verify') ? 'verify' : 'start', input);
+            socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, ...result }));
+          } catch {
+            socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, stage: 'browser_error' }));
+          }
+          break;
+        }
         case 'x_panel_open':
         case 'x_panel_sync': {
           try {
