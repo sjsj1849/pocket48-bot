@@ -39,6 +39,7 @@ def status(phase, message, **extra):
 
 def verification_message(stage):
     return {
+        'login_temporarily_blocked': 'X 拒绝当前登录：Sorry, you are not allowed to log in at this time. 已暂停自动重试。',
         'awaiting_sms_code': '手机号已提交，X 要求短信验证码；邮箱服务无法读取手机短信。',
         'needs_phone_country_selection': 'X 的国家区号控件需要进一步识别，已保留验证页面，尚未提交手机号。',
         'needs_phone': 'X 要求手机号验证，已保留页面等待继续处理。',
@@ -158,6 +159,12 @@ def main():
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        return
+    if (STORAGE / 'login-status.json').exists():
+        previous=json.loads((STORAGE / 'login-status.json').read_text())
+        if previous.get('phase')=='login_temporarily_blocked':
+            return
+    if not (STORAGE / 'login-input.json').exists():
         return
     credentials = json.loads((STORAGE / 'login-input.json').read_text())
     email = credentials['email']

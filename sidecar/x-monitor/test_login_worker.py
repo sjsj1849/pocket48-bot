@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import time
+import json
+import tempfile
 import unittest
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('login_worker',Path(__file__).with_name('login-worker.py'))
@@ -8,6 +10,15 @@ worker=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 class LoginTests(unittest.TestCase):
+ def test_upstream_login_block_stops_mail_and_browser_requests(self):
+  with tempfile.TemporaryDirectory() as directory:
+   storage=Path(directory)
+   (storage/'login-status.json').write_text(json.dumps({'phase':'login_temporarily_blocked'}))
+   with patch.object(worker,'STORAGE',storage),patch.object(worker.mail,'list_messages') as mail_read,patch.object(worker,'rpc') as browser_rpc:
+    worker.main()
+    mail_read.assert_not_called()
+    browser_rpc.assert_not_called()
+
  def test_code_formats_and_ambiguity(self):
   self.assertEqual(worker.verification_code({'subject':'Your X confirmation code is 123456'}),'123456')
   self.assertEqual(worker.verification_code({'body':'<p>Verification code:</p><b>A2bcD3</b>'}),'A2bcD3')
