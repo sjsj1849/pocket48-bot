@@ -1,3 +1,4 @@
+import { InstagramConfig } from './InstagramConfig'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Check, Eye, EyeOff, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { api } from '../api'
@@ -63,6 +64,7 @@ const groupBlurb: Record<string, string> = {
   抖音: '创作者订阅 ≠ 群聊 IM。',
   小红书: '创作者订阅；登录走浏览器页。',
   Weverse: '成员动态、回复、直播与活动报告。',
+  Instagram: '账号订阅、帖子、Reels、Story 与登录态。',
   X: '账号订阅、媒体转发与浏览器登录态。',
 }
 
@@ -1047,7 +1049,7 @@ export function Configuration() {
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '操作失败'}</div> : null}
       <div className="config-layout">
         <nav className="config-tabs">
-          {[...new Set([...data.groupOrder, 'Weverse', 'X'])].map((group) => (
+          {[...new Set([...data.groupOrder, 'Weverse', 'X', 'Instagram'])].map((group) => (
             <button key={group} className={active === group ? 'active' : ''} onClick={() => setActive(group)}>
               {group}
               <span>{platformSettingCounts[group as keyof typeof platformSettingCounts] ?? data.groups[group]?.length ?? 0}</span>
@@ -1063,6 +1065,7 @@ export function Configuration() {
           </div>
           <div className="config-fields">
             {active === 'Weverse' ? <WeverseConfig defaultGroup={boundGroup} /> : null}
+            {active === 'Instagram' ? <InstagramConfig defaultGroup={boundGroup} /> : null}
             {active === 'X' ? <XConfig defaultGroup={boundGroup} /> : null}
             {(data.groups[active] || []).filter((field) => activePlatformEnabled || field.key === activeMasterKey).map((field) => (
               <Field key={field.key} field={field} value={values[field.key]} onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))} />

@@ -1,3 +1,4 @@
+import { WeversePostPasswords } from './WeversePostPasswords'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { PlatformField, PlatformToggle } from '../components/PlatformField'
@@ -94,6 +95,7 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
       <button className="primary-button" disabled={!!busy} onClick={() => void action('save', () => save(settings))}>保存运行设置</button>
       {data?.status.lastCheck && <p className="muted">最近检查：{new Date(data.status.lastCheck).toLocaleString()}　{data.status.error || '正常'}</p>}
     </section>
+    <WeversePostPasswords />
     <WeverseAIConfig />
     <WeverseReportConfig />
     <section className="platform-section">

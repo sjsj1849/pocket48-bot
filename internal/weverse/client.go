@@ -145,6 +145,10 @@ func (c *Client) refresh(ctx context.Context, s *Session) error {
 func (c *Client) call(ctx context.Context, ep string, auth bool, out any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	ep, passwordErr := c.withPostPassword(ep)
+	if passwordErr != nil {
+		return passwordErr
+	}
 	var s Session
 	if auth {
 		unlock, err := sessionLock(ctx, c.Dir)
@@ -175,6 +179,9 @@ func (c *Client) call(ctx context.Context, ep string, auth bool, out any) error 
 				return e
 			}
 			continue
+		}
+		if code != 200 && bytes.Contains(b, []byte("post_700")) {
+			return ErrPostPassword
 		}
 		if code == 403 {
 			return ErrForbidden
