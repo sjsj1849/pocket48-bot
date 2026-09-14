@@ -77,10 +77,13 @@ async def collect(request):
     uid = str(request.get("userId", ""))
     if not uid.isdecimal():
         raise Failure("invalid_user_id")
-    events, seen = [], set()
+    events, seen, page_count = [], set(), 0
     async with aclosing(api.user_tweets_and_replies_raw(int(uid), limit=limit)) as pages:
         async for response in pages:
             payload = response.json()
+            page_count += 1
+            if payload.get("errors"):
+                raise Failure("timeline_unavailable")
             orders = raw_media_order(payload)
             primary = primary_tweet_ids(payload)
             for tweet in parse_tweets(payload):
@@ -89,6 +92,8 @@ async def collect(request):
                     continue
                 seen.add(tweet.id_str)
                 events.append(event(tweet.dict(), orders))
+    if page_count == 0:
+        raise Failure("timeline_unavailable")
     events.sort(key=lambda e: (e["time"], int(e["id"])))
     return {"events": events, "limit": limit, "coverageComplete": False,
             "coverageNote": "bounded timeline scan; BOT must validate overlap before advancing its cursor"}

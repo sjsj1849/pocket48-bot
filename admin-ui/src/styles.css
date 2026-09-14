@@ -411,3 +411,42 @@ h1, .sidebar-brand > span { font-family: 'Newsreader Variable', Georgia, serif; 
 .browser-navigation { flex-wrap: wrap; border-radius: 0; }
 .browser-navigation > div { flex-wrap: wrap; }
 .browser-navigation .secondary-button { width: auto; min-width: 80px; padding: 0 10px; font-size: 12px; }
+
+
+/* Platform settings share the standard config rows, switches and spacing. */
+.platform-config { min-width: 0; display: grid; gap: 0; }
+.platform-section { min-width: 0; padding: 22px 0; border-bottom: 1px solid var(--line); display: grid; gap: 14px; }
+.platform-section:last-child { border-bottom: 0; }
+.platform-section h3 { font-size: 14px; font-weight: 700; margin: 0; }
+.platform-section h4 { font-size: 13px; margin: 0; }
+.platform-section p { margin: 0; }
+.platform-section .muted { padding: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.platform-section > .primary-button { justify-self: start; }
+.platform-config input:not([type="checkbox"]), .platform-config select { min-width: 0; width: 100%; height: 38px; padding: 0 10px; border: 1px solid #d9dde2; border-radius: 5px; background: #fbfcfd; color: var(--ink); font: inherit; }
+.platform-config input:focus, .platform-config select:focus { outline: 0; border-color: #99b5d8; box-shadow: 0 0 0 3px var(--blue-soft); }
+.platform-config .toggle-row input { width: auto; height: auto; }
+.platform-config .inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.platform-notice, .platform-config .wv-notice { color: var(--blue-dark); background: var(--blue-soft); padding: 10px 12px; border-radius: 5px; font-size: 12px; }
+.platform-search { display: flex; gap: 10px; align-items: center; }
+.platform-search > input { flex: 1; }
+.platform-results { display: grid; gap: 8px; }
+.platform-result { display: flex; align-items: center; gap: 12px; padding: 12px; text-align: left; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); min-width: 0; }
+.platform-result.selected, .platform-config .wv-result.selected { border-color: var(--blue); background: var(--blue-soft); }
+.platform-result img { width: 40px; height: 40px; border-radius: 50%; }
+.platform-result span { display: grid; gap: 4px; min-width: 0; }
+.platform-result small { color: var(--muted); overflow-wrap: anywhere; }
+.platform-editor { padding-top: 18px; border-top: 1px solid var(--line); display: grid; gap: 14px; min-width: 0; }
+.platform-choices { display: flex; flex-wrap: wrap; gap: 12px; }
+.platform-choices label { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.platform-choices input, .platform-config .wv-check input { accent-color: var(--blue); }
+.platform-preview { padding: 14px; border: 1px solid var(--line); border-radius: 5px; display: grid; gap: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.platform-config .wv-subscription { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); }
+@media (max-width: 640px) {
+ .config-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; gap: 4px; overflow: visible; position: static; }
+ .config-tabs button { min-width: 0; padding: 0 9px; font-size: 13px; gap: 6px; }
+ .platform-config .wv-subscription { align-items: flex-start; flex-direction: column; }
+ .platform-section { padding: 18px 0; }
+ .platform-search { flex-wrap: wrap; }
+ .platform-search > input { min-width: 160px; }
+ .platform-config .sub-item-actions { flex-wrap: wrap; }
+}

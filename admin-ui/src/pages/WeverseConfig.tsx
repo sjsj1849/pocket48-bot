@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { PlatformField, PlatformToggle } from '../components/PlatformField'
 import { WeverseAIConfig } from './WeverseAIConfig'
 import { WeverseReportConfig } from './WeverseReportConfig'
 
@@ -71,31 +72,31 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
       }
     })
   }
-  if (!settings) return <div className="weverse-config">{error ? <p className="inline-error">{error}</p> : <p>正在加载 Weverse 配置…</p>}</div>
-  return <div className="weverse-config">
+  if (!settings) return <div className="platform-config weverse-config">{error ? <p className="inline-error">{error}</p> : <p>正在加载 Weverse 配置…</p>}</div>
+  return <div className="platform-config weverse-config">
     <p className="muted">监控指定团体或成员的发帖、回复与开播。首次启用只建立基线，不补发历史消息。</p>
     {error && <div role="alert" className="inline-error">{error}</div>}
     {message && <p role="status" className="wv-notice">{message}</p>}
-    <section className="wv-card">
+    <section className="platform-section">
       <h3>登录与运行</h3>
       <p>{data?.sessionConfigured ? '已保存登录态（有效性请点击只读测试确认）' : '尚未登录 Weverse'}</p>
-      <p className="muted">打开登录页后，在「浏览器」页面完成登录并加入 Hearts2Hearts 社区，再回到这里同步登录态。程序会自动续期；无法续期时显示重新登录提示。请在 Weverse 设置中将翻译语言设为中文。</p>
+      <p className="muted">在浏览器完成登录并加入社区后同步登录态。无法自动续期时会提示重新登录；请将 Weverse 翻译语言设为中文。</p>
       <div className="wv-actions">
         <button className="secondary-button" disabled={!!busy} onClick={() => void browser('open')}>打开 Weverse 登录</button>
         <button className="secondary-button" disabled={!!busy} onClick={() => void browser('sync')}>同步登录态</button>
         <button className="secondary-button" disabled={!!busy || !data?.sessionConfigured} onClick={() => void action('preview', async () => { const r = await api<{ events: typeof preview; message: string }>('weverse/preview', { method: 'POST' }); setPreview(r.events); setMessage(r.message) })}>{busy === 'preview' ? '测试中…' : '只读测试（不推送）'}</button>
       </div>
-      <label className="wv-check"><input type="checkbox" checked={settings.enabled} onChange={e => setSettings({ ...settings, enabled: e.target.checked })} />启用 Weverse 监控</label>
-      <div className="wv-fields">
-        <label>检查间隔（秒）<input type="number" min="30" max="3600" value={settings.pollSeconds} onChange={e => setSettings({ ...settings, pollSeconds: Number(e.target.value) })} /></label>
-        <label>网络代理（可选）<input value={settings.proxyUrl || ''} placeholder="留空使用服务器网络" onChange={e => setSettings({ ...settings, proxyUrl: e.target.value })} /></label>
+      <PlatformToggle label="启用 Weverse 监控" description="按已启用订阅转发成员发帖、回复和直播。" checked={settings.enabled} onChange={enabled => setSettings({ ...settings, enabled })} />
+      <div>
+        <PlatformField label="检查间隔（秒）" description="30–3600 秒。"><input type="number" min="30" max="3600" value={settings.pollSeconds} onChange={e => setSettings({ ...settings, pollSeconds: Number(e.target.value) })} /></PlatformField>
+        <PlatformField label="网络代理（可选）" description="留空使用服务器网络。"><input value={settings.proxyUrl || ''} placeholder="留空使用服务器网络" onChange={e => setSettings({ ...settings, proxyUrl: e.target.value })} /></PlatformField>
       </div>
       <button className="primary-button" disabled={!!busy} onClick={() => void action('save', () => save(settings))}>保存运行设置</button>
       {data?.status.lastCheck && <p className="muted">最近检查：{new Date(data.status.lastCheck).toLocaleString()}　{data.status.error || '正常'}</p>}
     </section>
     <WeverseAIConfig />
     <WeverseReportConfig />
-    <section className="wv-card">
+    <section className="platform-section">
       <h3>搜索团体与成员</h3>
       <p className="muted">支持团体英文名、韩文名、成员官方名，以及 Weverse 社区链接。可输入 Hearts2Hearts、H2H 或 CARMEN。</p>
       <form className="wv-actions" onSubmit={e => { e.preventDefault(); void search() }}>
@@ -124,14 +125,14 @@ export function WeverseConfig({ defaultGroup }: { defaultGroup: string }) {
         })}>{editing ? '保存订阅' : '添加订阅'}</button>
       </div>}
     </section>
-    <section className="wv-card"><h3>已订阅</h3>
+    <section className="platform-section"><h3>已订阅</h3>
       {!settings.subscriptions.length && <p className="muted">还没有订阅。搜索 Hearts2Hearts 后选择成员和推送群。</p>}
-      {settings.subscriptions.map(s => <div className="wv-subscription" key={s.id}><div><strong>{s.communityName} · {s.memberNames.length ? s.memberNames.join('、') : '整团'}</strong><p>QQ群 {s.groupId} · {events.filter(([k]) => s[k]).map(([, label]) => label).join(' / ')}</p>{s.atAll && <p>@全体：{s.atAllMemberIds?.length ? (s.atAllMemberNames || []).join('、') : '全部成员'}</p>}</div><div className="wv-actions">
+      {settings.subscriptions.map(s => <div className="wv-subscription douyin-card" key={s.id}><div><strong>{s.communityName} · {s.memberNames.length ? s.memberNames.join('、') : '整团'}</strong><p>QQ群 {s.groupId} · {events.filter(([k]) => s[k]).map(([, label]) => label).join(' / ')}</p>{s.atAll && <p>@全体：{s.atAllMemberIds?.length ? (s.atAllMemberNames || []).join('、') : '全部成员'}</p>}</div><div className="wv-actions">
         <button className="secondary-button" disabled={!!busy} onClick={() => void action('toggle', () => save({ ...settings, subscriptions: settings.subscriptions.map(v => v.id === s.id ? { ...v, enabled: !v.enabled } : v) }))}>{s.enabled ? '暂停' : '启用'}</button>
         <button className="secondary-button" disabled={!!busy} onClick={() => void selectCommunity({ id: s.communityId, name: s.communityName, slug: s.slug, members: s.memberNames }, s)}>编辑</button>
         <button className="secondary-button" disabled={!!busy} onClick={() => { if (window.confirm(`删除 ${s.communityName} 的这条订阅？`)) void action('delete', () => save({ ...settings, subscriptions: settings.subscriptions.filter(v => v.id !== s.id) })) }}>删除</button>
       </div></div>)}
     </section>
-    {preview.length > 0 && <section className="wv-card"><h3>只读预览</h3>{preview.slice(0,10).map((e,i) => <article className="wv-preview" key={i}><strong>【{e.author}|Weverse{e.kind === 'comment' ? '回复' : e.kind === 'live' ? '直播' : '动态'}】</strong>{e.parentBody && <><p>原文上下文：{e.parentBody}</p>{e.parentTranslation && <p>中文（机器翻译）：{e.parentTranslation}</p>}</>}<p>{e.body}</p>{e.translation && <p>中文（机器翻译）<br />{e.translation}</p>}{e.translationError && <p className="muted">翻译暂不可用：{e.translationError}</p>}<a href={e.url} target="_blank" rel="noreferrer">查看原文</a></article>)}</section>}
+    {preview.length > 0 && <section className="platform-section"><h3>只读预览</h3>{preview.slice(0,10).map((e,i) => <article className="wv-preview" key={i}><strong>【{e.author}|Weverse{e.kind === 'comment' ? '回复' : e.kind === 'live' ? '直播' : '动态'}】</strong>{e.parentBody && <><p>原文上下文：{e.parentBody}</p>{e.parentTranslation && <p>中文（机器翻译）：{e.parentTranslation}</p>}</>}<p>{e.body}</p>{e.translation && <p>中文（机器翻译）<br />{e.translation}</p>}{e.translationError && <p className="muted">翻译暂不可用：{e.translationError}</p>}<a href={e.url} target="_blank" rel="noreferrer">查看原文</a></article>)}</section>}
   </div>
 }
