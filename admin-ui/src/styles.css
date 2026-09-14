@@ -442,7 +442,7 @@ h1, .sidebar-brand > span { font-family: 'Newsreader Variable', Georgia, serif; 
 .platform-preview { padding: 14px; border: 1px solid var(--line); border-radius: 5px; display: grid; gap: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .platform-config .wv-subscription { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); }
 @media (max-width: 640px) {
- .config-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; gap: 4px; overflow: visible; position: static; }
+ .config-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-flow: row; grid-auto-columns: auto; margin: 0; padding: 0; gap: 4px; overflow: visible; position: static; }
  .config-tabs button { min-width: 0; padding: 0 9px; font-size: 13px; gap: 6px; }
  .platform-config .wv-subscription { align-items: flex-start; flex-direction: column; }
  .platform-section { padding: 18px 0; }
