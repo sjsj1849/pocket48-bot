@@ -1,3 +1,4 @@
+import { DouyinLiveCadence } from './douyin-live-cadence.mjs';
 import { trackXLogin, diagnoseXLogin } from './x-diagnostics.mjs';
 import { newBackgroundPage } from './background-page.mjs';
 import { handleWeversePanel } from './weverse-session.mjs';
@@ -38,6 +39,7 @@ let xiaohongshuPage;
 let statePath;
 let refreshTimer;
 let douyinTimer;
+let douyinLiveDiscoveryTimer;
 let xiaohongshuTimer;
 let douyinIMReconnectTimer;
 let douyinIMInitRetryTimer;
@@ -85,6 +87,7 @@ const douyinContacts = new Map();
 // forever and ballooned Chromium renderer memory on small VMs.
 let profileScanRunning = false;
 const douyinWorksHTTPBackoff = new DouyinAccountBackoff();
+const douyinLiveProfileBackoff = new DouyinLiveCadence();
 const douyinWorksHTTPFailureLoggedAt = new Map();
 let douyinContactSyncRunning = false;
 const douyinContactSyncMs = 6 * 60 * 60_000;
@@ -2005,7 +2008,7 @@ async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
   return { profileLive, snapshot, posts };
 }
 
-async function scanDouyinAccount(account, cookieHeader = '') {
+async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
   const secUserId = String(account.secUserId || '').trim();
   if (!secUserId) return;
   const profileUrl = account.profileUrl || `https://www.douyin.com/user/${encodeURIComponent(secUserId)}`;
@@ -2017,7 +2020,9 @@ async function scanDouyinAccount(account, cookieHeader = '') {
     let profileAttempted = false;
     // A persisted web_rid is monitored directly by douyinLive, including
     // later starts. Only navigate profiles until the first live_id is known.
-    if (account.liveEnabled !== false && !String(account.liveId || '').trim()) {
+    const needsLiveDiscovery = account.liveEnabled !== false && !String(account.liveId || '').trim();
+    if (needsLiveDiscovery && douyinLiveProfileBackoff.due(secUserId)) {
+      douyinLiveProfileBackoff.mark(secUserId);
       profileAttempted = true;
       try {
         liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
@@ -2026,7 +2031,9 @@ async function scanDouyinAccount(account, cookieHeader = '') {
       }
     }
 
-    if (account.worksEnabled === false) {
+    if (!needsLiveDiscovery) douyinLiveProfileBackoff.clear(secUserId);
+
+    if (liveOnly || account.worksEnabled === false) {
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
       return;
     }
@@ -2120,14 +2127,19 @@ async function runProfileScans(which) {
   try {
     const requested = which || 'both';
     if (requested === 'douyin' || requested === 'both') await scanAllDouyinInner();
+    if (requested === 'douyin-live') await scanAllDouyinInner(true);
     if (requested === 'xiaohongshu' || requested === 'both') await scanAllXiaohongshuInner();
   } finally {
     profileScanRunning = false;
   }
 }
 
-async function scanAllDouyinInner() {
+async function scanAllDouyinInner(liveOnly = false) {
   if (shuttingDown || !settings.douyinEnabled || settings.douyinAccounts.length === 0) return;
+  const accounts = liveOnly ? settings.douyinAccounts.filter((account) =>
+    account.liveEnabled !== false && !String(account.liveId || '').trim() &&
+    douyinLiveProfileBackoff.due(String(account.secUserId || '').trim())) : settings.douyinAccounts;
+  if (accounts.length === 0) return;
   if (douyinScanning) return;
   douyinScanning = true;
   try {
@@ -2139,15 +2151,15 @@ async function scanAllDouyinInner() {
       await startBrowser();
       cookie = await getDouyinCookieHeader();
     }
-    log(`douyin works scan via HTTP accounts=${settings.douyinAccounts.length} cookie=${cookie ? 'yes' : 'no'}`);
-    for (const account of settings.douyinAccounts) {
+    log(`douyin ${liveOnly ? 'live discovery' : 'works'} scan accounts=${accounts.length} cookie=${cookie ? 'yes' : 'no'}`);
+    for (const account of accounts) {
       if (shuttingDown) break;
       const accountKey = String(account.secUserId || account.name || 'unknown');
       try {
         // Playwright can occasionally leave goto/evaluate or response-body
         // promises pending even after their own timeout. Never let one creator
         // freeze the global scan lock and disable every subsequent poll.
-        await withHardTimeout(scanDouyinAccount(account, cookie), 50_000, `douyin scan ${accountKey}`);
+        await withHardTimeout(scanDouyinAccount(account, cookie, liveOnly), 50_000, `douyin scan ${accountKey}`);
       } catch (error) {
         log(`douyin account scan aborted user=${account.name || accountKey}: ${error.message}`);
         emit('douyin_account_error', {
@@ -2172,11 +2184,15 @@ async function scanAllDouyin() {
 
 function scheduleDouyin() {
   clearInterval(douyinTimer);
+  clearInterval(douyinLiveDiscoveryTimer);
   // NOTE: do NOT clear xiaohongshuTimer here — that was a bug that stopped
   // Xiaohongshu polling whenever Douyin schedule was refreshed.
   if (!settings.douyinEnabled) return;
   const seconds = Math.max(15, Number(settings.douyinPollSeconds) || 60);
   douyinTimer = setInterval(() => void scanAllDouyin(), seconds * 1000);
+  // Independent wakeups keep live discovery responsive without increasing works polling.
+  douyinLiveDiscoveryTimer = setInterval(() => void runProfileScans('douyin-live'), 30_000);
+  log('douyin live schedule Asia/Shanghai: 20:00–23:00 30s; otherwise 300s');
 }
 
 async function douyinBrowserLoggedIn() {
@@ -3501,6 +3517,7 @@ async function shutdown() {
   shuttingDown = true;
   clearInterval(refreshTimer);
   clearInterval(douyinTimer);
+  clearInterval(douyinLiveDiscoveryTimer);
   clearInterval(xiaohongshuTimer);
   clearInterval(douyinContactSyncTimer);
   clearInterval(browserHousekeepTimer);

@@ -1,0 +1,98 @@
+diff --git a/cmd/main/offline_schedule.go b/cmd/main/offline_schedule.go
+new file mode 100644
+index 0000000..688138b
+--- /dev/null
++++ b/cmd/main/offline_schedule.go
+@@ -0,0 +1,40 @@
++package main
++
++import (
++	"os"
++	"time"
++)
++
++var liveScheduleZone = time.FixedZone("Asia/Shanghai", 8*60*60)
++
++// Offline probes slow down outside the evening window. Active live sessions
++// use their original listening loop. Wake at 20:00 even after a daytime probe.
++func offlinePollWait(now time.Time, peak time.Duration) time.Duration {
++	local := now.In(liveScheduleZone)
++	if peak <= 0 {
++		peak = 30 * time.Second
++	}
++	wait := peak
++	if local.Hour() < 20 || local.Hour() >= 23 {
++		if wait < 5*time.Minute {
++			wait = 5 * time.Minute
++		}
++	}
++	boundary := time.Date(local.Year(), local.Month(), local.Day(), 20, 0, 0, 0, liveScheduleZone)
++	if local.Hour() >= 20 && local.Hour() < 23 {
++		boundary = time.Date(local.Year(), local.Month(), local.Day(), 23, 0, 0, 0, liveScheduleZone)
++	} else if local.Hour() >= 23 {
++		boundary = boundary.AddDate(0, 0, 1)
++	}
++	if until := boundary.Sub(now); until > 0 && until < wait {
++		wait = until
++	}
++	return wait
++}
++
++func roomMonitorPollWait(now time.Time, interval time.Duration) time.Duration {
++	if os.Getenv("POCKET48_DOUYIN_LIVE_SCHEDULE") != "1" {
++		return interval
++	}
++	return offlinePollWait(now, interval)
++}
+diff --git a/cmd/main/offline_schedule_test.go b/cmd/main/offline_schedule_test.go
+new file mode 100644
+index 0000000..00c6ab7
+--- /dev/null
++++ b/cmd/main/offline_schedule_test.go
+@@ -0,0 +1,37 @@
++package main
++
++import (
++	"testing"
++	"time"
++)
++
++func TestOfflinePollWaitBeijingBoundaries(t *testing.T) {
++	for _, tc := range []struct {
++		clock string
++		want  time.Duration
++	}{
++		{"00:00:00", 5 * time.Minute}, {"19:54:00", 5 * time.Minute},
++		{"19:59:59", time.Second}, {"20:00:00", 30 * time.Second},
++		{"22:59:59", time.Second}, {"23:00:00", 5 * time.Minute},
++	} {
++		now, err := time.Parse(time.RFC3339, "2026-09-14T"+tc.clock+"+08:00")
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := offlinePollWait(now.UTC(), 30*time.Second); got != tc.want {
++			t.Errorf("%s: got %v want %v", tc.clock, got, tc.want)
++		}
++	}
++}
++
++func TestRoomMonitorScheduleOptIn(t *testing.T) {
++	now, _ := time.Parse(time.RFC3339, "2026-09-14T12:00:00+08:00")
++	t.Setenv("POCKET48_DOUYIN_LIVE_SCHEDULE", "")
++	if got := roomMonitorPollWait(now, 30*time.Second); got != 30*time.Second {
++		t.Fatalf("legacy interval: %v", got)
++	}
++	t.Setenv("POCKET48_DOUYIN_LIVE_SCHEDULE", "1")
++	if got := roomMonitorPollWait(now, 30*time.Second); got != 5*time.Minute {
++		t.Fatalf("day interval: %v", got)
++	}
++}
+diff --git a/cmd/main/room_monitor.go b/cmd/main/room_monitor.go
+index 4b3621d..e2ee690 100644
+--- a/cmd/main/room_monitor.go
++++ b/cmd/main/room_monitor.go
+@@ -192 +192 @@ func (r *Room) runMonitorLoop(loop *roomMonitorLoop) {
+-	pollTicker := time.NewTicker(loop.pollInterval)
++	pollTicker := time.NewTicker(roomMonitorPollWait(time.Now(), loop.pollInterval))
+@@ -214,0 +215 @@ func (r *Room) runMonitorLoop(loop *roomMonitorLoop) {
++			pollTicker.Reset(roomMonitorPollWait(time.Now(), loop.pollInterval))
