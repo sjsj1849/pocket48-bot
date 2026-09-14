@@ -1,3 +1,4 @@
+import { newBackgroundPage } from './background-page.mjs';
 import { handleWeversePanel } from './weverse-session.mjs';
 import { handleXPanel } from './x-session.mjs';
 import { handleXLogin } from './x-login.mjs';
@@ -641,7 +642,7 @@ async function startBrowser() {
     });
     await restoreStorageState();
     await seedConfiguredCookies();
-    page = context.pages()[0] || await context.newPage();
+    page = context.pages().find(p => !/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(p.url())) || await newBackgroundPage(context);
     page.setDefaultTimeout(15_000);
     page.on('dialog', async (dialog) => {
       try { await dialog.dismiss(); } catch {}
@@ -674,7 +675,7 @@ async function startBrowser() {
 async function getDouyinPage() {
   await startBrowser();
   if (!douyinPage || douyinPage.isClosed()) {
-    douyinPage = await context.newPage();
+    douyinPage = await newBackgroundPage(context);
     douyinPage.setDefaultTimeout(15_000);
   }
   return douyinPage;
@@ -683,7 +684,7 @@ async function getDouyinPage() {
 async function getXiaohongshuPage() {
   await startBrowser();
   if (!xiaohongshuPage || xiaohongshuPage.isClosed()) {
-    xiaohongshuPage = await context.newPage();
+    xiaohongshuPage = await newBackgroundPage(context);
     xiaohongshuPage.setDefaultTimeout(15_000);
     attachXiaohongshuSignCapture(xiaohongshuPage);
     // Restore previously saved localStorage once the first xhs navigation happens.
@@ -801,7 +802,7 @@ async function pruneOrphanProfilePages() {
 async function getDouyinIMPage() {
   await startBrowser();
   if (!douyinIMPage || douyinIMPage.isClosed()) {
-    douyinIMPage = await context.newPage();
+    douyinIMPage = await newBackgroundPage(context);
     douyinIMPage.setDefaultTimeout(15_000);
   }
   return douyinIMPage;
@@ -810,7 +811,7 @@ async function getDouyinIMPage() {
 async function getDouyinLookupPage() {
   await startBrowser();
   if (!douyinLookupPage || douyinLookupPage.isClosed()) {
-    douyinLookupPage = await context.newPage();
+    douyinLookupPage = await newBackgroundPage(context);
     douyinLookupPage.setDefaultTimeout(15_000);
   }
   return douyinLookupPage;
@@ -3515,6 +3516,7 @@ wss.on('connection', (socket) => {
         return;
       }
       switch (cmd) {
+        case 'x_panel_resume':
         case 'x_panel_login':
         case 'x_panel_verify': {
           try {
@@ -3527,7 +3529,7 @@ wss.on('connection', (socket) => {
               if (Date.now() - verification.createdAt > 8 * 60_000) throw new Error('expired local code');
               input.code = verification.code;
             }
-            const result = await handleXLogin(context, cmd.endsWith('_verify') ? 'verify' : 'start', input);
+            const result = await handleXLogin(context, cmd.endsWith('_verify') ? 'verify' : cmd.endsWith('_resume') ? 'resume' : 'start', input);
             socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, ...result }));
           } catch {
             socket.send(JSON.stringify({ type: 'x_login_result', requestId: command.requestId, stage: 'browser_error' }));

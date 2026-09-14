@@ -37,6 +37,14 @@ def status(phase, message, **extra):
     print(f'X login phase={phase}', flush=True)
 
 
+def verification_message(stage):
+    return {
+        'awaiting_sms_code': '手机号已提交，X 要求短信验证码；邮箱服务无法读取手机短信。',
+        'needs_phone_country_selection': 'X 的国家区号控件需要进一步识别，已保留验证页面，尚未提交手机号。',
+        'needs_phone': 'X 要求手机号验证，已保留页面等待继续处理。',
+    }.get(stage, 'X 网页要求进一步验证，已保留面板浏览器；不会重复请求验证码。')
+
+
 def rpc(command):
     result = subprocess.run(['node', str(ROOT / 'sidecar/x-monitor/browser-rpc.cjs'), command], capture_output=True, text=True, timeout=85)
     if result.returncode:
@@ -181,7 +189,7 @@ def main():
             if stage == 'authenticated' and save_session():
                 return
             if stage != 'awaiting_code':
-                status(stage or 'browser_error', 'X 网页要求进一步验证，请检查面板浏览器；不会重复请求验证码。')
+                status(stage or 'browser_error', verification_message(stage))
                 return
             status('awaiting_code', '正在等待发给此 X 账号邮箱的新验证码，收到后自动验证。', requestedAt=int(requested_at*1000))
             deadline = requested_at + 480
@@ -201,7 +209,7 @@ def main():
                     (STORAGE / 'login-code.json').unlink(missing_ok=True)
                     if result.get('stage') == 'authenticated' and save_session():
                         return
-                    status(result.get('stage') or 'browser_error', '验证码已提交，X 仍要求进一步验证；不会重复提交。')
+                    status(result.get('stage') or 'browser_error', verification_message(result.get('stage')))
                     return
                 time.sleep(min(60, max(0, deadline-time.time())))
         status('waiting_mail_api', '本次未取得有效验证码，稍后重新确认邮箱可读；不会使用旧验证码。')
