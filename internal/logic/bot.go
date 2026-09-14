@@ -1052,6 +1052,7 @@ func (b *Bot) Start() error {
 	weverseCtx, stopWeverse := context.WithCancel(context.Background())
 	defer stopWeverse()
 	go b.runWeverseLoop(weverseCtx)
+	go b.runXLoop(weverseCtx)
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()

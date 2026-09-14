@@ -188,9 +188,9 @@ func buildOverviewAttention(services []serviceState) []attention {
 					ID: "weibo", Title: "微博认证异常", Description: item.LastEvent, Action: "查看浏览器", Target: "browser",
 				})
 			}
-		case "weverse":
+		case "weverse", "x":
 			if item.Status == "down" {
-				attentionItems = append(attentionItems, attention{ID: "weverse", Title: "Weverse 监控异常", Description: item.LastEvent, Action: "查看配置", Target: "config"})
+				attentionItems = append(attentionItems, attention{ID: item.ID, Title: item.Name + " 监控异常", Description: item.LastEvent, Action: "查看配置", Target: "config"})
 			}
 		case "napcat":
 			if item.Status == "down" {
@@ -317,6 +317,9 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		card.Uptime = uptime
 		states = append(states, *card)
 	}
+	card := xService(flags.ConfigPath, time.Now())
+	card.Uptime = uptime
+	states = append(states, *card)
 	return states
 }
 
@@ -689,14 +692,14 @@ func overviewActivity(lines []string, services []serviceState, limit int) []acti
 	// Keep the latest actual Weverse scan visible even when other platforms emit
 	// enough heartbeat messages to fill the recent log window.
 	for _, card := range services {
-		if card.ID != "weverse" || card.LastTime == "—" {
+		if (card.ID != "weverse" && card.ID != "x") || card.LastTime == "—" {
 			continue
 		}
 		level := "success"
 		if card.Status != "healthy" {
 			level = "warning"
 		}
-		items = append([]activityItem{{Time: card.LastTime, Level: level, Source: "Weverse", Message: card.LastEvent}}, items...)
+		items = append([]activityItem{{Time: card.LastTime, Level: level, Source: card.Name, Message: card.LastEvent}}, items...)
 	}
 	if len(items) > limit {
 		items = items[:limit]
