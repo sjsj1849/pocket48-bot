@@ -9,6 +9,37 @@ import collector as c
 
 
 class CollectorTests(unittest.TestCase):
+    def test_cached_profile_skips_search_and_checks_identity(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'profile-cache.json').write_text(json.dumps({'artist': '42'}))
+            context = SimpleNamespace(is_logged_in=True)
+            with patch.object(c.instaloader, 'Profile') as profile_class, patch.object(c.instaloader, 'TopSearchResults') as search:
+                profile = profile_class.return_value
+                profile.userid = 42
+                profile.username = 'artist'
+                self.assertIs(c.resolve_profile(context, 'artist', Path(directory)), profile)
+                profile._obtain_metadata.assert_called_once()
+                search.assert_not_called()
+                profile.username = 'other'
+                with self.assertRaises(c.Failure):
+                    c.resolve_profile(context, 'artist', Path(directory))
+
+    def test_naive_instaloader_dates_are_utc(self):
+        self.assertEqual(c.timestamp_ms(datetime.datetime(2026, 9, 15, 12)), c.timestamp_ms(datetime.datetime(2026, 9, 15, 12, tzinfo=datetime.timezone.utc)))
+
+    def test_authenticated_lookup_uses_exact_search_result(self):
+        context = SimpleNamespace(is_logged_in=True)
+        target = SimpleNamespace(username='Hearts2Hearts')
+        with patch.object(c.instaloader, 'TopSearchResults') as search, patch.object(c.instaloader.Profile, 'from_username') as direct:
+            search.return_value.get_profiles.return_value = iter([SimpleNamespace(username='hearts2hearts.fan'), target])
+            self.assertIs(c.resolve_profile(context, 'hearts2hearts'), target)
+            direct.assert_not_called()
+        with patch.object(c.instaloader, 'TopSearchResults') as search:
+            search.return_value.get_profiles.return_value = iter([SimpleNamespace(username='other')])
+            with self.assertRaises(c.Failure):
+                c.resolve_profile(context, 'hearts2hearts')
+
     def test_cookies_domain_and_secret_validation(self):
         self.assertEqual(c.parse_cookies('sessionid=abc%3A123; csrftoken=def; junk=x'), {'sessionid': 'abc%3A123', 'csrftoken': 'def'})
         with self.assertRaises(c.Failure):
