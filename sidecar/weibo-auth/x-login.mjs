@@ -1,5 +1,6 @@
 import { xSessionFromCookies } from './x-session.mjs'
 
+const phoneVerificationPages = new WeakSet()
 const codeSelector = 'input[autocomplete="one-time-code"]:visible, input[name*="code"]:visible, input[inputmode="numeric"]:visible, input[maxlength="6"]:visible'
 const nextButton = /^(Continue|Next|Verify|Log in|Sign in|继续|下一步|验证|登录)$/i
 
@@ -17,7 +18,8 @@ async function loginPage(context) {
 async function inspect(context, page) {
   if (await loggedIn(context)) return { stage: 'authenticated' }
   const body = await page.locator('body').innerText()
-  if (/verification code|confirmation code|enter.{0,30}code|验证码|验证代码/i.test(body)) return { stage: 'awaiting_code' }
+  if (/verification code|confirmation code|enter.{0,30}code|验证码|验证代码/i.test(body)) return { stage: phoneVerificationPages.has(page) || /text message|sms|短信/i.test(body) ? 'awaiting_sms_code' : 'awaiting_code' }
+  if (/phone number|手机号|电话号码/i.test(body) && !/phone number or username/i.test(body)) return { stage: 'needs_phone' }
   if (await page.locator('input[type="password"]:visible').count()) return { stage: 'awaiting_password' }
   if (/phone number or username|enter your.{0,20}username|输入.{0,10}用户名/i.test(body)) return { stage: 'needs_username' }
   return { stage: 'browser_verification_required' }
@@ -52,7 +54,7 @@ export async function handleXLogin(context, action, input) {
     }
     await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
     await page.waitForTimeout(3000)
-  } else {
+  } else if (action !== 'resume') {
     throw new Error('invalid login action')
   }
   if (await page.locator('input[type="password"]:visible').count()) {
@@ -61,5 +63,35 @@ export async function handleXLogin(context, action, input) {
     await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
     await page.waitForTimeout(3000)
   }
+  const state = await inspect(context, page)
+  if (state.stage !== 'needs_phone' || !/^\+86\d{11}$/.test(input.phone || '')) return state
+  const scope = await foreground(page)
+  const field = scope.locator('input[type="tel"]:visible, input[name*="phone"]:visible').last()
+  if (!await field.count()) return state
+  const country = scope.locator('select:visible')
+  let national = false
+  if (await country.count()) {
+    const options = await country.last().locator('option').evaluateAll(options => options.map(o => ({value:o.value, text:o.textContent})))
+    const china = options.find(o => /\+86\b|China|中国/i.test(o.text || ''))
+    if (!china) return { stage: 'needs_phone_country_selection' }
+    await country.last().selectOption(china.value)
+    national = true
+  } else {
+    const picker = scope.getByRole('combobox')
+    if (await picker.count()) {
+      await picker.last().click()
+      const option = page.getByRole('option', { name: /China.*\+86|\+86.*China|中国/i })
+      if (!await option.count()) return { stage: 'needs_phone_country_selection' }
+      await option.last().click()
+      national = true
+    } else if (/\+1\b/.test(await scope.innerText())) {
+      // Never submit a Chinese number while an unknown country widget still says +1.
+      return { stage: 'needs_phone_country_selection' }
+    }
+  }
+  await field.fill(national ? input.phone.slice(3) : input.phone)
+  phoneVerificationPages.add(page)
+  await scope.getByRole('button', { name: nextButton }).last().click({ timeout: 10000 })
+  await page.waitForTimeout(3000)
   return await inspect(context, page)
 }

@@ -23,3 +23,22 @@ test('login uses foreground form; valid OTP is submitted once', async () => {
  assert.equal(lastFields,2)
  assert.equal(submits,2)
 })
+
+test('email verification never submits an email code to SMS verification', async () => {
+ const page={url:()=> 'https://x.com/i/jf/onboarding/web',bringToFront:async()=>{},locator:()=>({innerText:async()=> 'Enter verification code sent by SMS text message'})}
+ const context={pages:()=>[page],cookies:async()=>[]}
+ assert.equal((await handleXLogin(context,'verify',{code:'123456'})).stage,'awaiting_sms_code')
+})
+
+test('phone verification selects China before submitting the national number', async () => {
+ let selected=false, submitted=false
+ const field={count:async()=>1,fill:async value=>{assert(selected);assert.equal(value,'13800138000')}}
+ const country={count:async()=>1,last:()=>({locator:()=>({evaluateAll:async()=>[{value:'US',text:'United States +1'},{value:'CN',text:'China +86'}]}),selectOption:async value=>{assert.equal(value,'CN');selected=true}})}
+ const page={url:()=> 'https://x.com/i/jf/onboarding/web',bringToFront:async()=>{},waitForTimeout:async()=>{},
+ locator:selector=>selector==='body'?{innerText:async()=> submitted?'Enter verification code sent by SMS':'Enter phone number +1'}:selector.includes('role=')?{count:async()=>0}:selector==='select:visible'?country:selector.includes('password')?{count:async()=>0}:{last:()=>field},
+ getByRole:()=>({last:()=>({click:async()=>{submitted=true}})}),
+ }
+ const context={pages:()=>[page],cookies:async()=>[]}
+ assert.equal((await handleXLogin(context,'resume',{phone:'+8613800138000'})).stage,'awaiting_sms_code')
+ assert(submitted)
+})
