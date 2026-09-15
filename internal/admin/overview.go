@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"pocket48-bot/internal/instagram"
 	"pocket48-bot/internal/weverse"
 	"runtime"
 	"strconv"
@@ -95,6 +96,7 @@ type overviewFeatureFlags struct {
 	DouyinEnabled      bool
 	DouyinIMEnabled    bool
 	XiaohongshuEnabled bool
+	InstagramEnabled   bool
 }
 
 func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
@@ -124,6 +126,9 @@ func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
 	flags.DouyinEnabled = readBool("DOUYIN_ENABLED", true)
 	flags.DouyinIMEnabled = readBool("DOUYIN_IM_ENABLED", true) && flags.DouyinEnabled
 	flags.XiaohongshuEnabled = readBool("XIAOHONGSHU_ENABLED", false)
+	if cfg, err := instagram.LoadSettings(instagram.Dir(configPath)); err == nil {
+		flags.InstagramEnabled = cfg.Enabled
+	}
 	return flags
 }
 
@@ -317,9 +322,11 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		card.Uptime = uptime
 		states = append(states, *card)
 	}
-	igCard := instagramService(flags.ConfigPath, time.Now())
-	igCard.Uptime = uptime
-	states = append(states, *igCard)
+	if flags.InstagramEnabled {
+		igCard := instagramService(flags.ConfigPath, time.Now())
+		igCard.Uptime = uptime
+		states = append(states, *igCard)
+	}
 	card := xService(flags.ConfigPath, time.Now())
 	card.Uptime = uptime
 	states = append(states, *card)
@@ -692,6 +699,22 @@ func weverseService(configPath string, now time.Time) *serviceState {
 
 func overviewActivity(lines []string, services []serviceState, limit int) []activityItem {
 	items := parseActivity(lines, limit)
+	instagramVisible := false
+	for _, card := range services {
+		if card.ID == "instagram" {
+			instagramVisible = true
+			break
+		}
+	}
+	if !instagramVisible {
+		filtered := items[:0]
+		for _, item := range items {
+			if item.Source != "Instagram" {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
 	// Keep the latest actual Weverse scan visible even when other platforms emit
 	// enough heartbeat messages to fill the recent log window.
 	for _, card := range services {
