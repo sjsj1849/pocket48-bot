@@ -422,6 +422,19 @@ func TestDouyinManualNicknameIsNotOverwritten(t *testing.T) {
 	}
 }
 
+func TestDouyinBridgePrioritizesRecentlyActiveCreators(t *testing.T) {
+	cfg := &config.Config{DouyinSubscriptions: map[int64]map[string]*config.DouyinConfig{
+		1: {
+			"older": {SecUserID: "sec-older", LastAwemeTime: 100},
+			"newer": {SecUserID: "sec-newer", LastAwemeTime: 200},
+		},
+	}}
+	accounts := douyinAccountsFromConfig(cfg)
+	if len(accounts) != 2 || accounts[0].SecUserID != "sec-newer" || accounts[0].LastAwemeTime != 200 {
+		t.Fatalf("bridge account order=%#v", accounts)
+	}
+}
+
 func TestDouyinLiveTargetsPreserveGroupsAndAtAll(t *testing.T) {
 	m := newDouyinLiveTestMonitor(t)
 	m.cfg.DouyinSubscriptions = map[int64]map[string]*config.DouyinConfig{

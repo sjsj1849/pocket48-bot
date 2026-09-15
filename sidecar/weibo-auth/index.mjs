@@ -8,12 +8,14 @@ import { createInstagramSessionStore } from './instagram-session-store.mjs';
 import { handleXLogin } from './x-login.mjs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
 import { chromium } from 'playwright';
 import WebSocket, { WebSocketServer } from 'ws';
 import { withHardTimeout } from './async-utils.mjs';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
+import douyinABogus from './vendor/mediacrawler-douyin/sign.cjs';
 import {
   DouyinAccountBackoff,
   extractProfileLive,
@@ -599,7 +601,13 @@ async function startBrowser() {
     // Optional proxy for XHS IP-risk bypass (BROWSER_PROXY_SERVER / proxyServer).
     const proxyServer = String(settings.proxyServer || '').trim();
     if (proxyServer) {
-      launchOptions.proxy = { server: proxyServer, bypass: 'x.com,.x.com,twitter.com,.twitter.com,twimg.com,.twimg.com' };
+      // Weibo stays on the host route. Douyin works requests need the browser
+      // route too: the host's plain HTTP/TLS path is currently rejected with
+      // 403 even when Cookie and a_bogus are valid.
+      launchOptions.proxy = {
+        server: proxyServer,
+        bypass: 'weibo.com,.weibo.com,weibo.cn,.weibo.cn,sina.com.cn,.sina.com.cn,x.com,.x.com,twitter.com,.twitter.com,twimg.com,.twimg.com',
+      };
       log(`browser proxy enabled: ${proxyServer}`);
     }
     context = await launchPersistentBrowser(profileDir, launchOptions);
@@ -1930,8 +1938,6 @@ function emitDouyinAccountState(account, secUserId, profileUrl, posts, profileLi
   if (posts.length > 0) emit('douyin_posts', { secUserId, nickname, posts });
 }
 
-const DOUYIN_HTTP_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
 /** Cookie header for douyin.com from live Playwright context, else storage-state file. */
 async function getDouyinCookieHeader() {
   try {
@@ -1954,41 +1960,85 @@ async function getDouyinCookieHeader() {
   return '';
 }
 
+async function getDouyinWorksPage() {
+  await startBrowser();
+  // Only reuse long-lived owned tabs. A disposable profile tab can disappear
+  // between selection and evaluate when the separate live-discovery pass ends.
+  const candidates = [douyinPage, douyinIMPage];
+  for (const candidate of candidates) {
+    if (!candidate || candidate.isClosed()) continue;
+    try {
+      if (new URL(candidate.url()).hostname.endsWith('douyin.com')) return candidate;
+    } catch {}
+  }
+  const targetPage = await getDouyinPage();
+  await targetPage.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  return targetPage;
+}
+
 /**
- * Works path: pure Cookie + HTTP (no profile navigation).
- * Browser is only needed for login / Cookie refresh / IM.
+ * Call the works JSON endpoint from an already-warm Douyin tab. The page's
+ * request carries a_bogus, while fetch keeps the real browser TLS fingerprint
+ * and session cookies. No creator profile is
+ * opened, so six accounts remain six small JSON calls on one shared tab.
  */
-async function fetchAwemePostsHTTP(secUserId, cookieHeader) {
-  if (!cookieHeader) return { posts: [], status_code: -1, message: 'empty cookie' };
-  const params = new URLSearchParams({
-    device_platform: 'webapp',
-    aid: '6383',
-    channel: 'channel_pc_web',
-    sec_user_id: secUserId,
-    count: '18',
-    max_cursor: '0',
-    publish_video_strategy_type: '2',
-    personal_center_strategy: '1',
+async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
+  const browser = await targetPage.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    msToken: window.localStorage?.getItem('xmst') || '',
+  }));
+  const chromeVersion = String(browser.userAgent || '').match(/Chrome\/([\d.]+)/)?.[1] || '125.0.0.0';
+  const queries = secUserIds.map((secUserId) => {
+    const params = new URLSearchParams({
+      device_platform: 'webapp', aid: '6383', channel: 'channel_pc_web',
+      version_code: '190600', version_name: '19.6.0', update_version_code: '170400',
+      pc_client_type: '1', cookie_enabled: 'true', browser_language: 'zh-CN',
+      browser_platform: 'Win32', browser_name: 'Chrome', browser_version: chromeVersion,
+      browser_online: 'true', engine_name: 'Blink', engine_version: chromeVersion,
+      os_name: 'Windows', os_version: '10', cpu_core_num: '8', device_memory: '8', platform: 'PC',
+      screen_width: '1920', screen_height: '1080', effective_type: '4g', round_trip_time: '50',
+      webid: String(Math.floor(7_000_000_000_000_000_000 + Math.random() * 200_000_000_000_000_000)),
+      msToken: browser.msToken || Array.from(randomBytes(107), (value) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[value % 64]).join(''),
+      sec_user_id: secUserId, count: '18', max_cursor: '', locate_query: 'false',
+      publish_video_strategy_type: '2',
+    });
+    const signature = String(douyinABogus.sign_datail(params.toString(), browser.userAgent) || '');
+    if (signature) params.set('a_bogus', signature);
+    return { secUserId, query: params.toString(), signed: Boolean(signature) };
   });
-  const url = `https://www.douyin.com/aweme/v1/web/aweme/post/?${params.toString()}`;
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(15_000),
-    headers: {
-      cookie: cookieHeader,
-      'user-agent': DOUYIN_HTTP_UA,
-      referer: 'https://www.douyin.com/',
-      accept: 'application/json, text/plain, */*',
-    },
-  });
-  const body = await response.json().catch(() => null);
-  const status_code = Number(body?.status_code);
-  const posts = status_code === 0 ? normalizeAwemeList(body, secUserId) : [];
-  return {
-    posts,
-    status_code: Number.isFinite(status_code) ? status_code : -1,
-    message: String(body?.status_msg || body?.message || ''),
-    http: response.status,
-  };
+  const payloads = await targetPage.evaluate(async (requests) => {
+    const requestOne = async (request) => {
+      if (!request.signed) return { ...request, http: 0, body: null, message: 'a_bogus signer returned empty' };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15_000);
+        try {
+          const response = await fetch(`/aweme/v1/web/aweme/post/?${request.query}`, {
+            credentials: 'include', signal: controller.signal,
+            headers: { accept: 'application/json, text/plain, */*', 'cache-control': 'no-cache' },
+          });
+          const body = await response.json().catch(() => null);
+          if (response.status || attempt > 0) return { ...request, http: response.status, body, message: '' };
+        } catch (error) {
+          if (attempt > 0) return { ...request, http: 0, body: null, message: error?.message || String(error) };
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      return { ...request, http: 0, body: null, message: 'request failed' };
+    };
+    return Promise.all(requests.map(requestOne));
+  }, queries);
+  return new Map(payloads.map((payload) => {
+    const status_code = Number(payload?.body?.status_code);
+    return [payload.secUserId, {
+      posts: status_code === 0 ? normalizeAwemeList(payload.body, payload.secUserId) : [],
+      status_code: Number.isFinite(status_code) ? status_code : -1,
+      message: String(payload?.body?.status_msg || payload?.body?.message || payload?.message || ''),
+      http: Number(payload?.http || 0), signed: Boolean(payload?.signed), source: 'browser-api',
+    }];
+  }));
 }
 
 async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
@@ -2013,7 +2063,7 @@ async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
   return { profileLive, snapshot, posts };
 }
 
-async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
+async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false, worksResult) {
   const secUserId = String(account.secUserId || '').trim();
   if (!secUserId) return;
   const profileUrl = account.profileUrl || `https://www.douyin.com/user/${encodeURIComponent(secUserId)}`;
@@ -2026,7 +2076,11 @@ async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
     // A persisted web_rid is monitored directly by douyinLive, including
     // later starts. Only navigate profiles until the first live_id is known.
     const needsLiveDiscovery = account.liveEnabled !== false && !String(account.liveId || '').trim();
-    if (needsLiveDiscovery && douyinLiveProfileBackoff.due(secUserId)) {
+    // Live discovery has its own cadence/timer. Running profile navigation in
+    // the works pass delayed later creators even when their JSON call was fast.
+    const shouldProbeLive = liveOnly && needsLiveDiscovery && douyinLiveProfileBackoff.due(secUserId);
+    if (shouldProbeLive) {
+      // Offline discovery uses the current Beijing-time cadence, independent of works polling.
       douyinLiveProfileBackoff.mark(secUserId);
       profileAttempted = true;
       try {
@@ -2034,9 +2088,9 @@ async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
       } catch (error) {
         emit('douyin_account_error', { secUserId, message: `抖音开播状态探测失败：${error.message}` });
       }
+    } else if (!needsLiveDiscovery) {
+      douyinLiveProfileBackoff.clear(secUserId);
     }
-
-    if (!needsLiveDiscovery) douyinLiveProfileBackoff.clear(secUserId);
 
     if (liveOnly || account.worksEnabled === false) {
       emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
@@ -2057,39 +2111,38 @@ async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
       return;
     }
 
-    if (douyinWorksHTTPBackoff.active(secUserId)) {
-      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
-      return;
-    }
+    const result = worksResult;
 
-    const result = await fetchAwemePostsHTTP(secUserId, cookie);
-    if (result.posts.length > 0) {
-      douyinWorksHTTPBackoff.clear(secUserId);
+    if (result?.posts.length > 0) {
+      douyinWorksProfileBackoff.clear(secUserId);
+      const status = `ok:${result.posts[0]?.id || ''}`;
+      if (douyinWorksStatus.get(secUserId) !== status) {
+        douyinWorksStatus.set(secUserId, status);
+        log(`douyin direct works API source=browser user=${nameHint} count=${result.posts.length} latest=${result.posts[0]?.id || 'unknown'}`);
+      }
       emitDouyinAccountState(account, secUserId, profileUrl, result.posts, liveState.profileLive, liveState.snapshot);
       return;
     }
 
-    // Soft failures: empty list with status 0 may mean private/no posts; treat as empty success.
-    if (result.status_code === 0) {
-      douyinWorksHTTPBackoff.clear(secUserId);
-      emitDouyinAccountState(account, secUserId, profileUrl, [], liveState.profileLive, liveState.snapshot);
-      return;
+    // A signed status=0 response can legitimately be empty, but the API also
+    // returns empty/stale lists under risk control. Confirm it periodically
+    // through the browser profile instead of treating it as definitive.
+    let msg = '';
+    if (result && result.status_code !== 0) {
+      msg = result.message || `status_code=${result.status_code} http=${result.http}`;
+      const now = Date.now();
+      douyinWorksStatus.set(secUserId, `failed:${result.http}:${result.status_code}`);
+      const lastFailureLog = Number(douyinWorksFailureLoggedAt.get(secUserId) || 0);
+      if (now - lastFailureLog >= 5 * 60_000) {
+        douyinWorksFailureLoggedAt.set(secUserId, now);
+        log(`douyin browser works API failed for ${nameHint}: ${msg}`);
+      }
     }
 
-    // Auth / risk — do NOT thrash profile pages; surface once.
-    const msg = result.message || `status_code=${result.status_code} http=${result.http}`;
-    const now = Date.now();
-    const backoffMs = result.http === 403 ? 30 * 60_000 : 10 * 60_000;
-    douyinWorksHTTPBackoff.fail(secUserId, backoffMs, now);
-    const lastFailureLog = Number(douyinWorksHTTPFailureLoggedAt.get(secUserId) || 0);
-    if (now - lastFailureLog >= 5 * 60_000) {
-      douyinWorksHTTPFailureLoggedAt.set(secUserId, now);
-      log(`douyin HTTP posts paused for ${Math.round(backoffMs / 60_000)}m after ${nameHint}: ${msg}`);
-    }
-
-    // A saved live_id lets us normally avoid profile navigation. If direct
-    // works HTTP is blocked, perform one browser fallback per backoff window.
-    if (!profileAttempted) {
+    // Direct API failures must never suppress works monitoring altogether.
+    // Browser profile confirmation has its own short cadence.
+    if (!profileAttempted && !douyinWorksProfileBackoff.active(secUserId)) {
+      douyinWorksProfileBackoff.fail(secUserId, 5 * 60_000);
       try {
         liveState = await scanDouyinLiveProfile(account, secUserId, profileUrl);
         if (liveState.posts.length > 0) {
@@ -2101,15 +2154,15 @@ async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false) {
         log(`douyin works browser fallback failed for ${nameHint}: ${error.message}`);
       }
     }
-    if (/验证|captcha|login|登录|未登录|risk|风控/i.test(msg) || result.status_code === 8 || result.http === 403) {
+    if (result && (/验证|captcha|login|登录|未登录|risk|风控/i.test(msg) || result.status_code === 8 || result.http === 403)) {
       emit('douyin_account_error', {
         secUserId,
-        message: `抖音作品 HTTP 拉取失败：${msg || '可能需要重新登录或过验证'}`,
+        message: `抖音作品浏览器接口拉取失败：${msg || '可能需要重新登录或过验证'}`,
       });
-    } else {
+    } else if (result && result.status_code !== 0) {
       emit('douyin_account_error', {
         secUserId,
-        message: `抖音作品 HTTP 拉取失败：${msg || 'empty'}`,
+        message: `抖音作品浏览器接口拉取失败：${msg || 'empty'}`,
       });
     }
     emit('douyin_account', {
@@ -2141,22 +2194,36 @@ async function runProfileScans(which) {
 
 async function scanAllDouyinInner(liveOnly = false) {
   if (shuttingDown || !settings.douyinEnabled || settings.douyinAccounts.length === 0) return;
-  const accounts = liveOnly ? settings.douyinAccounts.filter((account) =>
+  let accounts = liveOnly ? settings.douyinAccounts.filter((account) =>
     account.liveEnabled !== false && !String(account.liveId || '').trim() &&
     douyinLiveProfileBackoff.due(String(account.secUserId || '').trim())) : settings.douyinAccounts;
+  // Rotate profile-based live discovery one account at a time so works polls keep priority.
+  if (liveOnly && accounts.length > 1) accounts = accounts.slice(0, 1);
   if (accounts.length === 0) return;
   if (douyinScanning) return;
   douyinScanning = true;
   try {
-    // Works path is Cookie+HTTP only — no profile page.goto.
-    // Cookie from live Playwright context (IM already up) or weibo-storage-state.json.
+    // Works path batches signed JSON calls inside one warm Chromium tab.
+    // Cookie presence is still checked for a clear login-health message.
     let cookie = await getDouyinCookieHeader();
     if (!cookie) {
       // Cold start: open browser profile once to load cookies, still no profile navigation.
       await startBrowser();
       cookie = await getDouyinCookieHeader();
     }
+    let worksResults = new Map();
     log(`douyin ${liveOnly ? 'live discovery' : 'works'} scan accounts=${accounts.length} cookie=${cookie ? 'yes' : 'no'}`);
+    if (!liveOnly) {
+      try {
+        const worksPage = await getDouyinWorksPage();
+        worksResults = await fetchAwemePostsBrowserAPI(
+          worksPage,
+          accounts.map((account) => String(account.secUserId || '').trim()).filter(Boolean),
+        );
+      } catch (error) {
+        log(`douyin direct works browser runtime unavailable: ${error.message}`);
+      }
+    }
     for (const account of accounts) {
       if (shuttingDown) break;
       const accountKey = String(account.secUserId || account.name || 'unknown');
@@ -2164,7 +2231,7 @@ async function scanAllDouyinInner(liveOnly = false) {
         // Playwright can occasionally leave goto/evaluate or response-body
         // promises pending even after their own timeout. Never let one creator
         // freeze the global scan lock and disable every subsequent poll.
-        await withHardTimeout(scanDouyinAccount(account, cookie, liveOnly), 50_000, `douyin scan ${accountKey}`);
+        await withHardTimeout(scanDouyinAccount(account, cookie, liveOnly, worksResults.get(String(account.secUserId || '').trim())), 50_000, `douyin scan ${accountKey}`);
       } catch (error) {
         log(`douyin account scan aborted user=${account.name || accountKey}: ${error.message}`);
         emit('douyin_account_error', {
