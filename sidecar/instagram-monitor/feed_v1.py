@@ -1,5 +1,6 @@
 """Authenticated web feed adapter; protocol reference: Instaloader issue #2689."""
 import instaloader
+import requests
 
 
 class FeedError(Exception):
@@ -20,7 +21,12 @@ def user_posts_v1(loader, user_id, username):
         params = {'count': 12}
         if cursor:
             params['max_id'] = cursor
-        response = session.get(url, params=params, headers=headers, timeout=loader.context.request_timeout)
+        try:
+            response = session.get(url, params=params, headers=headers, timeout=loader.context.request_timeout)
+        except requests.exceptions.Timeout:
+            raise FeedError("timeout") from None
+        except requests.exceptions.RequestException:
+            raise FeedError("account_unavailable") from None
         if response.status_code in (401, 403):
             raise FeedError('login_required')
         if response.status_code != 200:

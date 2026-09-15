@@ -40,7 +40,7 @@ class RateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory);clock=Clock();response=requests.Response();response.status_code=401
             response._content=b'{"status":"fail","message":"Please wait a few minutes before you try again."}'
-            with patch.object(requests.Session,'request',return_value=response) as network:
+            with patch.object(requests.Session,'send',return_value=response) as network:
                 first=clock.limiter(path)
                 with first.transport():
                     with self.assertRaises(RateBlocked): requests.Session().get('https://www.instagram.com/graphql/query')

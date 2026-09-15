@@ -124,15 +124,16 @@ class PersistentLimiter:
 
     @contextlib.contextmanager
     def transport(self):
-        original = requests.Session.request
+        original = requests.Session.send
         limiter = self
 
-        def counted(session, method, url, *args, **kwargs):
+        def counted(session, request, **kwargs):
+            url = request.url
             host = urlparse(url).hostname or ''
             is_instagram = host == 'instagram.com' or host.endswith('.instagram.com')
             if is_instagram:
                 limiter.reserve_http()
-            response = original(session, method, url, *args, **kwargs)
+            response = original(session, request, **kwargs)
             if is_instagram:
                 limited = response.status_code == 429
                 if response.status_code in (401, 403):
@@ -141,8 +142,8 @@ class PersistentLimiter:
                     limiter.server_limit(response.headers.get('Retry-After'))
             return response
 
-        requests.Session.request = counted
+        requests.Session.send = counted
         try:
             yield
         finally:
-            requests.Session.request = original
+            requests.Session.send = original
