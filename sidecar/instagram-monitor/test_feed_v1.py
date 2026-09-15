@@ -18,4 +18,11 @@ class FeedTests(unittest.TestCase):
         with patch('requests.Session.get',return_value=SimpleNamespace(status_code=200,json=lambda:{'status':'fail'})):
             with self.assertRaises(feed_v1.FeedError): list(feed_v1.user_posts_v1(loader,'42','artist'))
 
+    def test_transport_errors_are_sanitized(self):
+        import requests
+        loader=SimpleNamespace(context=SimpleNamespace(_session=requests.Session(),request_timeout=20))
+        with patch('requests.Session.get',side_effect=requests.exceptions.Timeout('private URL')):
+            with self.assertRaises(feed_v1.FeedError) as error:list(feed_v1.user_posts_v1(loader,'42','artist'))
+        self.assertEqual(error.exception.code,'timeout')
+
 if __name__ == '__main__': unittest.main()

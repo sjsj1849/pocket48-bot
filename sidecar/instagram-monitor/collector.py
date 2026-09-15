@@ -14,6 +14,7 @@ import time
 import instaloader
 from persistent_rate import PersistentLimiter, RateBlocked
 from feed_v1 import user_posts_v1, FeedError
+from browser_transport import browser_transport
 
 
 class Failure(Exception):
@@ -169,7 +170,9 @@ def execute(request, directory):
         os.chmod(lock.name, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         limiter = PersistentLimiter(directory)
-        with limiter.transport():
+        backend=request.get("httpBackend", "curl_cffi")
+        if backend not in ("curl_cffi", "requests"): raise Failure("invalid_request")
+        with limiter.transport(), browser_transport(backend=="curl_cffi"):
             operation = request.get("operation")
             if operation == "session_clear":
                 path.unlink(missing_ok=True)
@@ -273,18 +276,34 @@ def execute(request, directory):
                 probe_path=directory/"probe-state.json"
                 previous=json.loads(probe_path.read_text()) if probe_path.exists() else {}
                 attempts=previous.get("attempts",0)
+                maximum=min(3,max(1,int(previous.get("maxAttempts",3))))
+                compare=bool(previous.get("compareTransport"))
+                comparison_path=directory/"transport-comparison.json"
                 before=len(limiter.state["requests"])
                 try:
                     events=scan_posts(user_posts_v1(loader,user_id,name),author,min(5,int(request.get("limit",1))),0)
                     write_session(path,loader.context,login)
+                    if compare and backend=="curl_cffi":
+                        limiter.success()
+                        comparison={"checkedAt":time.time(),"curl_cffi":{"success":True,"events":len(events)}}
+                        try:
+                            with browser_transport(False):
+                                baseline=scan_posts(user_posts_v1(loader,user_id,name),author,2,0)
+                            comparison["requests"]={"success":True,"events":len(baseline)}
+                        except RateBlocked as error:
+                            comparison["requests"]={"success":False,"error":error.code,"nextRetryAt":error.retry_at}
+                        except (FeedError,instaloader.exceptions.InstaloaderException) as error:
+                            comparison["requests"]={"success":False,"error":getattr(error,"code","account_unavailable")}
+                        write_private(comparison_path,comparison)
                     preference_path=directory/"feed-api.json"
                     preference=json.loads(preference_path.read_text()) if preference_path.exists() else {}
                     preference[name]="v1";write_private(preference_path,preference)
-                    write_private(probe_path,{"pending":False,"success":True,"username":name,"userId":user_id,"events":len(events),"attempts":attempts+1,"checkedAt":time.time()})
-                    return {"user":author,"events":events,"feedAPI":"v1"}
+                    write_private(probe_path,{"pending":False,"success":True,"username":name,"userId":user_id,"events":len(events),"attempts":attempts+1,"checkedAt":time.time(),"httpBackend":backend})
+                    return {"user":author,"events":events,"feedAPI":"v1","httpBackend":backend}
                 except RateBlocked as error:
                     if len(limiter.state["requests"])>before: attempts+=1
-                    write_private(probe_path,{"pending":attempts<3,"success":False,"username":name,"userId":user_id,"attempts":attempts,"nextRetryAt":error.retry_at,"error":"正在冷却，等待下一次只读验证" if attempts<3 else "三次验证均受平台限制，已暂停只读验证"})
+                    if compare: write_private(comparison_path,{"checkedAt":time.time(),"curl_cffi":{"success":False,"error":error.code,"nextRetryAt":error.retry_at},"requests":{"skipped":True,"reason":"cooldown"}})
+                    write_private(probe_path,{"pending":attempts<maximum,"success":False,"username":name,"userId":user_id,"attempts":attempts,"maxAttempts":maximum,"compareTransport":compare,"httpBackend":backend,"nextRetryAt":error.retry_at,"error":"正在冷却，等待下一次只读验证" if attempts<maximum else "验证受平台限制，已暂停只读验证"})
                     raise
                 except FeedError as error:
                     write_private(probe_path,{"pending":False,"success":False,"username":name,"userId":user_id,"attempts":attempts+1,"error":error.code})
