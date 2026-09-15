@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"os"
+	"path/filepath"
+	"pocket48-bot/internal/instagram"
 	"strings"
 	"testing"
 )
@@ -211,7 +214,6 @@ func TestDouyinLoginRequiredBeatsOlderWorksScan(t *testing.T) {
 	t.Fatal("Douyin state not found")
 }
 
-
 func TestNapCatFailedToConnectIsDown(t *testing.T) {
 	states := buildServiceStates([]string{
 		"2026/07/18 10:01:12 ❌ Failed to connect to NapCat: dial tcp 127.0.0.1:3001: connect: connection refused. Retrying in 5s...",
@@ -288,4 +290,38 @@ func TestNapCatDisconnectOverridesOlderConnection(t *testing.T) {
 		}
 	}
 	t.Fatal("NapCat state not found")
+}
+
+func TestDisabledInstagramHiddenFromOverviewAndActivity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := instagram.SaveSettings(instagram.Dir(configPath), instagram.Settings{Enabled: false, PollSeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	flags := loadOverviewFeatureFlags(configPath)
+	if flags.InstagramEnabled {
+		t.Fatal("disabled Instagram marked enabled")
+	}
+	states := buildServiceStates(nil, flags)
+	for _, card := range states {
+		if card.ID == "instagram" {
+			t.Fatal("disabled Instagram card visible")
+		}
+	}
+	items := overviewActivity([]string{"2026/09/15 13:00:00 [Instagram] 新帖子 test", "2026/09/15 13:00:01 [NIM] status=connected"}, states, 12)
+	for _, item := range items {
+		if item.Source == "Instagram" {
+			t.Fatal("disabled Instagram activity visible")
+		}
+	}
+
+	if err := instagram.SaveSettings(instagram.Dir(configPath), instagram.Settings{Enabled: true, PollSeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	flags = loadOverviewFeatureFlags(configPath)
+	if !flags.InstagramEnabled {
+		t.Fatal("enabled Instagram marked disabled")
+	}
 }
