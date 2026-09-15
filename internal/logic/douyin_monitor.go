@@ -27,12 +27,13 @@ import (
 )
 
 type douyinAccountCommand struct {
-	SecUserID    string `json:"secUserId"`
-	ProfileURL   string `json:"profileUrl,omitempty"`
-	Name         string `json:"name,omitempty"`
-	LiveID       string `json:"liveId,omitempty"`
-	WorksEnabled bool   `json:"worksEnabled"`
-	LiveEnabled  bool   `json:"liveEnabled"`
+	SecUserID     string `json:"secUserId"`
+	ProfileURL    string `json:"profileUrl,omitempty"`
+	Name          string `json:"name,omitempty"`
+	LiveID        string `json:"liveId,omitempty"`
+	LastAwemeTime int64  `json:"lastAwemeTime,omitempty"`
+	WorksEnabled  bool   `json:"worksEnabled"`
+	LiveEnabled   bool   `json:"liveEnabled"`
 }
 
 type douyinPost struct {

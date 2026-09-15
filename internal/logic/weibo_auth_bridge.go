@@ -485,6 +485,9 @@ func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
 			if current.LiveID == "" {
 				current.LiveID = item.LiveID
 			}
+			if item.LastAwemeTime > current.LastAwemeTime {
+				current.LastAwemeTime = item.LastAwemeTime
+			}
 			current.WorksEnabled = current.WorksEnabled || !item.WorksDisabled
 			current.LiveEnabled = current.LiveEnabled || !item.LiveDisabled
 			seen[sec] = current
@@ -494,7 +497,12 @@ func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
 	for _, item := range seen {
 		result = append(result, item)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].SecUserID < result[j].SecUserID })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].LastAwemeTime != result[j].LastAwemeTime {
+			return result[i].LastAwemeTime > result[j].LastAwemeTime
+		}
+		return result[i].SecUserID < result[j].SecUserID
+	})
 	return result
 }
 
