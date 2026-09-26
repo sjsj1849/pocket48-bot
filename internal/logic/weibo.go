@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pocket48-bot/internal/config"
@@ -20,10 +21,9 @@ func (b *Bot) notifyWeiboCookieInvalid(uid string) {
 	// First try browser cookie refresh; only email after recovery fails.
 	// Parallel alert+refresh was spamming when refresh would have succeeded.
 	if b.cfg.WeiboBrowserAuthEnabled && b.weiboAuth != nil {
-		if err := b.weiboAuth.RequestRefresh("cookie_invalid"); err != nil {
+		if got, err := b.weiboAuth.RequestRefreshAndWait("cookie_invalid", 50*time.Second); err != nil {
 			log.Printf("[Weibo-auth] request refresh after cookie invalid: %v", err)
 		} else {
-			got := b.weiboAuth.WaitCookies(50 * time.Second)
 			log.Printf("[Weibo-auth] cookie refresh wait done uid=%s gotCookies=%v", uid, got)
 			// Give monitor a moment to pick up hot-updated cookies.
 			time.Sleep(2 * time.Second)
@@ -652,9 +652,24 @@ func (b *Bot) tryWeiboSuperAutoSign() {
 	if strings.TrimSpace(b.cfg.WeiboSuperLastRunDate) == today {
 		return
 	}
-	result, anySuccess := b.signAllWeiboSuperTopics()
+	result, anySuccess, authExpired := b.signAllWeiboSuperTopics()
 	if result == "" {
 		return
+	}
+	if !anySuccess && authExpired && b.cfg.WeiboBrowserAuthEnabled && b.weiboAuth != nil {
+		log.Printf("[WeiboSuper] 检测到游客页，立即请求浏览器恢复 Cookie")
+		gotCookies, refreshErr := b.weiboAuth.RequestRefreshAndWait("super_sign_auth_expired", 50*time.Second)
+		if refreshErr != nil {
+			log.Printf("[WeiboSuper] request browser recovery failed: %v", refreshErr)
+		} else if gotCookies {
+			webOK, detail, checkErr := b.weiboMonitor.CheckWebCookie("")
+			if checkErr != nil {
+				log.Printf("[WeiboSuper] verify refreshed web cookie failed: %v", checkErr)
+			} else if webOK {
+				log.Printf("[WeiboSuper] browser Cookie verified (%s), retrying sign once", detail)
+				result, anySuccess, _ = b.signAllWeiboSuperTopics()
+			}
+		}
 	}
 	// 只有至少一个超话签到成功时才标记为今日已跑
 	// 全部失败时不标记，让下一个 tick 可以重试（如新 cookie 导入后）
@@ -666,7 +681,22 @@ func (b *Bot) tryWeiboSuperAutoSign() {
 	if err := b.cfg.Save(); err != nil {
 		log.Printf("[WeiboSuper] save auto run date failed: %v", err)
 	}
-	b.notifyAdminsQQ("[Weibo超话自动签到]\n" + result)
+	if anySuccess || b.shouldNotifyWeiboAutoSignFailure() {
+		b.notifyAdminsQQ("[Weibo超话自动签到]\n" + result)
+	} else {
+		log.Printf("[WeiboSuper] repeated failure notification suppressed (1h cooldown)")
+	}
+}
+
+func (b *Bot) shouldNotifyWeiboAutoSignFailure() bool {
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.lastWeiboAutoSignFailureNotifyAt.IsZero() && now.Sub(b.lastWeiboAutoSignFailureNotifyAt) < time.Hour {
+		return false
+	}
+	b.lastWeiboAutoSignFailureNotifyAt = now
+	return true
 }
 
 func (b *Bot) getGlobalWeiboSuperTopics() map[string]*config.WeiboSuperTopic {
@@ -808,14 +838,15 @@ func (b *Bot) findWeiboSuperTopic(key string) (string, *config.WeiboSuperTopic) 
 	return "", nil
 }
 
-func (b *Bot) signAllWeiboSuperTopics() (string, bool) {
+func (b *Bot) signAllWeiboSuperTopics() (string, bool, bool) {
 	topics := b.getGlobalWeiboSuperTopics()
 	if len(topics) == 0 {
-		return "", false
+		return "", false, false
 	}
 	countTopics := b.getWeiboSuperCountTopics()
 	var lines []string
 	anySuccess := false
+	authExpired := false
 	for oid, topic := range topics {
 		// 如果该超话标注了随日报签到，自动签到跳过
 		normKey := strings.TrimPrefix(normalizeWeiboSuperOID(oid), "1022:")
@@ -835,6 +866,9 @@ func (b *Bot) signAllWeiboSuperTopics() (string, bool) {
 			name = oid
 		}
 		if err != nil {
+			if monitor.IsWeiboAuthExpired(err) {
+				authExpired = true
+			}
 			topic.LastSignStatus = "失败: " + err.Error()
 			lines = append(lines, fmt.Sprintf("[%s] 签到失败: %v", name, err))
 			continue
@@ -858,12 +892,12 @@ func (b *Bot) signAllWeiboSuperTopics() (string, bool) {
 		}
 	}
 	if len(lines) == 0 {
-		return "", false
+		return "", false, authExpired
 	}
 	if err := b.cfg.Save(); err != nil {
 		log.Printf("[WeiboSuper] save sign result failed: %v", err)
 	}
-	return strings.Join(lines, "\n"), anySuccess
+	return strings.Join(lines, "\n"), anySuccess, authExpired
 }
 
 func (b *Bot) fetchWeiboSuperCountAll() ([]monitor.WeiboSuperCountResult, []string) {
@@ -875,12 +909,46 @@ func (b *Bot) fetchWeiboSuperCountAllBefore(deadline time.Time) ([]monitor.Weibo
 	results := make([]monitor.WeiboSuperCountResult, 0, len(topics))
 	failed := make([]string, 0)
 
-	// 第一轮：从 App/Web API 拿数据
+	// 第一轮：日报在 23:59 才开始取数，以有限并发确保全部超话尽量在
+	// 午夜前完成。手动查询仍保持串行，避免无截止时间的操作突然放大流量。
+	type countJob struct {
+		oid      string
+		nameHint string
+	}
+	type countOutcome struct {
+		job countJob
+		res *monitor.WeiboSuperCountResult
+		err error
+	}
+	jobs := make([]countJob, 0, len(topics))
 	for oid, topic := range topics {
-		nameHint := strings.TrimSpace(topic.Name)
-		res, err := fetchWeiboDailyCount(deadline, func() (*monitor.WeiboSuperCountResult, error) {
-			return b.weiboMonitor.FetchSuperCountByOID(oid, nameHint)
-		})
+		jobs = append(jobs, countJob{oid: oid, nameHint: strings.TrimSpace(topic.Name)})
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].oid < jobs[j].oid })
+	outcomes := make([]countOutcome, len(jobs))
+	parallelism := 1
+	if !deadline.IsZero() {
+		parallelism = 4
+	}
+	limit := make(chan struct{}, parallelism)
+	var wg sync.WaitGroup
+	for i, job := range jobs {
+		i, job := i, job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			res, err := fetchWeiboDailyCount(deadline, func() (*monitor.WeiboSuperCountResult, error) {
+				return b.weiboMonitor.FetchSuperCountByOID(job.oid, job.nameHint)
+			})
+			outcomes[i] = countOutcome{job: job, res: res, err: err}
+		}()
+	}
+	wg.Wait()
+
+	for _, outcome := range outcomes {
+		oid, nameHint, res, err := outcome.job.oid, outcome.job.nameHint, outcome.res, outcome.err
 		if err != nil {
 			log.Printf("[Weibo][Count] unavailable oid=%s name=%q: %v", oid, nameHint, err)
 			name := nameHint
@@ -1339,8 +1407,14 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 
 // weiboSuperCountHTMLSection is one table block inside the daily email.
 type weiboSuperCountHTMLSection struct {
-	Title   string
-	Results []monitor.WeiboSuperCountResult
+	GroupKey string
+	Title    string
+	Results  []monitor.WeiboSuperCountResult
+}
+
+type weiboSuperCountImage struct {
+	Title    string
+	Sections []weiboSuperCountHTMLSection
 }
 
 // buildWeiboSuperCountHTMLTable renders a single ranking table (dynamic columns: only columns with data).
@@ -1377,7 +1451,7 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 					signDelta = "new"
 				}
 			}
-			likeText := ""
+			likeText := "未获取"
 			hasLike := item.SuperLikeKnown || item.SuperLikeCount > 0
 			if hasLike {
 				likeText = fmt.Sprintf("%d", item.SuperLikeCount)
@@ -1634,8 +1708,8 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 		footer = ""
 	} else {
 		footer = `<tr><td style="padding:8px 28px 28px;" align="center">
-<div style="display:inline-block;padding:12px 20px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:8px;font-size:14px;font-weight:650;">⬇ 下载图片附件（PNG）</div>
-<p style="margin:12px 0 0;color:#98a1af;font-size:12px;line-height:1.6;">邮件附件为 3:4 手机比例卡片图，可直接保存。管理面板：https://pocket48.jiufeng.cloud</p>
+<div style="display:inline-block;padding:12px 20px;background:#3478d4;color:#ffffff;text-decoration:none;border-radius:8px;font-size:14px;font-weight:650;">下载日报图片附件（PNG）</div>
+<p style="margin:12px 0 0;color:#98a1af;font-size:12px;line-height:1.6;">邮件附件为手机比例卡片图，可直接保存；如配置了多个出图方案，会附带多张图片。管理面板：https://pocket48.jiufeng.cloud</p>
 </td></tr>`
 	}
 
@@ -1679,7 +1753,7 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 // HTML sections. Standalone version (no Bot instance needed) for resend tool.
 func buildWeiboSuperCountSections(groups map[string]*config.WeiboSuperCountGroupInfo, topics map[string]*config.WeiboSuperCountTopic, results []monitor.WeiboSuperCountResult) []weiboSuperCountHTMLSection {
 	if len(groups) == 0 {
-		return []weiboSuperCountHTMLSection{{Title: "全部超话", Results: results}}
+		return []weiboSuperCountHTMLSection{{GroupKey: "__all__", Title: "全部超话", Results: results}}
 	}
 	sortedGroupIDs := make([]string, 0, len(groups))
 	for gid := range groups {
@@ -1722,7 +1796,7 @@ func buildWeiboSuperCountSections(groups map[string]*config.WeiboSuperCountGroup
 		for _, r := range groupResults {
 			used[normalizeWeiboSuperOID(r.OID)] = struct{}{}
 		}
-		sections = append(sections, weiboSuperCountHTMLSection{Title: name, Results: groupResults})
+		sections = append(sections, weiboSuperCountHTMLSection{GroupKey: gid, Title: name, Results: groupResults})
 	}
 	var leftover []monitor.WeiboSuperCountResult
 	for _, r := range results {
@@ -1731,12 +1805,82 @@ func buildWeiboSuperCountSections(groups map[string]*config.WeiboSuperCountGroup
 		}
 	}
 	if len(leftover) > 0 {
-		sections = append(sections, weiboSuperCountHTMLSection{Title: "未分组", Results: leftover})
+		sections = append(sections, weiboSuperCountHTMLSection{GroupKey: "__ungrouped__", Title: "未分组", Results: leftover})
 	}
 	if len(sections) == 0 {
-		return []weiboSuperCountHTMLSection{{Title: "全部超话", Results: results}}
+		return []weiboSuperCountHTMLSection{{GroupKey: "__all__", Title: "全部超话", Results: results}}
 	}
 	return sections
+}
+
+// buildWeiboSuperCountImages applies the optional attachment layout. Configured
+// plans may intentionally reuse a report group. Any section not referenced by
+// a plan is appended to an automatic fallback image so a configuration mistake
+// can never silently omit data from the attachments.
+func buildWeiboSuperCountImages(plans map[string]*config.WeiboSuperCountImageGroupInfo, sections []weiboSuperCountHTMLSection) []weiboSuperCountImage {
+	if len(plans) == 0 {
+		return []weiboSuperCountImage{{Sections: sections}}
+	}
+	planKeys := make([]string, 0, len(plans))
+	for key := range plans {
+		planKeys = append(planKeys, key)
+	}
+	sort.Strings(planKeys)
+	byGroup := make(map[string]weiboSuperCountHTMLSection, len(sections))
+	for _, section := range sections {
+		byGroup[section.GroupKey] = section
+	}
+	used := make(map[string]struct{}, len(sections))
+	images := make([]weiboSuperCountImage, 0, len(plans)+1)
+	for _, key := range planKeys {
+		plan := plans[key]
+		if plan == nil {
+			continue
+		}
+		selected := make([]weiboSuperCountHTMLSection, 0, len(plan.GroupKeys))
+		for _, groupKey := range plan.GroupKeys {
+			if section, ok := byGroup[strings.TrimSpace(groupKey)]; ok {
+				selected = append(selected, section)
+				used[section.GroupKey] = struct{}{}
+			}
+		}
+		if len(selected) > 0 {
+			images = append(images, weiboSuperCountImage{Title: strings.TrimSpace(plan.Name), Sections: selected})
+		}
+	}
+	remaining := make([]weiboSuperCountHTMLSection, 0, len(sections))
+	for _, section := range sections {
+		if _, ok := used[section.GroupKey]; !ok {
+			remaining = append(remaining, section)
+		}
+	}
+	if len(remaining) > 0 {
+		images = append(images, weiboSuperCountImage{Title: "其他分组", Sections: remaining})
+	}
+	if len(images) == 0 {
+		return []weiboSuperCountImage{{Sections: sections}}
+	}
+	return images
+}
+
+func buildWeiboSuperCountImageAttachments(cfg *config.Config, sections []weiboSuperCountHTMLSection, failed []string, title string, now time.Time, signBaseline, likeBaseline, postBaseline map[string]int) []emailAttachment {
+	images := buildWeiboSuperCountImages(cfg.WeiboSuperCountImageGroups, sections)
+	attachments := make([]emailAttachment, 0, len(images))
+	for index, image := range images {
+		imageTitle := title
+		if image.Title != "" {
+			imageTitle = fmt.Sprintf("[%s - %s]", strings.Trim(strings.TrimSpace(title), "[]"), image.Title)
+		}
+		shotHTML := formatWeiboSuperCountDualRankingHTML(image.Sections, failed, imageTitle, now, signBaseline, likeBaseline, postBaseline, true)
+		png, err := renderHTMLToPNG(shotHTML)
+		if err != nil {
+			log.Printf("[WeiboSuperCount] html→png failed image=%d name=%q: %v", index+1, image.Title, err)
+			continue
+		}
+		filename := fmt.Sprintf("weibo-super-count-%s-%02d.png", now.Format("2006-01-02"), index+1)
+		attachments = append(attachments, emailAttachment{Name: filename, ContentType: "image/png", Data: png})
+	}
+	return attachments
 }
 
 func (b *Bot) buildWeiboSuperCountEmailSections(results []monitor.WeiboSuperCountResult) []weiboSuperCountHTMLSection {
@@ -1759,40 +1903,19 @@ func ResendWeiboSuperCountDailyEmail(
 	// Build grouped sections from config.
 	sections := buildWeiboSuperCountSections(cfg.WeiboSuperCountGroups, cfg.WeiboSuperCountTopics, results)
 	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
-	shotHTML := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, true)
 	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
-	filename := fmt.Sprintf("weibo-super-count-%s.png", now.Format("2006-01-02"))
-	var atts []emailAttachment
-	if png, err := renderHTMLToPNG(shotHTML); err != nil {
-		log.Printf("[WeiboSuperCount] html→png failed: %v (email without image)", err)
-	} else {
-		atts = append(atts, emailAttachment{
-			Name:        filename,
-			ContentType: "image/png",
-			Data:        png,
-		})
-	}
+	atts := buildWeiboSuperCountImageAttachments(cfg, sections, failed, title, now, signBaseline, likeBaseline, postBaseline)
 	plain := formatWeiboSuperCountDualRanking(results, failed, title, now, signBaseline, likeBaseline, postBaseline)
 	return sendAdminHTMLEmail(cfg, subject, htmlBody, plain, atts...)
 }
 
-// sendWeiboSuperCountDailyEmail sends ONE email with multi-group tables + PNG attachment.
+// sendWeiboSuperCountDailyEmail sends one email with multi-group tables and one
+// or more PNG attachments according to the configured image layout.
 func (b *Bot) sendWeiboSuperCountDailyEmail(reportText, title string, results []monitor.WeiboSuperCountResult, failed []string, now time.Time, signBaseline, likeBaseline, postBaseline map[string]int) {
 	sections := b.buildWeiboSuperCountEmailSections(results)
 	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
-	shotHTML := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, true)
 	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
-	filename := fmt.Sprintf("weibo-super-count-%s.png", now.Format("2006-01-02"))
-	var atts []emailAttachment
-	if png, err := renderHTMLToPNG(shotHTML); err != nil {
-		log.Printf("[WeiboSuperCount] html→png failed: %v (email without image)", err)
-	} else {
-		atts = append(atts, emailAttachment{
-			Name:        filename,
-			ContentType: "image/png",
-			Data:        png,
-		})
-	}
+	atts := buildWeiboSuperCountImageAttachments(b.cfg, sections, failed, title, now, signBaseline, likeBaseline, postBaseline)
 	b.notifyAdminsEmailReport(subject, htmlBody, reportText, atts...)
 }
 
@@ -1804,10 +1927,6 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	// Web 采集含移动端补充，按每个超话 3 秒预算，并为失败重试预留时间。
-	const timePerTopic = 3 * time.Second
-	const safetyBuffer = 45 * time.Second
-
 	for range ticker.C {
 		if !b.cfg.WeiboSuperCountEnabled {
 			continue
@@ -1817,21 +1936,7 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			continue
 		}
 		now := time.Now().In(loc)
-		// 动态计算开始时间
-		neededDuration := time.Duration(numTopics)*timePerTopic + safetyBuffer
-		// 提前启动并设置当日截止时间，避免将次日签到写进昨日快照。
-		maxStart := 23*3600 + 58*60 + 30
-		minStart := 23*3600 + 50*60 + 0
-		startSecond := maxStart - int(neededDuration.Seconds())
-		if startSecond < minStart {
-			startSecond = minStart
-		}
-		if startSecond > maxStart {
-			startSecond = maxStart
-		}
-		// 用范围匹配代替精确秒匹配，避免 1s ticker 经长时间运行后累积漂移错过触发
-		currentSecond := now.Hour()*3600 + now.Minute()*60 + now.Second()
-		if currentSecond < startSecond || currentSecond >= maxStart {
+		if !withinWeiboDailyCollectionWindow(now) {
 			continue
 		}
 		today := now.Format("2006-01-02")
@@ -1839,8 +1944,11 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			continue
 		}
 
-		deadline := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 45, 0, loc)
+		deadline := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, loc)
+		started := time.Now()
+		log.Printf("[WeiboSuperCount] daily collection started topics=%d deadline=%s", numTopics, deadline.Format(time.RFC3339))
 		results, failed := b.fetchWeiboSuperCountAllBefore(deadline)
+		log.Printf("[WeiboSuperCount] daily collection finished results=%d failed=%d elapsed=%s", len(results), len(failed), time.Since(started).Round(time.Millisecond))
 		yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 		var signBaseline map[string]int
 		var likeBaseline map[string]int
@@ -1908,6 +2016,10 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 			log.Printf("[WeiboSuperCount] save last push date failed: %v", err)
 		}
 	}
+}
+
+func withinWeiboDailyCollectionWindow(now time.Time) bool {
+	return now.Hour() == 23 && now.Minute() == 59 && now.Second() >= 15
 }
 
 // runWeiboAppAuthHealthCheckLoop 主动健康检查微博 App 认证，每 2 小时检查一次。

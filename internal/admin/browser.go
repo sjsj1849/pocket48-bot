@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,57 @@ import (
 )
 
 const vncPort = 5901
+
+// Only fixed Weibo actions are exposed; the sidecar's other commands are not
+// reachable through this authenticated, CSRF-protected panel endpoint.
+func (s *Server) handleBrowserWeibo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var input struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&input); err != nil || (input.Action != "open" && input.Action != "sync") {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择 open 或 sync"})
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(s.opts.ConfigPath), "storage", "browser-sidecar.json"))
+	var endpoint struct {
+		Port int `json:"port"`
+	}
+	if err != nil || json.Unmarshal(data, &endpoint) != nil || endpoint.Port < 1 || endpoint.Port > 65535 {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "浏览器侧卡尚未就绪"})
+		return
+	}
+	dialer := websocket.Dialer{HandshakeTimeout: 3 * time.Second}
+	conn, _, err := dialer.DialContext(r.Context(), fmt.Sprintf("ws://127.0.0.1:%d/", endpoint.Port), nil)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "无法连接浏览器侧卡"})
+		return
+	}
+	defer conn.Close()
+	conn.SetReadLimit(8 << 20)
+	_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	id := strconv.FormatInt(time.Now().UnixNano(), 10)
+	if err = conn.WriteJSON(map[string]string{"cmd": "weibo_panel_" + input.Action, "requestId": id}); err == nil {
+		for {
+			var event struct {
+				Type      string `json:"type"`
+				RequestID string `json:"requestId"`
+			}
+			if err = conn.ReadJSON(&event); err != nil {
+				break
+			}
+			if event.Type == "panel_ack" && event.RequestID == id {
+				writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "浏览器未确认请求，请稍后重试"})
+}
 
 type browserStatus struct {
 	Available bool   `json:"available"`

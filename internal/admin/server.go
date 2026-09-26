@@ -225,6 +225,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleInstagramBrowser(w, r)
 	case "/api/instagram/settings", "/api/instagram/search", "/api/instagram/preview", "/api/instagram/session":
 		s.handleInstagram(w, r)
+	case "/api/melon/settings", "/api/melon/search", "/api/melon/preview":
+		s.handleMelon(w, r)
 	case "/api/x/settings", "/api/x/search", "/api/x/preview":
 		s.handleX(w, r)
 	case "/api/weverse/settings", "/api/weverse/search", "/api/weverse/members", "/api/weverse/browser", "/api/weverse/preview":
@@ -255,12 +257,18 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleWeiboSuperSignTopics(w, r)
 	case "/api/weibo/super-topics":
 		s.handleWeiboUnifiedSuperTopics(w, r)
+	case "/api/weibo/super-count/image-groups":
+		s.handleWeiboSuperCountImageGroups(w, r)
+	case "/api/weibo/super-count/groups":
+		s.handleWeiboSuperCountGroups(w, r)
 	case "/api/service/restart":
 		s.handleRestart(w, r)
 	case "/api/browser/status":
 		s.handleBrowserStatus(w, r)
 	case "/api/browser/x":
 		s.handleBrowserX(w, r)
+	case "/api/browser/weibo":
+		s.handleBrowserWeibo(w, r)
 	case "/api/browser/session":
 		s.handleBrowserSession(w, r)
 	case "/api/browser/ws":

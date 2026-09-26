@@ -11,7 +11,15 @@ import (
 )
 
 func weverseEventBody(e weverse.Event) string {
-	lines := []string{fmt.Sprintf("【%s|Weverse】", e.Author)}
+	headerAuthor := e.Author
+	if e.Kind == "comment" && e.PostContext != nil && e.PostContext.AuthorIsArtist &&
+		strings.TrimSpace(e.MemberID) != "" && strings.TrimSpace(e.PostContext.MemberID) != "" &&
+		e.MemberID != e.PostContext.MemberID {
+		if postAuthor := strings.TrimSpace(e.PostContext.Author); postAuthor != "" {
+			headerAuthor += "（" + postAuthor + "）"
+		}
+	}
+	lines := []string{fmt.Sprintf("【%s|Weverse】", headerAuthor)}
 	if e.Kind == "live" {
 		lines = append(lines, "已开播")
 	}
@@ -20,6 +28,23 @@ func weverseEventBody(e weverse.Event) string {
 	}
 	if e.Kind == "live_end" {
 		lines = append(lines, "直播已结束")
+	}
+	if e.Kind == "live_chat" {
+		host := strings.TrimSpace(e.LiveHostAuthor)
+		if host == "" {
+			host = "其他成员"
+		}
+		lines = append(lines, "来自 "+host+" 的直播")
+	}
+	if e.Kind == "moment" && e.MembershipOnly {
+		lines = append(lines, "发布了会员专属 Moment（当前账号无权查看内容）")
+	}
+	if e.PasswordProtected {
+		contentType := "帖子"
+		if e.Kind == "moment" {
+			contentType = " Moment"
+		}
+		lines = append(lines, "发布了密码保护"+contentType+"（尚未配置密码）")
 	}
 
 	if (e.Kind == "live_end" || e.Kind == "live_replay") && e.LiveDuration > 0 {
@@ -101,6 +126,7 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 	defer history.Close()
 	go b.runWeverseAISummaryLoop(ctx, dir)
 	go b.runWeverseReportLoop(ctx, dir)
+	go b.runWeversePasswordSyncLoop(ctx, dir)
 	var state weverse.Runtime
 	if e := weverse.Read(dir, "state.json", &state); e != nil {
 		log.Printf("[Weverse] 无法读取去重状态: %v", e)
@@ -185,7 +211,15 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 								}
 							}
 						}
-						for _, message := range weverseMessageGroups(s, event) {
+						deliveryEvent := event
+						if !s.Translate && deliveryEvent.Kind == "live_chat" {
+							deliveryEvent.Translation = ""
+						}
+						messages := weverseMessageGroups(s, deliveryEvent)
+						if strings.EqualFold(b.cfg.MediaDelivery, "local") {
+							b.localizeMessageGroups(messages)
+						}
+						for _, message := range messages {
 							b.napcat.SendGroupMessage(s.GroupID, message)
 						}
 						if err := history.Record([]weverse.Event{event}, s.ID); err != nil {
@@ -224,6 +258,80 @@ func (b *Bot) runWeverseLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
+		}
+	}
+}
+
+func (b *Bot) runWeversePasswordSyncLoop(ctx context.Context, dir string) {
+	const interval = 7 * 24 * time.Hour
+	for {
+		var previous weverse.PasswordSyncStatus
+		_ = weverse.Read(dir, "password-sync-status.json", &previous)
+		if last, err := time.Parse(time.RFC3339, previous.LastSuccess); err == nil {
+			wait := time.Until(last.Add(interval))
+			if wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+			}
+		}
+
+		settings, err := weverse.LoadSettings(dir)
+		var communityID int64
+		slug := ""
+		if err == nil && settings.Enabled {
+			for _, subscription := range settings.Subscriptions {
+				if subscription.Enabled && subscription.Slug == "hearts2hearts" {
+					communityID = subscription.CommunityID
+					slug = subscription.Slug
+					break
+				}
+			}
+		}
+		if err != nil || communityID == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(6 * time.Hour):
+				continue
+			}
+		}
+
+		history, openErr := weverse.OpenHistory(dir)
+		if openErr != nil {
+			log.Printf("[Weverse Password] 无法打开历史记录: %v", openErr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(6 * time.Hour):
+				continue
+			}
+		}
+		client := weverse.NewClient(dir, settings.ProxyURL)
+		cycle, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		status, syncErr := client.SyncH2HPasswords(cycle, history, communityID, slug)
+		cancel()
+		client.HTTP.CloseIdleConnections()
+		history.Close()
+		if syncErr != nil {
+			status.Error = syncErr.Error()
+			log.Printf("[Weverse Password] 每周同步失败: %v", syncErr)
+		} else {
+			log.Printf("[Weverse Password] 同步完成: 来源=%d 候选=%d 新增=%d 已有=%d 未匹配=%d", status.Entries, status.Candidates, status.Imported, status.AlreadyKnown, status.Unmatched)
+		}
+		if err := weverse.Write(dir, "password-sync-status.json", status); err != nil {
+			log.Printf("[Weverse Password] 无法保存同步状态: %v", err)
+		}
+		wait := interval
+		if syncErr != nil {
+			wait = 6 * time.Hour
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
 		}
 	}
 }

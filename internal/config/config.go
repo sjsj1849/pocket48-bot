@@ -30,16 +30,17 @@ type Config struct {
 	NIMRoomMessagePollFallback  bool                                       `json:"NIM_ROOM_MESSAGE_POLL_FALLBACK"`
 	NIMLiveDanmakuEnabled       bool                                       `json:"NIM_LIVE_DANMAKU_ENABLED"`
 	NIMViewerEventEnabled       bool                                       `json:"NIM_VIEWER_EVENT_ENABLED"`
-	PollingInterval             int                                        `json:"POLLING_INTERVAL"`              // Seconds
-	LastStartupTime             int64                                      `json:"LAST_STARTUP_TIME"`             // Unix Timestamp
-	WeiboSubscriptions          map[int64]map[string]*WeiboConfig          `json:"WEIBO_SUBSCRIPTIONS"`           // GroupID -> UID -> WeiboConfig
-	WeiboSuperPostSubscriptions map[int64]map[string]*WeiboSuperPostConfig `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"` // GroupID -> key(uid|oid) -> config
-	WeiboSuperTopics            map[int64]map[string]*WeiboSuperTopic      `json:"WEIBO_SUPER_TOPICS"`            // GroupID -> OID -> Topic
-	WeiboSuperAutoEnabled       bool                                       `json:"WEIBO_SUPER_AUTO_ENABLED"`      // Daily auto super-topic sign-in
-	WeiboSuperLastRunDate       string                                     `json:"WEIBO_SUPER_LAST_RUN_DATE"`     // YYYY-MM-DD
-	WeiboSuperCountEnabled      bool                                       `json:"WEIBO_SUPER_COUNT_ENABLED"`     // Enable weibo super count feature
-	WeiboSuperCountTopics       map[string]*WeiboSuperCountTopic           `json:"WEIBO_SUPER_COUNT_TOPICS"`      // OID -> Topic for count feature
-	WeiboSuperCountGroups       map[string]*WeiboSuperCountGroupInfo       `json:"WEIBO_SUPER_COUNT_GROUPS"`      // group_id -> group info
+	PollingInterval             int                                        `json:"POLLING_INTERVAL"`                         // Seconds
+	LastStartupTime             int64                                      `json:"LAST_STARTUP_TIME"`                        // Unix Timestamp
+	WeiboSubscriptions          map[int64]map[string]*WeiboConfig          `json:"WEIBO_SUBSCRIPTIONS"`                      // GroupID -> UID -> WeiboConfig
+	WeiboSuperPostSubscriptions map[int64]map[string]*WeiboSuperPostConfig `json:"WEIBO_SUPERPOST_SUBSCRIPTIONS"`            // GroupID -> key(uid|oid) -> config
+	WeiboSuperTopics            map[int64]map[string]*WeiboSuperTopic      `json:"WEIBO_SUPER_TOPICS"`                       // GroupID -> OID -> Topic
+	WeiboSuperAutoEnabled       bool                                       `json:"WEIBO_SUPER_AUTO_ENABLED"`                 // Daily auto super-topic sign-in
+	WeiboSuperLastRunDate       string                                     `json:"WEIBO_SUPER_LAST_RUN_DATE"`                // YYYY-MM-DD
+	WeiboSuperCountEnabled      bool                                       `json:"WEIBO_SUPER_COUNT_ENABLED"`                // Enable weibo super count feature
+	WeiboSuperCountTopics       map[string]*WeiboSuperCountTopic           `json:"WEIBO_SUPER_COUNT_TOPICS"`                 // OID -> Topic for count feature
+	WeiboSuperCountGroups       map[string]*WeiboSuperCountGroupInfo       `json:"WEIBO_SUPER_COUNT_GROUPS"`                 // group_id -> group info
+	WeiboSuperCountImageGroups  map[string]*WeiboSuperCountImageGroupInfo  `json:"WEIBO_SUPER_COUNT_IMAGE_GROUPS,omitempty"` // image_id -> groups combined in one PNG
 	// WeiboSuperCountDelivery: email | qq | both (default both when empty)
 	WeiboSuperCountDelivery string `json:"WEIBO_SUPER_COUNT_DELIVERY,omitempty"`
 	// WeiboSuperCountQQ: extra QQ numbers (private) for daily report when delivery includes qq
@@ -154,6 +155,14 @@ type WeiboSuperPostConfig struct {
 
 type WeiboSuperCountGroupInfo struct {
 	Name string `json:"name"` // Display name for the group
+}
+
+// WeiboSuperCountImageGroupInfo describes one daily-report PNG attachment.
+// GroupKeys references keys in WEIBO_SUPER_COUNT_GROUPS. An empty config keeps
+// the legacy behaviour: all report groups are rendered into one image.
+type WeiboSuperCountImageGroupInfo struct {
+	Name      string   `json:"name"`
+	GroupKeys []string `json:"group_keys"`
 }
 
 type WeiboSuperCountTopic struct {
@@ -307,6 +316,9 @@ func LoadConfig(path string) (*Config, error) {
 	// Migration: if topics exist but no groups defined, create a default group
 	if _, ok := raw["WEIBO_SUPER_COUNT_GROUPS"]; !ok || cfg.WeiboSuperCountGroups == nil {
 		cfg.WeiboSuperCountGroups = make(map[string]*WeiboSuperCountGroupInfo)
+	}
+	if _, ok := raw["WEIBO_SUPER_COUNT_IMAGE_GROUPS"]; !ok || cfg.WeiboSuperCountImageGroups == nil {
+		cfg.WeiboSuperCountImageGroups = make(map[string]*WeiboSuperCountImageGroupInfo)
 	}
 	if len(cfg.WeiboSuperCountTopics) > 0 && len(cfg.WeiboSuperCountGroups) == 0 {
 		hasGroup := false

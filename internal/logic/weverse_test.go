@@ -1,6 +1,8 @@
 package logic
 
 import (
+	"fmt"
+	"pocket48-bot/internal/melon"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/weverse"
 	"strings"
@@ -30,6 +32,32 @@ func TestFormatWeverseOriginalAndChinese(t *testing.T) {
 	}
 }
 
+func TestWeverseReplyShowsDifferentPostAuthor(t *testing.T) {
+	e := weverse.Event{
+		Kind: "comment", MemberID: "carmen", Author: "CARMEN", Body: "좋아요",
+		ParentAuthor: "粉丝昵称", ParentBody: "예쁘다", PostContext: &weverse.AIPostContext{MemberID: "stella", Author: "STELLA", AuthorIsArtist: true},
+	}
+	got := formatWeverseEvent(e)
+	if !strings.HasPrefix(got, "【CARMEN（STELLA）|Weverse】\n粉丝昵称：예쁘다") {
+		t.Fatal(got)
+	}
+
+	e.PostContext = &weverse.AIPostContext{MemberID: "carmen", Author: "CARMEN", AuthorIsArtist: true}
+	if !strings.HasPrefix(formatWeverseEvent(e), "【CARMEN|Weverse】\n") {
+		t.Fatal("成员自己帖子下的回复不应额外标注")
+	}
+
+	e.PostContext = &weverse.AIPostContext{Author: "STELLA"}
+	if !strings.HasPrefix(formatWeverseEvent(e), "【CARMEN|Weverse】\n") {
+		t.Fatal("主帖成员 ID 缺失时不应猜测归属")
+	}
+
+	e.PostContext = &weverse.AIPostContext{MemberID: "fan", Author: "粉丝昵称"}
+	if !strings.HasPrefix(formatWeverseEvent(e), "【CARMEN|Weverse】\n") {
+		t.Fatal("粉丝帖下的成员回复不应把粉丝名放进顶栏", formatWeverseEvent(e))
+	}
+}
+
 func TestWeverseLiveEndNotification(t *testing.T) {
 	e := weverse.Event{Kind: "live_end", Author: "JIWOO", Body: "방송", Translation: "直播标题", LiveDuration: 2076, Time: 100000, URL: "https://weverse.io/hearts2hearts/live/1-2"}
 	got := formatWeverseEvent(e)
@@ -43,9 +71,19 @@ func TestWeverseLiveEndNotification(t *testing.T) {
 	}
 }
 
+func TestWeverseLiveChatNotification(t *testing.T) {
+	e := weverse.Event{Kind: "live_chat", Author: "YUHA", Body: "웃겨 정말", Translation: "真好笑。", LiveHostAuthor: "JUUN", Time: 100000, URL: "https://weverse.io/hearts2hearts/live/1-2"}
+	got := formatWeverseEvent(e)
+	for _, want := range []string{"【YUHA|Weverse】", "来自 JUUN 的直播", "YUHA：真好笑。", "YUHA（原文）：웃겨 정말", e.URL} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestWeverseOnlyStellaMentionsAll(t *testing.T) {
 	sub := weverse.Subscription{AtAll: true, AtAllMemberIDs: []string{"stella"}, AtAllMemberNames: []string{"STELLA"}, Enabled: true, CommunityID: 235, Posts: true, Comments: true, Live: true}
-	for _, kind := range []string{"post", "comment", "live", "live_end", "live_replay"} {
+	for _, kind := range []string{"post", "comment", "live", "live_end", "live_replay", "live_chat"} {
 		for _, member := range []string{"stella", "carmen"} {
 			e := weverse.Event{Kind: kind, MemberID: member, CommunityID: 235, Images: []string{"https://img.example/a.jpg"}}
 			if !weverse.Matches(sub, e) {
@@ -111,7 +149,7 @@ func TestWeverseMediaBeforeFooter(t *testing.T) {
 	}
 }
 
-func TestAIChunksPreserveStellaMentionRule(t *testing.T) {
+func TestAIChunksNeverMentionAll(t *testing.T) {
 	s := weverse.Subscription{AtAll: true, AtAllMemberIDs: []string{"stella"}}
 	job := &weverse.AIBatch{MemberID: "ian", Author: "IAN", Entries: []weverse.AIEntry{{Body: "reply"}}, Result: strings.Repeat("中文", 2000)}
 	chunks := weverseAISegments(s, job)
@@ -127,24 +165,21 @@ func TestAIChunksPreserveStellaMentionRule(t *testing.T) {
 	}
 	job.MemberID = "stella"
 	chunks = weverseAISegments(s, job)
-	count := 0
-	for i, chunk := range chunks {
+	for _, chunk := range chunks {
 		for _, segment := range chunk {
 			if segment.(napcat.MessageSegment).Type == "at" {
-				count++
-				if i != 0 {
-					t.Fatal("mention repeated in continuation")
-				}
+				t.Fatal("STELLA AI summary mentioned all")
 			}
 		}
 	}
-	if count != 1 {
-		t.Fatal("STELLA missing mention")
-	}
 	job.MemberID = "ian"
 	job.MemberIDs = []string{"ian", "stella"}
-	if weverseAISegments(s, job)[0][0].(napcat.MessageSegment).Type != "at" {
-		t.Fatal("merged Stella replies missing mention")
+	for _, chunk := range weverseAISegments(s, job) {
+		for _, segment := range chunk {
+			if segment.(napcat.MessageSegment).Type == "at" {
+				t.Fatal("merged Stella AI summary mentioned all")
+			}
+		}
 	}
 	job.MemberIDs = nil
 	cfg := weverse.Settings{Enabled: true, Subscriptions: []weverse.Subscription{{ID: "s", GroupID: 1, CommunityID: 235, Enabled: true, Comments: true}}}
@@ -157,6 +192,53 @@ func TestAIChunksPreserveStellaMentionRule(t *testing.T) {
 	cfg.Subscriptions[0].Comments = false
 	if _, ok := aiSubscription(cfg, job); ok {
 		t.Fatal("disabled replies still forwarded")
+	}
+}
+
+func TestMelonMusicWaveMessagePreservesDialogueOrderAndFooter(t *testing.T) {
+	sub := melon.Subscription{ArtistName: "Hearts2Hearts (하츠투하츠)", AtAll: true, AtAllAuthorNames: []string{"STELLA"}}
+	events := []melon.Event{
+		{Author: "유하 (YUHA)", Body: "첫 번째", URL: melon.Hearts2HeartsMusicWaveURL, Time: 100000},
+		{Author: "스텔라 (STELLA)", Body: "두 번째", URL: melon.Hearts2HeartsMusicWaveURL, Time: 101000},
+		{Author: "유하 (YUHA)", Body: "세 번째", URL: melon.Hearts2HeartsMusicWaveURL, Time: 102000},
+	}
+	messages := melonMusicWaveMessages(sub, events)
+	if len(messages) != 1 || len(messages[0]) != 3 {
+		t.Fatalf("messages=%#v", messages)
+	}
+	if messages[0][0].(napcat.MessageSegment).Type != "at" {
+		t.Fatal("missing at-all")
+	}
+	body := messages[0][2].(napcat.MessageSegment).Data["text"]
+	first, second, third := strings.Index(body, "YUHA)：첫 번째"), strings.Index(body, "STELLA)：두 번째"), strings.Index(body, "YUHA)：세 번째")
+	if !(first >= 0 && first < second && second < third) || strings.Contains(body, "试推") || strings.Contains(body, "来源：") {
+		t.Fatal(body)
+	}
+	if !strings.HasSuffix(body, melon.Hearts2HeartsMusicWaveURL+"\n\n1970-01-01 08:01:42") {
+		t.Fatal("footer not last", body)
+	}
+	withoutStella := melonMusicWaveMessages(sub, []melon.Event{{Author: "유하 (YUHA)", Body: "안녕", Time: 103000}})
+	if len(withoutStella) != 1 || withoutStella[0][0].(napcat.MessageSegment).Type == "at" {
+		t.Fatal("non-STELLA message mentioned all", withoutStella)
+	}
+}
+
+func TestMelonMusicWaveMessageLimitsEachCardForQQTranslation(t *testing.T) {
+	sub := melon.Subscription{ArtistName: "Hearts2Hearts", AtAll: true, AtAllAuthorNames: []string{"STELLA"}}
+	events := make([]melon.Event, 0, 9)
+	for i := 0; i < 9; i++ {
+		author := "유하 (YUHA)"
+		if i == 8 {
+			author = "스텔라 (STELLA)"
+		}
+		events = append(events, melon.Event{Author: author, Body: fmt.Sprintf("message-%d", i+1), URL: melon.Hearts2HeartsMusicWaveURL, Time: int64(100000 + i)})
+	}
+	messages := melonMusicWaveMessages(sub, events)
+	if len(messages) != 2 {
+		t.Fatalf("expected two short cards, got %d", len(messages))
+	}
+	if messages[0][0].(napcat.MessageSegment).Type == "at" || messages[1][0].(napcat.MessageSegment).Type != "at" {
+		t.Fatal("STELLA mention was not scoped to her card", messages)
 	}
 }
 

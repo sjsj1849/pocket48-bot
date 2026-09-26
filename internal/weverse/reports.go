@@ -155,22 +155,26 @@ func DueReportPeriods(s ReportSettings, now time.Time) []ReportPeriod {
 }
 
 type MemberCount struct {
-	PostPhotos      int            `json:"postPhotos"`
-	PostComments    int64          `json:"postComments"`
-	PostLikes       int64          `json:"postLikes"`
-	CommentPosts    int            `json:"commentPosts"`
-	LikePosts       int            `json:"likePosts"`
-	FanReplies      int            `json:"fanReplies"`
-	MemberReplies   int            `json:"memberReplies"`
-	SelfReplies     int            `json:"selfReplies"`
-	UnknownReplies  int            `json:"unknownReplies"`
-	ReplyMembers    map[string]int `json:"replyMembers"`
-	Videos          int            `json:"videos"`
-	Moments         int            `json:"moments"`
-	LiveSeconds     int64          `json:"liveSeconds"`
-	TimedLives      int            `json:"timedLives"`
-	SoloLiveSeconds int64          `json:"soloLiveSeconds"`
-	SoloLives       int            `json:"soloLives"`
+	PostPhotos        int            `json:"postPhotos"`
+	PostComments      int64          `json:"postComments"`
+	PostLikes         int64          `json:"postLikes"`
+	CommentPosts      int            `json:"commentPosts"`
+	LikePosts         int            `json:"likePosts"`
+	FanReplies        int            `json:"fanReplies"`
+	MemberReplies     int            `json:"memberReplies"`
+	SelfReplies       int            `json:"selfReplies"`
+	UnknownReplies    int            `json:"unknownReplies"`
+	ReplyMembers      map[string]int `json:"replyMembers"`
+	Videos            int            `json:"videos"`
+	Moments           int            `json:"moments"`
+	LiveSeconds       int64          `json:"liveSeconds"`
+	TimedLives        int            `json:"timedLives"`
+	SoloLiveSeconds   int64          `json:"soloLiveSeconds"`
+	SoloLives         int            `json:"soloLives"`
+	LiveChats         int            `json:"liveChats"`
+	LiveChatLives     int            `json:"liveChatLives"`
+	LiveChatHosts     map[string]int `json:"liveChatHosts"`
+	LiveChatHostLives map[string]int `json:"liveChatHostLives"`
 
 	ID              string         `json:"id"`
 	Name            string         `json:"name"`
@@ -195,20 +199,26 @@ type ReportMonth struct {
 	Month   string        `json:"month"`
 	Members []MemberCount `json:"members"`
 }
+type LiveChatTarget struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	IsMember bool   `json:"isMember"`
+}
 type Report struct {
 	Months []ReportMonth `json:"months"`
 
-	MissingParentComments int             `json:"missingParentComments"`
-	AsOf                  time.Time       `json:"asOf"`
-	Period                ReportPeriod    `json:"period"`
-	Community             string          `json:"community"`
-	Members               []MemberCount   `json:"members"`
-	TeammateReplies       []TeammateReply `json:"teammateReplies"`
-	Events                []Event         `json:"events"`
-	RecordingStarted      time.Time       `json:"recordingStarted"`
-	UnavailablePosts      int             `json:"unavailablePosts"`
-	UnknownRootReplies    int             `json:"unknownRootReplies"`
-	Complete              bool            `json:"complete"`
+	MissingParentComments int              `json:"missingParentComments"`
+	AsOf                  time.Time        `json:"asOf"`
+	Period                ReportPeriod     `json:"period"`
+	Community             string           `json:"community"`
+	Members               []MemberCount    `json:"members"`
+	TeammateReplies       []TeammateReply  `json:"teammateReplies"`
+	Events                []Event          `json:"events"`
+	LiveChatTargets       []LiveChatTarget `json:"liveChatTargets"`
+	RecordingStarted      time.Time        `json:"recordingStarted"`
+	UnavailablePosts      int              `json:"unavailablePosts"`
+	UnknownRootReplies    int              `json:"unknownRootReplies"`
+	Complete              bool             `json:"complete"`
 }
 
 func (h *History) BuildReport(s ReportSettings, p ReportPeriod) (Report, error) {
@@ -247,7 +257,7 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
 	for _, m := range members {
 		index[m.ID] = len(r.Members)
-		r.Members = append(r.Members, MemberCount{ID: m.ID, Name: m.Name, Teammates: map[string]int{}, ReplyMembers: map[string]int{}})
+		r.Members = append(r.Members, MemberCount{ID: m.ID, Name: m.Name, Teammates: map[string]int{}, ReplyMembers: map[string]int{}, LiveChatHosts: map[string]int{}, LiveChatHostLives: map[string]int{}})
 	}
 	for _, e := range events {
 		if e.Kind == "post" {
@@ -258,6 +268,12 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 		}
 	}
 	seen := map[string]bool{}
+	liveChatLives := map[string]map[string]bool{}
+	liveChatHostLives := map[string]bool{}
+	liveChatTargets := map[string]LiveChatTarget{}
+	for _, m := range r.Members {
+		liveChatTargets[m.ID] = LiveChatTarget{ID: m.ID, Name: m.Name, IsMember: true}
+	}
 	for _, e := range events {
 		if seen[e.ID] || e.CommunityID != s.CommunityID || e.Time < p.Start.UnixMilli() || e.Time >= p.End.UnixMilli() {
 			continue
@@ -267,7 +283,7 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 		if !ok {
 			continue
 		}
-		if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "moment" {
+		if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_chat" && e.Kind != "moment" {
 			continue
 		}
 		r.Events = append(r.Events, e)
@@ -317,6 +333,36 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 				m.SoloLives++
 				m.SoloLiveSeconds += e.LiveDuration
 			}
+		case "live_chat":
+			m.LiveChats++
+			hostID := e.LiveHostMemberID
+			if hostID == "" {
+				hostID = "__unknown_live_host__"
+			}
+			if hostID != e.MemberID {
+				m.LiveChatHosts[hostID]++
+				if _, known := liveChatTargets[hostID]; !known {
+					name := strings.TrimSpace(e.LiveHostAuthor)
+					if name == "" {
+						name = "未识别发起账号"
+					} else {
+						name = "团体账号：" + name
+					}
+					liveChatTargets[hostID] = LiveChatTarget{ID: hostID, Name: name}
+				}
+				hostLiveKey := e.MemberID + "\x00" + hostID + "\x00" + e.PostID
+				if !liveChatHostLives[hostLiveKey] {
+					liveChatHostLives[hostLiveKey] = true
+					m.LiveChatHostLives[hostID]++
+				}
+			}
+			if liveChatLives[e.MemberID] == nil {
+				liveChatLives[e.MemberID] = map[string]bool{}
+			}
+			if !liveChatLives[e.MemberID][e.PostID] {
+				liveChatLives[e.MemberID][e.PostID] = true
+				m.LiveChatLives++
+			}
 		case "moment":
 			m.Moments++
 		}
@@ -331,6 +377,21 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 			}
 		}
 	}
+	for _, m := range r.Members {
+		r.LiveChatTargets = append(r.LiveChatTargets, liveChatTargets[m.ID])
+		delete(liveChatTargets, m.ID)
+	}
+	extraTargets := make([]LiveChatTarget, 0, len(liveChatTargets))
+	for _, target := range liveChatTargets {
+		extraTargets = append(extraTargets, target)
+	}
+	sort.Slice(extraTargets, func(i, j int) bool {
+		if extraTargets[i].Name == extraTargets[j].Name {
+			return extraTargets[i].ID < extraTargets[j].ID
+		}
+		return extraTargets[i].Name < extraTargets[j].Name
+	})
+	r.LiveChatTargets = append(r.LiveChatTargets, extraTargets...)
 	sort.Slice(r.Events, func(i, j int) bool { return r.Events[i].Time < r.Events[j].Time })
 	sort.Slice(r.TeammateReplies, func(i, j int) bool { return r.TeammateReplies[i].Time < r.TeammateReplies[j].Time })
 	if p.Kind == "firstHalf" || p.Kind == "annual" {
@@ -343,7 +404,7 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 	return r
 }
 func (r Report) CoverageNote() string {
-	parts := []string{"按北京时间统计。帖子照片只统计主帖照片；视频按附件数量统计，包含帖子、回复和 Moment，排除直播回放。回复按直接被回复者区分粉丝、其他成员、自己，身份不明单列；队友帖下回复另按主帖作者统计。评论/点赞是本期发布帖子的最新已采集累计值，不是本期新增互动；缺少采集值标为缺失。Moment 只计已采集的独立内容，过期历史可能无法回采。直播按发起账号计开播；团体账号发起的直播不能可靠分配到单个成员，因此不计入八位成员的场次；时长仅统计有时长数据的直播，单人时长仅在参与成员名单明确为一人时统计，未识别参与者不推测单人。", "报告生成于 " + r.AsOf.In(ReportLocation).Format("2006-01-02 15:04:05") + "；累计互动的具体采集时间见 Excel 活动明细。"}
+	parts := []string{"按北京时间统计。帖子照片只统计主帖照片；视频按附件数量统计，包含帖子、回复和 Moment，排除直播回放。回复按直接被回复者区分粉丝、其他成员、自己，身份不明单列；队友帖下回复另按主帖作者统计。评论/点赞是本期发布帖子的最新已采集累计值，不是本期新增互动；缺少采集值标为缺失。Moment 只计已采集的独立内容，过期历史可能无法回采。直播按发起账号计开播；团体账号发起的直播不能可靠分配到单个成员，因此不计入八位成员的场次；时长仅统计有时长数据的直播，单人时长仅在参与成员名单明确为一人时统计，未识别参与者不推测单人。直播弹幕只统计可识别为 ARTIST、属于成员目录且不是直播发起人的消息；关系按成员 ID 与直播发起账号 ID 匹配，不根据昵称猜测。弹幕计在发送成员名下，参与直播场次按直播编号去重；团体或未识别发起账号单独列示。", "报告生成于 " + r.AsOf.In(ReportLocation).Format("2006-01-02 15:04:05") + "；累计互动的具体采集时间见 Excel 活动明细。"}
 	if r.Complete {
 		parts = append(parts, "本期可见内容已完成历史回采；已删除或无权限内容可能无法恢复。")
 	}

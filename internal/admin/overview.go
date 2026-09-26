@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"pocket48-bot/internal/instagram"
+	"pocket48-bot/internal/melon"
 	"pocket48-bot/internal/weverse"
 	"runtime"
 	"strconv"
@@ -19,15 +20,16 @@ import (
 )
 
 type serviceState struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Subtitle   string `json:"subtitle"`
-	Status     string `json:"status"`
-	StatusText string `json:"statusText"`
-	Uptime     string `json:"uptime"`
-	Detail     string `json:"detail"`
-	LastEvent  string `json:"lastEvent"`
-	LastTime   string `json:"lastTime"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Subtitle      string `json:"subtitle"`
+	Status        string `json:"status"`
+	StatusText    string `json:"statusText"`
+	Uptime        string `json:"uptime"`
+	Detail        string `json:"detail"`
+	LastEvent     string `json:"lastEvent"`
+	LastTime      string `json:"lastTime"`
+	SuppressAlert bool   `json:"-"`
 }
 
 type activityItem struct {
@@ -97,6 +99,7 @@ type overviewFeatureFlags struct {
 	DouyinIMEnabled    bool
 	XiaohongshuEnabled bool
 	InstagramEnabled   bool
+	MelonEnabled       bool
 }
 
 func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
@@ -128,6 +131,9 @@ func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
 	flags.XiaohongshuEnabled = readBool("XIAOHONGSHU_ENABLED", false)
 	if cfg, err := instagram.LoadSettings(instagram.Dir(configPath)); err == nil {
 		flags.InstagramEnabled = cfg.Enabled
+	}
+	if cfg, err := melon.LoadSettings(melon.Dir(configPath)); err == nil {
+		flags.MelonEnabled = cfg.Enabled
 	}
 	return flags
 }
@@ -193,7 +199,7 @@ func buildOverviewAttention(services []serviceState) []attention {
 					ID: "weibo", Title: "微博认证异常", Description: item.LastEvent, Action: "查看浏览器", Target: "browser",
 				})
 			}
-		case "weverse", "x":
+		case "weverse", "x", "melon":
 			if item.Status == "down" {
 				attentionItems = append(attentionItems, attention{ID: item.ID, Title: item.Name + " 监控异常", Description: item.LastEvent, Action: "查看配置", Target: "config"})
 			}
@@ -326,6 +332,11 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		igCard := instagramService(flags.ConfigPath, time.Now())
 		igCard.Uptime = uptime
 		states = append(states, *igCard)
+	}
+	if flags.MelonEnabled {
+		melonCard := melonService(flags.ConfigPath, time.Now())
+		melonCard.Uptime = uptime
+		states = append(states, *melonCard)
 	}
 	card := xService(flags.ConfigPath, time.Now())
 	card.Uptime = uptime

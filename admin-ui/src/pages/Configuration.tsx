@@ -1,4 +1,5 @@
 import { InstagramConfig } from './InstagramConfig'
+import { MelonConfig } from './MelonConfig'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Check, Eye, EyeOff, Pencil, Plus, Save, Search, Trash2, X } from 'lucide-react'
 import { api } from '../api'
@@ -43,7 +44,11 @@ type SuperTopic = {
   lastSignRank?: number
 }
 type SuperGroup = { key: string; name: string }
+type SuperManagedGroup = SuperGroup & { topicCount: number; imageGroupNames: string[] }
 type SuperResponse = { topics: SuperTopic[]; groups?: SuperGroup[] }
+type SuperGroupResponse = { groups?: SuperManagedGroup[] }
+type SuperImageGroup = { key: string; name: string; groupKeys: string[] }
+type SuperImageGroupResponse = { imageGroups?: SuperImageGroup[] }
 type PocketSearchHit = {
   serverId: number
   serverName: string
@@ -62,10 +67,11 @@ const groupBlurb: Record<string, string> = {
   口袋48: '账号 / NIM / 房间订阅。',
   微博: '登录态、动态 UID、超话签到、超话日报（分渠道）。',
   抖音: '创作者订阅 ≠ 群聊 IM。',
-  小红书: '创作者订阅；登录走浏览器页。',
+  小红书: '当前不可用；限流与风控会阻断稳定采集，仅保留诊断入口。',
   Weverse: '成员动态、回复、直播与活动报告。',
   Instagram: '账号订阅、帖子、Reels、Story 与登录态。',
   X: '账号订阅、媒体转发与浏览器登录态。',
+  Melon: '艺人频道动态、专辑、MV、活动杂志与照片。',
 }
 
 function Field({ field, value, onChange }: { field: ConfigField; value: unknown; onChange: (value: unknown) => void }) {
@@ -431,11 +437,11 @@ function WeiboSubscriptionManager({
     <div className="sub-manager weibo-dynamic-manager">
       <div className="sub-manager-title">
         <strong>微博动态订阅</strong>
-        <p>监控账号发博并转发到 QQ 群。UID 添加后固定，可调整目标群、昵称和 @全体。</p>
+        <p>监控账号发博并转发到 QQ 群。可粘贴微博主页/动态完整链接，系统会自动识别 UID；添加后 UID 固定。</p>
       </div>
       <div className="douyin-add weibo-dynamic-add">
         <input type="text" inputMode="numeric" placeholder="目标 QQ 群号" value={groupID} onChange={(event) => updateGroup(event.target.value.replace(/\D/g, ''))} />
-        <input type="text" inputMode="numeric" placeholder="微博 UID（纯数字）" value={uid} onChange={(event) => setUID(event.target.value.replace(/\D/g, ''))} />
+        <input type="text" placeholder="微博 UID 或完整链接" value={uid} onChange={(event) => setUID(event.target.value)} />
         <input type="text" placeholder="昵称（可选，便于识别）" value={name} onChange={(event) => setName(event.target.value)} />
         <div className="monitor-kind-options">
           <label><input type="checkbox" checked={atAll} onChange={(event) => setAtAll(event.target.checked)} /> @全体成员</label>
@@ -504,7 +510,7 @@ function WeiboSubscriptionManager({
               </div>
             </article>
           )
-        }) : <p className="muted">暂无微博动态订阅。在上方填写 UID 后添加。</p>}
+        }) : <p className="muted">暂无微博动态订阅。在上方填写 UID 或粘贴微博完整链接后添加。</p>}
       </div>
     </div>
   )
@@ -800,10 +806,10 @@ function WeiboSuperTopicManager({
     <div className="sub-manager super-topic-manager">
       <div className="sub-manager-title">
         <strong>超话订阅（签到/日报）</strong>
-        <p>每个超话可选择自动签到、超话日报或两者。日报分组只影响日报统计与推送。</p>
+        <p>每个超话可选择自动签到、超话日报或两者。可直接粘贴超话完整链接，系统会自动识别 OID。</p>
       </div>
       <div className="super-topic-add">
-        <input type="text" placeholder="超话 OID（100808…）" value={oid} onChange={(e) => setOid(e.target.value)} />
+        <input type="text" placeholder="超话 OID 或完整链接" value={oid} onChange={(e) => setOid(e.target.value)} />
         <input type="text" placeholder="显示名（可选）" value={name} onChange={(e) => setName(e.target.value)} />
         {reportEnabled ? (
           <input
@@ -900,7 +906,146 @@ function WeiboSuperTopicManager({
               </div>
             </article>
           )
-        }) : <p className="muted">暂无超话订阅。在上方填写 OID 并选择自动签到、超话日报或两者。</p>}
+        }) : <p className="muted">暂无超话订阅。填写 OID 或粘贴完整链接，并选择自动签到、超话日报或两者。</p>}
+      </div>
+    </div>
+  )
+}
+
+function WeiboSuperImageGroupManager({
+  groups,
+  items,
+  saving,
+  onSave,
+  onRemove,
+}: {
+  groups: SuperGroup[]
+  items: SuperImageGroup[]
+  saving: boolean
+  onSave: (item: SuperImageGroup | null, name: string, groupKeys: string[]) => Promise<void>
+  onRemove: (item: SuperImageGroup) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [selected, setSelected] = useState<string[]>([])
+  const [editingKey, setEditingKey] = useState('')
+
+  function toggleGroup(key: string) {
+    setSelected((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])
+  }
+
+  function reset() {
+    setName('')
+    setSelected([])
+    setEditingKey('')
+  }
+
+  function startEdit(item: SuperImageGroup) {
+    setName(item.name)
+    setSelected(item.groupKeys)
+    setEditingKey(item.key)
+  }
+
+  const editingItem = items.find((item) => item.key === editingKey) || null
+  const groupNameByKey = new Map(groups.map((group) => [group.key, group.name]))
+
+  return (
+    <div className="sub-manager super-image-manager">
+      <div className="sub-manager-title">
+        <strong>日报图片组合</strong>
+        <p>每个方案生成一张 PNG，可把多个日报分组合并到同一张图。未配置时仍生成一张总图；未被方案选中的分组会自动生成“其他分组”图。</p>
+      </div>
+      {groups.length ? (
+        <div className="super-image-editor">
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="图片名称，例如：八小妹 + 哈two哈" />
+          <div className="super-image-group-options" aria-label="选择要合并的日报分组">
+            {groups.map((group) => (
+              <label key={group.key}>
+                <input type="checkbox" checked={selected.includes(group.key)} onChange={() => toggleGroup(group.key)} />
+                {group.name}
+              </label>
+            ))}
+          </div>
+          <div className="sub-item-actions">
+            <button
+              className="secondary-button"
+              disabled={saving || !name.trim() || selected.length === 0}
+              onClick={() => void onSave(editingItem, name.trim(), selected).then(reset)}
+            >
+              {editingItem ? <Check size={15} /> : <Plus size={15} />}
+              {editingItem ? '保存方案' : '添加方案'}
+            </button>
+            {editingItem ? <button className="icon-button" disabled={saving} aria-label="取消编辑出图方案" onClick={reset}><X size={16} /></button> : null}
+          </div>
+        </div>
+      ) : <p className="muted">请先给超话设置日报分组，再配置图片组合。</p>}
+      <div className="super-image-list">
+        {items.map((item) => (
+          <article className={`douyin-card${editingKey === item.key ? ' editing-plan' : ''}`} key={item.key}>
+            <div className="douyin-card-main">
+              <div className="douyin-card-heading"><strong>{item.name}</strong><span className="image-count-badge">1 张图</span></div>
+              <div className="douyin-groups">
+                <span>包含分组</span>
+                {item.groupKeys.map((key) => <b key={key}>{groupNameByKey.get(key) || `${key}（已删除）`}</b>)}
+              </div>
+            </div>
+            <div className="sub-item-actions">
+              <button className="icon-button" disabled={saving} aria-label={`编辑 ${item.name}`} onClick={() => startEdit(item)}><Pencil size={15} /></button>
+              <button className="icon-button danger" disabled={saving} aria-label={`删除 ${item.name}`} onClick={() => void onRemove(item).then(() => editingKey === item.key && reset())}><Trash2 size={16} /></button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function WeiboSuperGroupManager({
+  groups,
+  saving,
+  onRemove,
+}: {
+  groups: SuperManagedGroup[]
+  saving: boolean
+  onRemove: (group: SuperManagedGroup) => Promise<void>
+}) {
+  return (
+    <div className="sub-manager super-group-manager">
+      <div className="sub-manager-title">
+        <strong>日报分组管理</strong>
+        <p>分组在添加超话日报配置时自动创建。只有未被超话日报或图片组合引用的分组可以删除，防止报表关系被误删。</p>
+      </div>
+      <div className="super-image-list">
+        {groups.map((group) => {
+          const imageUsage = group.imageGroupNames || []
+          const used = group.topicCount > 0 || imageUsage.length > 0
+          const usage = [
+            group.topicCount > 0 ? `${group.topicCount} 个超话` : '',
+            imageUsage.length > 0 ? `图片组合：${imageUsage.join('、')}` : '',
+          ].filter(Boolean).join(' · ')
+          return (
+            <article className="douyin-card" key={group.key}>
+              <div className="douyin-card-main">
+                <div className="douyin-card-heading">
+                  <strong>{group.name}</strong>
+                  <span className={`image-count-badge${used ? '' : ' unused'}`}>{used ? '使用中' : '未使用'}</span>
+                </div>
+                <div className="douyin-identity"><span>分组标识</span><code>{group.key}</code></div>
+                <p>{usage || '没有超话或图片组合引用，可以删除。'}</p>
+              </div>
+              <div className="sub-item-actions">
+                <button
+                  className="icon-button danger"
+                  disabled={saving || used}
+                  title={used ? '请先迁移超话或移除图片组合中的引用' : '删除未使用分组'}
+                  aria-label={`删除日报分组 ${group.name}`}
+                  onClick={() => {
+                    if (window.confirm(`删除未使用的日报分组“${group.name}”？`)) void onRemove(group)
+                  }}
+                ><Trash2 size={16} /></button>
+              </div>
+            </article>
+          )
+        })}
       </div>
     </div>
   )
@@ -919,17 +1064,20 @@ export function Configuration() {
   const [weibo, setWeibo] = useState<SubItem[]>([])
   const [rooms, setRooms] = useState<SubItem[]>([])
   const [superTopics, setSuperTopics] = useState<SuperTopic[]>([])
-  const [superGroups, setSuperGroups] = useState<SuperGroup[]>([])
+  const [superGroups, setSuperGroups] = useState<SuperManagedGroup[]>([])
+  const [superImageGroups, setSuperImageGroups] = useState<SuperImageGroup[]>([])
 
   const load = useCallback(async () => {
     try {
-      const [response, xhsR, dyR, wbR, roomR, superR] = await Promise.all([
+      const [response, xhsR, dyR, wbR, roomR, superR, groupR, imageGroupR] = await Promise.all([
         api<ConfigResponse>('config'),
         api<SubResponse>('xiaohongshu/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('douyin/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('weibo/subscriptions').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SubResponse>('pocket/rooms').catch(() => ({ subscriptions: [] as SubItem[] })),
         api<SuperResponse>('weibo/super-topics').catch(() => ({ topics: [] as SuperTopic[], groups: [] as SuperGroup[] })),
+        api<SuperGroupResponse>('weibo/super-count/groups').catch(() => ({ groups: [] as SuperManagedGroup[] })),
+        api<SuperImageGroupResponse>('weibo/super-count/image-groups').catch(() => ({ imageGroups: [] as SuperImageGroup[] })),
       ])
       const next: Record<string, unknown> = {}
       Object.values(response.groups)
@@ -944,7 +1092,8 @@ export function Configuration() {
       setWeibo(wbR.subscriptions || [])
       setRooms(roomR.subscriptions || [])
       setSuperTopics(superR.topics || [])
-      setSuperGroups(superR.groups || [])
+      setSuperGroups(groupR.groups || [])
+      setSuperImageGroups(imageGroupR.imageGroups || [])
       setActive((current) => current || response.groupOrder[0])
       setError(null)
     } catch (reason) {
@@ -1049,7 +1198,7 @@ export function Configuration() {
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '操作失败'}</div> : null}
       <div className="config-layout">
         <nav className="config-tabs">
-          {[...new Set([...data.groupOrder, 'Weverse', 'X', 'Instagram'])].map((group) => (
+          {[...new Set([...data.groupOrder, 'Weverse', 'X', 'Instagram', 'Melon'])].map((group) => (
             <button key={group} className={active === group ? 'active' : ''} onClick={() => setActive(group)}>
               {group}
               <span>{platformSettingCounts[group as keyof typeof platformSettingCounts] ?? data.groups[group]?.length ?? 0}</span>
@@ -1066,7 +1215,8 @@ export function Configuration() {
           <div className="config-fields">
             {active === 'Weverse' ? <WeverseConfig defaultGroup={boundGroup} /> : null}
             {active === 'Instagram' ? <InstagramConfig defaultGroup={boundGroup} /> : null}
-            {active === 'X' ? <XConfig defaultGroup={boundGroup} /> : null}
+            {active === 'Melon' ? <MelonConfig defaultGroup={boundGroup} /> : null}
+      {active === 'X' ? <XConfig defaultGroup={boundGroup} /> : null}
             {(data.groups[active] || []).filter((field) => activePlatformEnabled || field.key === activeMasterKey).map((field) => (
               <Field key={field.key} field={field} value={values[field.key]} onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))} />
             ))}
@@ -1194,6 +1344,39 @@ export function Configuration() {
                       await api('weibo/super-topics', {
                         method: 'DELETE',
                         body: JSON.stringify({ oid: item.oid }),
+                      })
+                    })
+                  }
+                />
+                <WeiboSuperGroupManager
+                  groups={superGroups}
+                  saving={subSaving}
+                  onRemove={(group) =>
+                    withSub(async () => {
+                      await api('weibo/super-count/groups', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ key: group.key }),
+                      })
+                    })
+                  }
+                />
+                <WeiboSuperImageGroupManager
+                  groups={superGroups}
+                  items={superImageGroups}
+                  saving={subSaving}
+                  onSave={(item, name, groupKeys) =>
+                    withSub(async () => {
+                      await api('weibo/super-count/image-groups', {
+                        method: item ? 'PUT' : 'POST',
+                        body: JSON.stringify({ key: item?.key, name, groupKeys }),
+                      })
+                    })
+                  }
+                  onRemove={(item) =>
+                    withSub(async () => {
+                      await api('weibo/super-count/image-groups', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ key: item.key }),
                       })
                     })
                   }

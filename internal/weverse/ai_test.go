@@ -87,7 +87,7 @@ func TestAIUsesWholeOriginalConversationAndSanitizesErrors(t *testing.T) {
 	cfg := AISettings{BaseURL: server.URL + "/v1", Model: "grok-4.5", APIKey: "confidential"}
 	b := AIBatch{Author: "IAN", PostContext: &AIPostContext{PostID: "p", Author: "IAN", MemberID: "artist", Body: "root-original", ImageCount: 5}, Entries: []AIEntry{{ID: "one", Author: "IAN", ParentAuthor: "粉丝", ParentBody: "parent-original", Body: "first-reply"}, {ID: "two", Author: "IAN", Body: "second-reply"}}}
 	result, err := SummarizeAI(context.Background(), cfg, b)
-	if err != nil || !strings.Contains(result, "IAN：第一条\nIAN：第二条\n\n这段在聊什么：\n完整上下文翻译") {
+	if err != nil || !strings.Contains(result, "【评论 1】\n粉丝：上下文\n  IAN：第一条") || !strings.Contains(result, "【评论 2】\n  IAN：第二条\n\n这段在聊什么：\n完整上下文翻译") {
 		t.Fatal(result, err)
 	}
 	code = 401
@@ -205,7 +205,7 @@ func TestAITranslationFormattingKeepsEveryReplyBeforeSummary(t *testing.T) {
 	entries := []AIEntry{{ID: "one", Author: "IAN", ParentAuthor: "粉丝", ParentBody: "팬", Body: "안녕", PostID: "post", ParentCommentID: "parent"}, {ID: "two", Author: "STELLA", ParentAuthor: "粉丝", ParentBody: "팬", Body: "좋아", PostID: "post", ParentCommentID: "parent"}}
 	raw := `{"translations":[{"id":"two","parentChinese":"粉丝的话","replyChinese":"好呀"},{"id":"one","parentChinese":"粉丝的话","replyChinese":"你好"}],"summary":"两位成员互动。"}`
 	result, err := formatAISummary(raw, entries)
-	if err != nil || result != "粉丝：粉丝的话\nIAN：你好\nSTELLA：好呀\n\n这段在聊什么：\n两位成员互动。" {
+	if err != nil || result != "【评论 1】\n粉丝：粉丝的话\n  IAN：你好\n  STELLA：好呀\n\n这段在聊什么：\n两位成员互动。" {
 		t.Fatal(result, err)
 	}
 	captioned := strings.Replace(raw, "粉丝的话", "粉丝：粉丝的话", -1)
@@ -217,6 +217,23 @@ func TestAITranslationFormattingKeepsEveryReplyBeforeSummary(t *testing.T) {
 		if result, err := formatAISummary(bad, entries); err == nil || result != "" {
 			t.Fatal("incomplete translation accepted", result)
 		}
+	}
+}
+
+func TestAITranslationGroupsNestedRepliesAsOneCommentThread(t *testing.T) {
+	entries := []AIEntry{
+		{ID: "comment:member-one", Author: "IAN", ParentAuthor: "粉丝", ParentBody: "첫 댓글", Body: "첫 답글", PostID: "post", ParentCommentID: "fan-root", Time: 1},
+		{ID: "comment:member-two", Author: "STELLA", ParentAuthor: "IAN", ParentBody: "첫 답글", Body: "이어진 답글", PostID: "post", ParentCommentID: "member-one", Time: 2},
+		{ID: "comment:member-three", Author: "YUHA", ParentAuthor: "另一位粉丝", ParentBody: "다른 댓글", Body: "별도 답글", PostID: "post", ParentCommentID: "fan-other", Time: 3},
+	}
+	raw := `{"translations":[{"id":"comment:member-one","parentChinese":"第一条粉丝评论","replyChinese":"第一条回复"},{"id":"comment:member-two","parentChinese":"第一条回复","replyChinese":"接在下面的回复"},{"id":"comment:member-three","parentChinese":"另一条粉丝评论","replyChinese":"单独的回复"}],"summary":"成员回复了两条评论。"}`
+	result, err := formatAISummary(raw, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "【评论 1】\n粉丝：第一条粉丝评论\n  IAN：第一条回复\n    STELLA：接在下面的回复"
+	if !strings.Contains(result, want) || strings.Count(result, "【评论 ") != 2 || strings.Count(result, "第一条粉丝评论") != 1 {
+		t.Fatal(result)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -39,10 +40,15 @@ func Pending(state *Runtime, s Subscription, events []Event, now time.Time) []Ev
 			continue
 		}
 		if _, ok := cur.Seen[e.ID]; ok {
+			// Seen is a retention clock, not the content's publish time. An old
+			// post may remain (or reappear) in Weverse's current feed long after
+			// publication; refreshing it here prevents pruning the dedupe key and
+			// sending the same still-visible post again on the next poll.
+			cur.Seen[e.ID] = now.UnixMilli()
 			continue
 		}
 		if !cur.Initialized || e.Time < cur.Since {
-			cur.Seen[e.ID] = e.Time
+			cur.Seen[e.ID] = now.UnixMilli()
 			continue
 		}
 		out = append(out, e)
@@ -60,10 +66,15 @@ func Pending(state *Runtime, s Subscription, events []Event, now time.Time) []Ev
 }
 func MarkDelivered(state *Runtime, s Subscription, e Event) {
 	if c := state.Subscriptions[s.ID]; c != nil {
-		c.Seen[e.ID] = e.Time
+		c.Seen[e.ID] = time.Now().UnixMilli()
 	}
 }
 func (c *Client) TranslateEvent(ctx context.Context, e *Event) {
+	// Live chat carries Weverse's own translations in the chat payload; it does
+	// not have a post/comment translation endpoint of its own.
+	if e.Kind == "live_chat" {
+		return
+	}
 	// Translation is fetched on demand, preserving the source text. It follows the
 	// logged-in account's translation language; accept only Chinese responses.
 	translate := func(kind, id string) (string, error) {
@@ -77,8 +88,8 @@ func (c *Client) TranslateEvent(ctx context.Context, e *Event) {
 			return "", err
 		}
 		t := obj(d["translated"])
-		lang := text(t, "userLanguage", "language")
-		if lang != "zh-cn" && lang != "zh_CN" && lang != "zh-tw" && lang != "zh_TW" && lang != "zh" {
+		lang := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(text(t, "userLanguage", "language")), "_", "-"))
+		if lang != "zh-cn" && lang != "zh-tw" && lang != "zh" {
 			return "", fmt.Errorf("请在 Weverse 设置中将翻译语言设为中文")
 		}
 		result := plain(text(t, "plainBody", "body", "title"))

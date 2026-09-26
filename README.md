@@ -1,8 +1,11 @@
 # Pocket48 Bot
 
-基于 Go 的 **口袋48** 消息监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ) (OneBot v11) QQ 机器人框架。
+基于 Go 的多平台偶像动态监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot v11），把口袋48、微博、抖音、Weverse、Melon、X、Instagram 等平台的动态转发到不同 QQ 群。
 
-通过 NIM 实时通道（并保留 REST 轮询兜底）监控小偶像的口袋房间、直播间和微博动态，将消息转发到 QQ 群。
+主进程负责采集、去重、订阅路由和消息队列；NIM、浏览器自动化及部分实时协议由本机 sidecar 提供。Web 管理台可维护配置、订阅、登录态、日报和运行日志。
+
+> [!WARNING]
+> **小红书和 Instagram 当前不可用。** 两个平台的限流、登录校验和自动化风控会阻断稳定采集；即使 Cookie 或浏览器页面显示已登录，也不能代表监控链路可用。现有配置页和代码仅保留用于诊断与后续适配，请勿在生产环境启用，也不要依赖其消息通知。
 
 ## 功能
 
@@ -18,7 +21,7 @@
 | :---: | :---: |
 | ![抖音](docs/screenshots/03-config-douyin.png) | ![小红书](docs/screenshots/04-config-xhs.png) |
 
-配置页按 **Bot / 口袋48 / 微博 / 抖音 / 小红书** 分组；各平台页底部可直接添加/删除订阅（不必只靠 QQ 命令）。
+配置页覆盖 **Bot / 口袋48 / 微博 / 抖音 / 小红书 / Weverse / Melon / X / Instagram**；各平台页可直接搜索、预览和维护订阅，不必只依赖 QQ 命令。
 
 
 ### 📱 口袋48 房间监控
@@ -51,9 +54,31 @@
 - **IM 只读转发**（可选）：私信 + 指定群的群主消息 → QQ（不回写抖音）
 - 私信标题格式：`【昵称|抖音】`；图片消息经桥接透传 URL；部分客户端卡片（如 type=110 空正文）有可读占位
 - 私信**回复**尽量拆成引用栈：`我/对方：【分享图文|视频 标题】` + `对方：正文`；短时双推（约 3s）软去重
-- IM 断连自愈：软告警 → 侧重启 → Bot 进程重启（systemd）→ 仍未恢复再告警
+- IM 断连自愈：断线约 45 秒重启浏览器侧卡，约 2 分钟仍未恢复则重启 Bot；Bot 重启后再等待 180 秒，仍未连接才发送人工告警
 
-### 📕 小红书监控（**不建议启用**）
+### 🌐 Weverse 监控
+- 按社区、成员和 QQ 群订阅艺人帖子、评论和直播
+- 支持中文翻译、AI 整理、成员级 `@全体成员` 和只读内容预览
+- 浏览器登录后同步会话；Access Token 轮换使用进程间锁，避免 Bot 与管理台互相覆盖
+- 支持密码帖密码维护及外部密码来源导入，保存前会校验成员和帖子
+- 支持直播与直播聊天转发；聊天优先使用 Weverse payload 自带翻译
+- 日报支持预览、下载、补采、发送和 XLSX 导出；详细说明见 [`docs/weverse.md`](docs/weverse.md)
+
+### 🍈 Melon 监控
+- 支持 Music Wave 实时聊天、Artist Note、新专辑/MV、杂志/活动和照片/Story
+- 按艺人和 QQ 群独立订阅，可按成员名单控制 `@全体成员`
+- Music Wave 与普通动态使用独立轮询周期，消息按平台时间线排序后入队
+- 设置、艺人搜索和只读预览均可在管理台完成；状态与去重游标保存在 `storage/melon/`
+
+### 𝕏 X 监控
+- X 支持账号搜索、帖子预览、订阅和浏览器登录态维护；独立 worker 持久化限流状态
+- 通过管理台维护，浏览器会话和凭据只保存在 `storage/`，不得提交到 Git
+
+### 📷 Instagram（**当前不可用**）
+- Instagram 配置、登录态同步、订阅和预览代码仍保留，但平台限流与自动化风控使采集链路无法稳定工作
+- 管理台入口仅用于诊断和未来适配；当前请保持关闭，不应把 Cookie 可见或登录成功视为可用
+
+### 📕 小红书监控（**当前不可用**）
 - 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
 - **主路径**：页内 `mnsv2 → XYS_` 签名 + 缓存 `X-S-Common` / `x-rap-param` → `user_posted` API（失败**不** goto 用户主页）
 - 登录态：Chromium Profile + `weibo-storage-state.json`（cookie + 小红书 localStorage）；登录成功才 force 写盘，失败扫描不覆盖好会话
@@ -63,7 +88,7 @@
 - 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
 - **视频帖**：QQ 侧目前稳定发封面图 + 小红书链接，列表接口**不保证**视频文件本体
 - **浏览器内存**：侧卡默认 `--renderer-process-limit=4`；每 5 分钟 prune 孤儿页并打 `browserDiag`
-- ⚠️ **风控与稳定性（2026-07）**：实战中拉帖极不稳定——`user/me` 常为 guest、`user_posted` 易 461、扫码后仍可能被判定游客或账号异常，甚至触发平台违规提醒。**默认请保持 `XIAOHONGSHU_ENABLED=false`，不建议生产依赖本链路。** 紧急停扫可 touch `storage/xhs-scan-paused`。
+- ⚠️ **当前结论**：平台限流和风控导致 `user/me` 常为 guest、`user_posted` 易返回 461，扫码后仍可能被判定游客或账号异常，甚至触发平台违规提醒。**本链路当前不可用，请保持 `XIAOHONGSHU_ENABLED=false`。** 保留代码只用于诊断与后续适配；紧急停扫可 `touch storage/xhs-scan-paused`。
 
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
@@ -239,7 +264,7 @@ Linux 可用仓库内的安装脚本下载并校验固定版本的官方发布�
 - 原始统计/礼物调试键仅为兼容旧配置保留；提醒模式不会保存这两类样本。
 - IM 使用 `frontier-im.douyin.com` 的只读 WebSocket 推送。群聊优先按群号精确匹配，再从初始化包取得内部会话 ID 和群主 UID；只有该会话中群主发送的消息会转发到 `BOUND_GROUP_ID`，其他成员消息直接丢弃。
 - 私聊只转发“发送者不是当前登录账号”的新消息，并且只私聊 `SUPER_ADMIN`/`ADMIN_QQ`，不会发到 QQ 群；QQ 文案标题为 `【昵称|抖音】`（不再写「抖音私信」）。
-- IM WebSocket 长时间断开时：先告警，约 2 分钟重启浏览器侧车，约 5 分钟退出进程由 systemd 拉起 Bot，约 8 分钟仍未恢复再告警（有冷却，避免刷屏）。
+- IM WebSocket 长时间断开时：约 45 秒重启浏览器侧车；约 2 分钟仍未恢复则写入恢复标记并退出，由 systemd 拉起 Bot；Bot 重启后再等待 180 秒，仍未连接才告警。重复人工告警有 30 分钟冷却，恢复后会清理标记。
 - 抖音 IM 模块没有创建会话、回复或发送消息的实现，也不会向抖音群或私聊主动发消息。首次启用只会建立当前消息基线，不转发历史消息。
 
 可在已经登录的机器上执行只读联调（只输出群名、群号和特别关注数量）：
@@ -249,14 +274,14 @@ cd sidecar/weibo-auth
 npm run test:douyin-im
 ```
 
-### 📕 小红书帖子监控（可选 · **不建议生产启用**）
+### 📕 小红书帖子监控（**当前不可用，仅保留诊断代码**）
 
 > ⚠️ **先看结论（2026-07 实战）**  
-> 小红书对自动化风控很严，本链路**不稳定**，不建议作为日常监控依赖。常见现象包括：  
+> 小红书对自动化访问的限流和风控很严，本链路**当前不可用**，不能作为日常监控依赖。常见现象包括：
 > - 浏览器 Cookie / `web_session` 已落盘，但 `user/me` 仍为 **guest**，`user_posted` 返回 **HTTP 461** 或 notes=0  
 > - 扫码“登上去”后很快失效，或页面刷新后再次要求登录  
 > - 持续轮询可能加重账号/环境异常，甚至触发平台违规提醒  
-> **默认请保持 `XIAOHONGSHU_ENABLED=false`。** 若必须调试：先 `touch storage/xhs-scan-paused` 停自动扫，只做登录与探针；确认安全后再删该文件并开启总开关。
+> **必须保持 `XIAOHONGSHU_ENABLED=false`。** 配置入口、登录与探针只为排障和未来适配保留；若必须诊断，先 `touch storage/xhs-scan-paused` 停止自动扫描，不要在生产环境开启总开关。
 
 小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。**当前主路径**是登录页（explore）上的页内签名后调用 edith `user_posted`，而不是每轮 `goto` 用户主页扒 DOM：
 
@@ -306,11 +331,16 @@ npm run test:douyin-im
 ```bash
 git clone git@github.com:sjsj1849/pocket48-bot.git
 cd pocket48-bot
-git checkout v0.2.6   # 或最新 tag
+
+# Bot
 go build -o pocket48-bot ./cmd/bot
-# 可选：管理面板二进制（内嵌 admin-ui）
+
+# 管理面板：先生成前端静态资源，再编译内嵌资源的 Go 二进制
+cd admin-ui
+npm ci
+npm run build
+cd ..
 go build -o pocket48-admin ./cmd/admin
-./pocket48-bot
 ```
 
 启用 NIM / 浏览器侧卡时还需在对应目录 `npm ci`（见上文侧卡章节），并保证 `sidecar/` 与二进制同工作目录。
@@ -428,7 +458,9 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 | `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
 | `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
-| `XIAOHONGSHU_ENABLED` | 启用小红书帖子与开播提醒（**不建议生产开启**） |
+| `XIAOHONGSHU_ENABLED` | 小红书诊断链路总开关；当前不可用，必须保持 `false` |
+
+Weverse、Melon、X 和 Instagram 的设置不直接塞进 `config.json`：管理台分别写入 `storage/weverse/`、`storage/melon/`、`storage/x/` 和对应平台状态目录。这样浏览器同步的会话、自动刷新的 Token 和运行游标不会被其他配置保存操作覆盖。
 
 `POCKET_PASSWORD` 会在本地按 App 的 AES 规则加密后提交（`loginType=MOBILE_PWD`）。部分账号会被官方要求「请使用手机号验证码登录」，此时密码自动登录会失败，请改用短信或手填 `POCKET_TOKEN`。也可用短信登录：
 
@@ -457,7 +489,7 @@ bot code <验证码>          # 输入验证码完成登录
 | `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
 | `BROWSER_PROXY_SERVER` | 可选：Chromium 代理（如 `http://127.0.0.1:17890`） | `""` |
-| `XIAOHONGSHU_ENABLED` | 启用小红书监控（**默认 false；不建议生产开启**） | `false` |
+| `XIAOHONGSHU_ENABLED` | 小红书诊断链路；当前不可用，必须保持关闭 | `false` |
 | `XIAOHONGSHU_POLL_SECONDS` | 小红书轮询间隔（秒；配置低于 30 回落 60） | `60` |
 | `XIAOHONGSHU_SUBSCRIPTIONS` | QQ 群→小红书内部用户 ID 订阅 | `{}` |
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
@@ -490,7 +522,9 @@ bot code <验证码>          # 输入验证码完成登录
 
 程序会自动读取同目录下的 `config.json`，启动后检查口袋登录并开始监控。
 
-也可用管理面板（`cmd/admin`，默认 `http://127.0.0.1:8787`）在浏览器里改配置、管理各平台订阅。多数订阅与开关保存后 **SIGHUP 热重载**；NapCat 地址/Token、口袋账号密码/Token、各平台总开关、浏览器侧卡等会标「需重启」。另有「说明」手册页与可筛选日志页。
+也可用管理面板（`cmd/admin`，默认 `http://127.0.0.1:8787`）在浏览器里改配置、管理各平台订阅。多数订阅与开关保存后 **SIGHUP 热重载**；NapCat 地址/Token、口袋账号密码/Token、各平台总开关、浏览器侧卡等会标「需重启」。管理台还提供平台只读预览、浏览器会话维护、Weverse 日报与密码管理、服务状态和可筛选日志。
+
+生产环境建议分别用 systemd 运行 `pocket48-bot.service` 与 `pocket48-admin.service`。仓库的 `deploy/pocket48-admin.service` 是管理台示例；`deploy/pocket48-nginx.conf` 和 `deploy/onebot-nginx.conf` 是 HTTPS/WebSocket 反向代理参考，使用前必须替换域名、证书路径和上游端口。
 
 `config.json` 与 `storage/`（含浏览器 Profile、直播场次缓存、密码文件）**切勿提交 Git**。
 
@@ -667,7 +701,7 @@ bot weibo cookie check
 > **日报字段与邮件（可选）**：
 > - 抓取主链路为 **weibo.com** 超话页（签到人数 + 帖子/粉丝/等级图标）；**m.weibo.cn** 补累计**阅读**（失败不影响签到主链路）。
 > - 等级文案来自 web 图标：`silver_1`→银1，`gold_1`→金1；`*_common`→**普通**（不是银超/金超）。
-> - 开启邮件告警配置后，约 **23:55–23:59** 发送 **单封** HTML 日报：按分组 **多张独立表**（不合成一张），有数据才出列；附件为 **3:4** 卡片 PNG（需本机 Node + Playwright，脚本 `scripts/html_to_png.mjs`）。
+> - 开启邮件告警配置后，每天 **23:59:15 开始取数**，取数完成后发送 **单封** HTML 日报：按分组 **多张独立表**（不合成一张），有数据才出列；附件为 **3:4** 卡片 PNG（需本机 Node + Playwright，脚本 `scripts/html_to_png.mjs`）。
 > - ⚠️ **涨跌需要连续运行两天**：当天 23:59 左右写 snapshot，次日对比昨日。某晚 bot 离线则次日可能无涨跌。
 
 > **邮件告警原则（与运维）**：
@@ -689,6 +723,8 @@ bot weibo cookie check
 > IM：可选只读转发私信与指定群群主消息到 QQ；**不会**向抖音回写消息。
 
 ### 📕 小红书
+
+> 当前不可用。以下命令仅为诊断和未来适配保留，请勿在生产环境启用监控。
 
 | 命令 | 说明 |
 | :--- | :--- |
@@ -740,14 +776,19 @@ bot help weibo
 ├── internal/
 │   ├── admin/                # Web 管理面板 API + 静态资源
 │   ├── config/               # 配置
-│   ├── logic/                # 核心逻辑（口袋/微博/抖音/小红书/命令）
+│   ├── logic/                # Bot 编排、订阅路由与平台通知
+│   ├── melon/                # Melon / Music Wave 客户端与状态
 │   ├── monitor/              # 微博抓取（web / mweibo / App 路径）
 │   ├── napcat/               # OneBot v11 客户端
 │   ├── pocket48/             # 口袋48 API
+│   ├── weverse/              # Weverse 客户端、直播、日报与密码帖
+│   ├── instagram/            # Instagram 诊断代码（当前不可用）
+│   ├── xmonitor/             # X 监控状态与采集器
 │   └── storage/              # 归档
 ├── sidecar/
 │   ├── nim-bridge/           # 口袋 NIM QChat / Chatroom 侧卡
-│   └── weibo-auth/           # 浏览器侧卡（微博 Cookie / 抖音 / 小红书）
+│   ├── weibo-auth/           # 统一浏览器侧卡（微博 / 抖音 / 会话同步）
+│   └── x-monitor/            # X 采集 worker
 ├── scripts/
 │   └── html_to_png.mjs       # 超话日报 HTML → 3:4 PNG（可选，依赖 Playwright）
 ├── config.json.template      # 配置模板（勿提交真实 config.json）

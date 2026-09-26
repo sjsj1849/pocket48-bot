@@ -34,10 +34,38 @@ type weiboSuperCountGroupStored struct {
 	Name string `json:"name"`
 }
 
+type weiboSuperCountImageGroupPanel struct {
+	Key       string   `json:"key,omitempty"`
+	Name      string   `json:"name"`
+	GroupKeys []string `json:"groupKeys"`
+}
+
+type weiboSuperCountImageGroupStored struct {
+	Name      string   `json:"name"`
+	GroupKeys []string `json:"group_keys"`
+}
+
+type weiboSuperCountGroupPanel struct {
+	Key             string   `json:"key"`
+	Name            string   `json:"name"`
+	TopicCount      int      `json:"topicCount"`
+	ImageGroupNames []string `json:"imageGroupNames"`
+}
+
 var oidPattern = regexp.MustCompile(`^(?:100808)?[0-9a-fA-F]{32,40}$`)
+var oidInLinkPattern = regexp.MustCompile(`(?i)100808[0-9a-f]{32,40}`)
 
 func normalizeSuperOID(raw string) string {
 	raw = strings.TrimSpace(raw)
+	// Super-topic links commonly carry the OID either in /p/100808… or in a
+	// containerid query parameter. Match it before parsing prefixes so callers
+	// can paste the complete desktop/mobile URL (including URL-encoded values).
+	if decoded, err := url.QueryUnescape(raw); err == nil {
+		raw = decoded
+	}
+	if oid := oidInLinkPattern.FindString(raw); oid != "" {
+		return strings.ToLower(oid)
+	}
 	// strip common prefixes
 	raw = strings.TrimPrefix(raw, "1022:")
 	if strings.HasPrefix(raw, "100808") {
@@ -61,6 +89,221 @@ func loadCountGroups(raw map[string]json.RawMessage) map[string]*weiboSuperCount
 		_ = json.Unmarshal(encoded, &groups)
 	}
 	return groups
+}
+
+func loadCountImageGroups(raw map[string]json.RawMessage) map[string]*weiboSuperCountImageGroupStored {
+	plans := map[string]*weiboSuperCountImageGroupStored{}
+	if encoded := raw["WEIBO_SUPER_COUNT_IMAGE_GROUPS"]; len(encoded) > 0 {
+		_ = json.Unmarshal(encoded, &plans)
+	}
+	return plans
+}
+
+func countImageGroupList(plans map[string]*weiboSuperCountImageGroupStored) []weiboSuperCountImageGroupPanel {
+	result := make([]weiboSuperCountImageGroupPanel, 0, len(plans))
+	for key, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		result = append(result, weiboSuperCountImageGroupPanel{Key: key, Name: plan.Name, GroupKeys: plan.GroupKeys})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name == result[j].Name {
+			return result[i].Key < result[j].Key
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func nextCountImageGroupKey(plans map[string]*weiboSuperCountImageGroupStored) string {
+	for i := 1; ; i++ {
+		key := fmt.Sprintf("image-%d", i)
+		if _, exists := plans[key]; !exists {
+			return key
+		}
+	}
+}
+
+func countGroupReference(groups map[string]*weiboSuperCountGroupStored, topics map[string]*weiboSuperCountTopicStored, plans map[string]*weiboSuperCountImageGroupStored, key string) (int, []string) {
+	key = strings.TrimSpace(key)
+	display := key
+	if group := groups[key]; group != nil && strings.TrimSpace(group.Name) != "" {
+		display = strings.TrimSpace(group.Name)
+	}
+	topicCount := 0
+	for _, topic := range topics {
+		if topic == nil {
+			continue
+		}
+		stored := strings.TrimSpace(topic.GroupName)
+		if stored == key || stored == display {
+			topicCount++
+		}
+	}
+	imageNames := []string{}
+	for _, plan := range plans {
+		if plan == nil {
+			continue
+		}
+		for _, stored := range plan.GroupKeys {
+			if strings.TrimSpace(stored) == key || strings.TrimSpace(stored) == display {
+				name := strings.TrimSpace(plan.Name)
+				if name == "" {
+					name = "未命名出图方案"
+				}
+				imageNames = append(imageNames, name)
+				break
+			}
+		}
+	}
+	sort.Strings(imageNames)
+	return topicCount, imageNames
+}
+
+func (s *Server) handleWeiboSuperCountGroups(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]json.RawMessage
+	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	groups := loadCountGroups(raw)
+	topics := map[string]*weiboSuperCountTopicStored{}
+	if encoded := raw["WEIBO_SUPER_COUNT_TOPICS"]; len(encoded) > 0 {
+		_ = json.Unmarshal(encoded, &topics)
+	}
+	plans := loadCountImageGroups(raw)
+
+	if r.Method == http.MethodGet {
+		result := make([]weiboSuperCountGroupPanel, 0, len(groups))
+		for key, group := range groups {
+			name := key
+			if group != nil && strings.TrimSpace(group.Name) != "" {
+				name = strings.TrimSpace(group.Name)
+			}
+			topicCount, imageNames := countGroupReference(groups, topics, plans, key)
+			result = append(result, weiboSuperCountGroupPanel{Key: key, Name: name, TopicCount: topicCount, ImageGroupNames: imageNames})
+		}
+		sort.Slice(result, func(i, j int) bool {
+			if result[i].Name == result[j].Name {
+				return result[i].Key < result[j].Key
+			}
+			return result[i].Name < result[j].Name
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"groups": result})
+		return
+	}
+	if r.Method != http.MethodDelete {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Key string `json:"key"`
+	}
+	if err := decodeJSON(r, &body); err != nil || strings.TrimSpace(body.Key) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择要删除的日报分组"})
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	group := groups[key]
+	if group == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "日报分组不存在或已删除"})
+		return
+	}
+	topicCount, imageNames := countGroupReference(groups, topics, plans, key)
+	if topicCount > 0 || len(imageNames) > 0 {
+		parts := []string{}
+		if topicCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d 个超话日报配置", topicCount))
+		}
+		if len(imageNames) > 0 {
+			parts = append(parts, "图片组合："+strings.Join(imageNames, "、"))
+		}
+		writeJSON(w, http.StatusConflict, apiError{Error: "该分组仍被" + strings.Join(parts, "；") + "引用，请先迁移或移除引用"})
+		return
+	}
+	delete(groups, key)
+	if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUPER_COUNT_GROUPS": groups}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "日报分组已删除"})
+}
+
+// handleWeiboSuperCountImageGroups manages how existing report groups are
+// combined into PNG attachments. It intentionally does not change email table
+// grouping or QQ delivery.
+func (s *Server) handleWeiboSuperCountImageGroups(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]json.RawMessage
+	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	groups := loadCountGroups(raw)
+	plans := loadCountImageGroups(raw)
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{"imageGroups": countImageGroupList(plans)})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		var body weiboSuperCountImageGroupPanel
+		if err := decodeJSON(r, &body); err != nil || strings.TrimSpace(body.Key) == "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择要删除的出图方案"})
+			return
+		}
+		delete(plans, strings.TrimSpace(body.Key))
+		if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUPER_COUNT_IMAGE_GROUPS": plans}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "出图方案已删除"})
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		methodNotAllowed(w)
+		return
+	}
+	var body weiboSuperCountImageGroupPanel
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写图片名称"})
+		return
+	}
+	seen := make(map[string]struct{}, len(body.GroupKeys))
+	cleanKeys := make([]string, 0, len(body.GroupKeys))
+	for _, rawKey := range body.GroupKeys {
+		key := strings.TrimSpace(rawKey)
+		if _, exists := groups[key]; !exists {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: fmt.Sprintf("日报分组 %q 不存在", key)})
+			return
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleanKeys = append(cleanKeys, key)
+	}
+	if len(cleanKeys) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "每张图片至少选择一个日报分组"})
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if r.Method == http.MethodPost {
+		key = nextCountImageGroupKey(plans)
+	} else if _, exists := plans[key]; key == "" || !exists {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "要编辑的出图方案不存在"})
+		return
+	}
+	plans[key] = &weiboSuperCountImageGroupStored{Name: body.Name, GroupKeys: cleanKeys}
+	if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUPER_COUNT_IMAGE_GROUPS": plans}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "出图方案已保存", "key": key})
 }
 
 func resolveCountGroupDisplay(groups map[string]*weiboSuperCountGroupStored, key string) (groupKey, display string) {
@@ -157,7 +400,7 @@ func (s *Server) handleWeiboSuperCountTopics(w http.ResponseWriter, r *http.Requ
 		}
 		oid := normalizeSuperOID(body.OID)
 		if oid == "" || !oidPattern.MatchString(oid) {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808… 开头，可从超话页 URL 的 containerid 获取）"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）或完整微博超话链接"})
 			return
 		}
 		// group input prefers display name field
@@ -317,7 +560,7 @@ func (s *Server) handleWeiboSuperSignTopics(w http.ResponseWriter, r *http.Reque
 		}
 		oid := normalizeSuperOID(body.OID)
 		if oid == "" || !oidPattern.MatchString(oid) {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）或完整微博超话链接"})
 			return
 		}
 		// remove old oid variants from all groups, keep last_* if same oid
@@ -572,7 +815,7 @@ func (s *Server) handleWeiboUnifiedSuperTopics(w http.ResponseWriter, r *http.Re
 		}
 		oid := normalizeSuperOID(body.OID)
 		if oid == "" || !oidPattern.MatchString(oid) {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效超话 OID（100808…）或完整微博超话链接"})
 			return
 		}
 		if r.Method == http.MethodPut {

@@ -66,3 +66,11 @@ func TestPostURLRejectsUntrustedAndNonPostLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestPostURLAcceptsMomentLink(t *testing.T) {
+	raw := "https://weverse.io/hearts2hearts/moment/stella/post/3-241593308"
+	id, link, err := ParsePostURL(raw)
+	if err != nil || id != "3-241593308" || link != raw {
+		t.Fatal(id, link, err)
+	}
+}

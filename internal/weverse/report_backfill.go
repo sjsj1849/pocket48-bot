@@ -59,7 +59,7 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 			err := c.call(ctx, "/post/v1.0/post-"+root+"?fieldSet=postV1", true, &full)
 			if err == nil {
 				source = full
-			} else if !errors.Is(err, ErrForbidden) && !errors.Is(err, ErrNotFound) {
+			} else if !reportPostUnavailable(err) {
 				return err
 			}
 		}
@@ -67,7 +67,7 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 		var e error
 		for attempt := 0; attempt < 3; attempt++ {
 			events, e = c.threadEvents(ctx, s.CommunityID, slug, root, source, p.Start, p.End)
-			if e == nil || errors.Is(e, ErrNotFound) || errors.Is(e, ErrForbidden) || errors.Is(e, ErrLogin) || ctx.Err() != nil {
+			if e == nil || reportPostUnavailable(e) || errors.Is(e, ErrLogin) || ctx.Err() != nil {
 				break
 			}
 			select {
@@ -76,7 +76,7 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 			case <-time.After(time.Second):
 			}
 		}
-		if errors.Is(e, ErrNotFound) || errors.Is(e, ErrForbidden) {
+		if reportPostUnavailable(e) {
 			unavailable++
 			// A stale list entry may still provide the root metadata.
 			if rootEvent, parseErr := eventFromPost(obj(raw), slug, s.CommunityID); parseErr == nil && rootEvent.ID != "" {
@@ -119,9 +119,41 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 		if e != nil {
 			return e
 		}
-		if allowed[event.MemberID] && event.Time >= p.Start.UnixMilli() && event.Time < p.End.UnixMilli() {
-			event.Author = names[event.MemberID]
+		if event.ID == "" || event.Time < p.Start.UnixMilli() || event.Time >= p.End.UnixMilli() {
+			continue
+		}
+		var full Object
+		err := c.call(ctx, "/post/v1.0/post-"+event.PostID+"?fieldSet=postV1", true, &full)
+		if reportPostUnavailable(err) {
+			unavailable++
+			if allowed[event.MemberID] {
+				event.Author = names[event.MemberID]
+				selected = append(selected, event)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if complete, parseErr := historicalLive(full, slug, s.CommunityID); parseErr != nil {
+			return parseErr
+		} else if complete.ID != "" {
+			event = complete
+		}
+		if name := names[event.MemberID]; name != "" {
+			event.Author = name
+		}
+		if allowed[event.MemberID] {
 			selected = append(selected, event)
+		}
+		chats, chatErr := c.liveChatEvents(ctx, full, event, slug, s.CommunityID, names, time.UnixMilli(1), 200)
+		if chatErr != nil {
+			return chatErr
+		}
+		for _, chat := range chats {
+			if chat.Time >= p.Start.UnixMilli() && chat.Time < p.End.UnixMilli() {
+				selected = append(selected, chat)
+			}
 		}
 	}
 	if e = h.Record(selected, ""); e != nil {
@@ -147,7 +179,7 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 		}
 		var post Object
 		err := c.call(ctx, "/post/v1.0/post-"+id+"?fieldSet=postV1", true, &post)
-		if errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound) {
+		if reportPostUnavailable(err) {
 			continue
 		}
 		if err != nil {
@@ -174,6 +206,15 @@ func (c *Client) BackfillReport(ctx context.Context, h *History, s ReportSetting
 	_, e = h.db.Exec("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", "backfill:"+p.Key, time.Now().Format(time.RFC3339))
 	return e
 }
+
+// A single deleted, access-restricted, or password-changed post must not make
+// an otherwise valid historical report impossible to generate. The report
+// already exposes the unavailable-post count so the missing detail stays
+// visible instead of being silently treated as complete data.
+func reportPostUnavailable(err error) bool {
+	return errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrPostPassword)
+}
+
 func historicalLive(p Object, slug string, cid int64) (Event, error) {
 	v := obj(obj(p["extension"])["video"])
 	vod, _ := v["liveToVod"].(bool)
@@ -223,7 +264,7 @@ func (c *Client) RefreshReportPosts(ctx context.Context, h *History, s ReportSet
 		seen[previous.PostID] = true
 		var post Object
 		err := c.call(ctx, "/post/v1.0/post-"+previous.PostID+"?fieldSet=postV1", true, &post)
-		if errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound) {
+		if reportPostUnavailable(err) {
 			continue
 		}
 		if err != nil {

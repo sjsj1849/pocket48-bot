@@ -136,7 +136,7 @@ func loadAlertConfig(path string) (alertConfig, error) {
 // Douyin IM is excluded: bot-side watchdog does sidecar restart → bot restart →
 // email only after auto-heal fails. Admin must not mail on "重连中".
 func shouldAlertService(service serviceState) bool {
-	if service.ID == "douyin_im" {
+	if service.ID == "douyin_im" || service.SuppressAlert {
 		return false
 	}
 	if service.ID != "bot" && service.LastTime == "" {

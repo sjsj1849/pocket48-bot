@@ -20,7 +20,7 @@ export function WeversePostPasswords() {
   }
   return <section className="platform-section">
     <h3>私密帖密码</h3>
-    <p className="muted">填写帖子链接与已知密码，也支持评论链接。验证成功后按帖子保存，后续采集、上下文和报表读取复用；此前的消息不会重复转发。会员权限仍需登录账号具备对应资格。</p>
+    <p className="muted">填写帖子、评论或 Moment 链接与已知密码。验证成功后按内容 ID 保存，后续采集、上下文和报表读取复用；此前的消息不会重复转发。会员权限仍需登录账号具备对应资格。</p>
     <PlatformField label="帖子链接"><input type="url" value={url} onChange={e => setURL(e.target.value)} placeholder="https://weverse.io/hearts2hearts/artist/…" /></PlatformField>
     <PlatformField label="帖子密码"><input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} /></PlatformField>
     {error && <p role="alert" className="inline-error">{error}</p>}{message && <p role="status" className="wv-notice">{message}</p>}

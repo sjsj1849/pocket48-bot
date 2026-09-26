@@ -77,6 +77,21 @@ func (c *Client) LiveEndEvents(ctx context.Context, state *Runtime, cfg Settings
 			}
 			return nil, err
 		}
+		// Fetch the closed channel once more before emitting terminal events. This
+		// closes the polling gap when an artist sends a final message shortly before
+		// the live disappears from the on-air list.
+		slug, _, _ := notificationTarget(Object{"url": tracked.Event.URL})
+		names := map[string]string{}
+		for _, member := range c.Artists[tracked.Event.CommunityID] {
+			names[member.ID] = member.Name
+		}
+		if slug != "" && len(names) > 0 {
+			chats, chatErr := c.liveChatEvents(ctx, post, tracked.Event, slug, tracked.Event.CommunityID, names, time.UnixMilli(1), 200)
+			if chatErr != nil {
+				return nil, chatErr
+			}
+			ends = append(ends, chats...)
+		}
 		video := obj(obj(post["extension"])["video"])
 		liveToVod, _ := video["liveToVod"].(bool)
 		if !(str(video["type"]) == "LIVE" && str(video["status"]) == "DONE") && !liveToVod {

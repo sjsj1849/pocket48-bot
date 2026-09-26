@@ -46,7 +46,7 @@ func TestWeiboCredentialUpdatesPreserveSuccessfulAutoSignDate(t *testing.T) {
 		{
 			name: "browser cookie refresh",
 			update: func(bot *Bot) error {
-				bot.handleWeiboAuthCookies("SUB=browser-cookie", "SUB=mobile-cookie", "scheduled")
+				bot.handleWeiboAuthCookies("SUB=browser-cookie", "SUB=mobile-cookie", "scheduled", true)
 				return nil
 			},
 		},
@@ -62,5 +62,20 @@ func TestWeiboCredentialUpdatesPreserveSuccessfulAutoSignDate(t *testing.T) {
 				t.Fatalf("last auto-sign date = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestUnverifiedBrowserCookiesAreIgnored(t *testing.T) {
+	bot := newWeiboAutoSignTestBot(t)
+	bot.cfg.WeiboCookie = "SUB=known-good"
+	bot.weiboMonitor.SetCookie(bot.cfg.WeiboCookie)
+
+	bot.handleWeiboAuthCookies("SUB=unverified", "SUB=unverified-mobile", "scheduled_soft", false)
+
+	if got, want := bot.cfg.WeiboCookie, "SUB=known-good"; got != want {
+		t.Fatalf("web cookie = %q, want %q", got, want)
+	}
+	if got := bot.cfg.WeiboMWeiboCookie; got != "" {
+		t.Fatalf("mobile cookie unexpectedly changed to %q", got)
 	}
 }

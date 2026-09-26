@@ -101,6 +101,11 @@ def event(data, orders=None, depth=0):
         source = https(animated.get("videoUrl"))
         attachments.append({"kind": "animated", "cover": https(animated.get("thumbnailUrl")),
                             "variants": [{"url": source, "bitrate": 0}] if source else []})
+    # X appends a t.co token for attached media to rawContent. It is not a
+    # second destination and becomes confusing once we render the actual media
+    # plus the canonical post URL ourselves.
+    if attachments:
+        body = re.sub(r"(?:\s*https://t\.co/[A-Za-z0-9]+)+\s*$", "", body).rstrip()
     order = orders.get(identity, [])
     positions = {url: i for i, url in enumerate(order)}
     attachments.sort(key=lambda a: positions.get(a.get("cover"), len(order)))

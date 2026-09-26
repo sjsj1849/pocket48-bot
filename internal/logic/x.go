@@ -11,6 +11,33 @@ import (
 	"time"
 )
 
+const (
+	xRegularTimelineLimit = 20
+	xDeepTimelineLimit    = 500
+	xUserRefreshInterval  = 6 * time.Hour
+)
+
+type xUserCacheEntry struct {
+	user      xmonitor.User
+	expiresAt time.Time
+}
+
+func xRetryDelay(code string, consecutiveFailures int, regular time.Duration) time.Duration {
+	switch code {
+	case "account_unavailable", "timeout", "collection_failed", "timeline_unavailable":
+		switch consecutiveFailures {
+		case 1:
+			return 5 * time.Minute
+		case 2:
+			return 15 * time.Minute
+		default:
+			return 30 * time.Minute
+		}
+	default:
+		return regular
+	}
+}
+
 func xVideoURL(media xmonitor.Media) string {
 	best := xmonitor.Variant{}
 	for _, v := range media.Variants {
@@ -57,7 +84,7 @@ func xMessageGroups(sub xmonitor.Subscription, e xmonitor.Event) [][]interface{}
 	for _, m := range media {
 		if m.Kind == "video" || m.Kind == "gif" || m.Kind == "animated" {
 			if xVideoURL(m) != "" {
-				lines = append(lines, "[视频]（视频单独发送）")
+				lines = append(lines, "[视频]")
 			} else {
 				lines = append(lines, "[视频]（请打开原帖观看）")
 			}
@@ -109,6 +136,8 @@ func (b *Bot) runXLoop(ctx context.Context) {
 		state.Subscriptions = map[string]xmonitor.Cursor{}
 	}
 	status := xmonitor.Status{StartedAt: time.Now().Format(time.RFC3339), Targets: map[string]string{}}
+	userCache := map[string]xUserCacheEntry{}
+	consecutiveFailures := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -142,12 +171,27 @@ func (b *Bot) runXLoop(ctx context.Context) {
 				events := results[key]
 				e := failures[key]
 				if !known && e == nil {
-					user, e = client.Lookup(ctx, sub.Username)
+					now := time.Now()
+					cached, cachedOK := userCache[key]
+					if cachedOK && now.Before(cached.expiresAt) && (sub.UserID == "" || cached.user.ID == sub.UserID) {
+						user = cached.user
+					} else {
+						user, e = client.Lookup(ctx, sub.Username)
+						if e == nil {
+							userCache[key] = xUserCacheEntry{user: user, expiresAt: now.Add(xUserRefreshInterval)}
+						} else if cachedOK && cached.user.ID != "" && (sub.UserID == "" || cached.user.ID == sub.UserID) {
+							// Profile refresh is optional. Keep using the last verified,
+							// immutable user ID when only the lookup endpoint is unavailable.
+							user = cached.user
+							userCache[key] = xUserCacheEntry{user: user, expiresAt: now.Add(30 * time.Minute)}
+							e = nil
+						}
+					}
 					if e == nil && sub.UserID != "" && user.ID != sub.UserID {
 						e = fmt.Errorf("账号编号发生变化，请重新保存订阅")
 					}
 					if e == nil {
-						events, e = client.Timeline(ctx, user.ID, 100)
+						events, e = client.Timeline(ctx, user.ID, xRegularTimelineLimit)
 					}
 					if e == nil {
 						users[key] = user
@@ -163,7 +207,7 @@ func (b *Bot) runXLoop(ctx context.Context) {
 					cursor := state.Subscriptions[sub.ID]
 					initialized := cursor.Ready && cursor.UserID == sub.UserID && strings.EqualFold(cursor.Username, sub.Username)
 					if initialized && !xmonitor.Overlap(cursor, events, user.PinnedIDs) {
-						events, e = client.Timeline(ctx, user.ID, 500)
+						events, e = client.Timeline(ctx, user.ID, xDeepTimelineLimit)
 						if e == nil && !xmonitor.Overlap(cursor, events, user.PinnedIDs) {
 							e = fmt.Errorf("时间线与上次扫描没有重叠，已保留进度；请检查账号或重新添加订阅建立基线")
 						}
@@ -183,15 +227,11 @@ func (b *Bot) runXLoop(ctx context.Context) {
 									if ctx.Err() != nil {
 										return
 									}
-									for _, group := range xMessageGroups(sub, event) {
-										if strings.EqualFold(b.cfg.MediaDelivery, "local") {
-											for i, item := range group {
-												if segment, ok := item.(napcat.MessageSegment); ok && (segment.Type == "image" || segment.Type == "video") {
-													segment.Data["file"] = b.mediaPathForMessage(nil, segment.Data["file"])
-													group[i] = segment
-												}
-											}
-										}
+									groups := xMessageGroups(sub, event)
+									if strings.EqualFold(b.cfg.MediaDelivery, "local") {
+										b.localizeMessageGroups(groups)
+									}
+									for _, group := range groups {
 										b.napcat.SendGroupMessage(sub.GroupID, group)
 									}
 									status.Forwarded++
@@ -211,17 +251,28 @@ func (b *Bot) runXLoop(ctx context.Context) {
 					status.Targets[sub.ID] = "正常"
 				}
 			}
-			status.LastCheck = time.Now().Format(time.RFC3339)
+			now := time.Now()
+			status.LastCheck = now.Format(time.RFC3339)
+			wait := interval
 			if status.Error == "" {
 				status.LastSuccess = status.LastCheck
+				status.NextRetryAt = ""
+				status.ConsecutiveFailures = 0
+				consecutiveFailures = 0
+			} else {
+				consecutiveFailures++
+				wait = xRetryDelay(status.ErrorCode, consecutiveFailures, interval)
+				status.ConsecutiveFailures = consecutiveFailures
+				status.NextRetryAt = now.Add(wait).Format(time.RFC3339)
 			}
 			if xmonitor.Write(dir, "status.json", status) != nil {
 				log.Print("[X] 无法保存监控状态")
 			} else if status.Error != "" {
-				log.Printf("[X] 扫描异常: %s", status.Error)
+				log.Printf("[X] 扫描异常: %s；将在 %s 后重试", status.Error, wait)
 			} else {
 				log.Printf("[X] 扫描完成: %d 条帖子，新内容 %d 条已入队", status.Events, status.Forwarded)
 			}
+			interval = wait
 		}
 		select {
 		case <-ctx.Done():

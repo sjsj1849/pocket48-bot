@@ -80,4 +80,7 @@ func TestShouldAlertServiceSkipsDouyinIM(t *testing.T) {
 	if !shouldAlertService(serviceState{ID: "bot", Status: "down", StatusText: "已停止"}) {
 		t.Fatal("bot down still alerts")
 	}
+	if shouldAlertService(serviceState{ID: "x", Status: "attention", StatusText: "自动恢复中", SuppressAlert: true}) {
+		t.Fatal("self-healing X failures must not send email")
+	}
 }

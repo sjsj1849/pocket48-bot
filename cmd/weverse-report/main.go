@@ -21,7 +21,8 @@ func must(e error) {
 func main() {
 	now := time.Now().In(weverse.ReportLocation)
 	cfgPath := flag.String("config", "/root/pocket48-bot/config.json", "BOT 配置路径")
-	kind := flag.String("kind", "monthly", "monthly | firstHalf | annual")
+	kind := flag.String("kind", "monthly", "weekly | monthly | firstHalf | annual")
+	date := flag.String("date", now.Format("2006-01-02"), "周报所在周的任意日期（YYYY-MM-DD）")
 	year := flag.Int("year", now.Year(), "年份")
 	month := flag.Int("month", int(now.Month()), "月份")
 	refresh := flag.Bool("refresh-posts", false, "刷新已记录主帖的累计互动与附件")
@@ -42,7 +43,12 @@ func main() {
 		settings.Annual = true
 		must(weverse.SaveReportSettings(dir, settings))
 	}
-	period, e := weverse.NewReportPeriod(*kind, *year, *month)
+	var period weverse.ReportPeriod
+	if *kind == "weekly" {
+		period, e = weverse.NewWeeklyReportPeriod(*date)
+	} else {
+		period, e = weverse.NewReportPeriod(*kind, *year, *month)
+	}
 	must(e)
 	h, e := weverse.OpenHistory(dir)
 	must(e)

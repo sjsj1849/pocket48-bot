@@ -1,14 +1,14 @@
 import { DouyinLiveCadence } from './douyin-live-cadence.mjs';
 import { trackXLogin, diagnoseXLogin } from './x-diagnostics.mjs';
 import { newBackgroundPage } from './background-page.mjs';
-import { handleWeversePanel } from './weverse-session.mjs';
-import { handleXPanel } from './x-session.mjs';
-import { createXSessionStore } from './x-session-store.mjs';
-import { createInstagramSessionStore } from './instagram-session-store.mjs';
-import { handleXLogin } from './x-login.mjs';
-import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import { handleWeversePanel } from './weverse-session.mjs';
+import { handleXPanel } from './x-session.mjs';
+import { createInstagramSessionStore } from './instagram-session-store.mjs';
+import { createXSessionStore } from './x-session-store.mjs';
+import { handleXLogin } from './x-login.mjs';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import process from 'node:process';
 import { chromium } from 'playwright';
@@ -16,6 +16,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { withHardTimeout } from './async-utils.mjs';
 import { formatCookies, parseCookieHeader } from './cookies.mjs';
 import douyinABogus from './vendor/mediacrawler-douyin/sign.cjs';
+import { classifyWeiboProbe, summarizeWeiboProbes } from './weibo-session.mjs';
 import {
   DouyinAccountBackoff,
   extractProfileLive,
@@ -38,7 +39,6 @@ let instagramSessionStore;
 let page;
 let douyinPage;
 let douyinIMPage;
-let douyinLookupPage;
 let xiaohongshuPage;
 let statePath;
 let refreshTimer;
@@ -60,7 +60,9 @@ let douyinIMInitRunning = false;
 let qrRunning = false;
 let shuttingDown = false;
 let lastQRCodeAt = 0;
-const qrCooldownMs = 2 * 60 * 60_000;
+// Weibo's current QR token is short-lived. A two-hour cooldown made recovery
+// unnecessarily painful after one missed/expired scan.
+const qrCooldownMs = 60_000;
 let settings = {
   profileDir: './storage/weibo-browser-profile',
   headless: true,
@@ -90,9 +92,12 @@ const douyinContacts = new Map();
 // accounts serially. Old 1-account-1-tab design left many profile tabs open
 // forever and ballooned Chromium renderer memory on small VMs.
 let profileScanRunning = false;
-const douyinWorksHTTPBackoff = new DouyinAccountBackoff();
+const douyinWorksProfileBackoff = new DouyinAccountBackoff();
+const douyinWorksFailureLoggedAt = new Map();
+const douyinWorksStatus = new Map();
+let douyinRiskResetAt = 0;
 const douyinLiveProfileBackoff = new DouyinLiveCadence();
-const douyinWorksHTTPFailureLoggedAt = new Map();
+const douyinTemporaryPages = new Set();
 let douyinContactSyncRunning = false;
 const douyinContactSyncMs = 6 * 60 * 60_000;
 
@@ -254,13 +259,28 @@ function cookieObjects(header, domain) {
   }));
 }
 
+function cookieIdentity(cookie) {
+  return `${String(cookie?.domain || '').toLowerCase()}\t${cookie?.path || '/'}\t${cookie?.name || ''}`;
+}
+
+async function addOnlyMissingCookies(cookies, source) {
+  if (!Array.isArray(cookies) || cookies.length === 0) return 0;
+  const existing = new Set((await context.cookies()).map(cookieIdentity));
+  const missing = cookies.filter((cookie) => !existing.has(cookieIdentity(cookie)));
+  if (missing.length > 0) await context.addCookies(missing);
+  if (missing.length !== cookies.length) {
+    log(`${source}: preserved ${cookies.length - missing.length} cookies already present in persistent profile`);
+  }
+  return missing.length;
+}
+
 async function restoreStorageState() {
   try {
     const raw = await fs.readFile(statePath, 'utf8');
     const saved = JSON.parse(raw);
     if (Array.isArray(saved.cookies) && saved.cookies.length > 0) {
-      await context.addCookies(saved.cookies);
-      log(`restored ${saved.cookies.length} cookies from storage state`);
+      const restored = await addOnlyMissingCookies(saved.cookies, 'storage restore');
+      log(`restored ${restored}/${saved.cookies.length} missing cookies from storage state`);
       // Remember last good XHS session fingerprint for fail-safe persist.
       const xhs = saved.cookies.filter((c) => /xiaohongshu/i.test(String(c.domain || '')));
       const ws = xhs.find((c) => c.name === 'web_session')?.value || '';
@@ -541,8 +561,8 @@ async function seedConfiguredCookies() {
     ...cookieObjects(settings.mobileCookie || settings.webCookie, '.weibo.cn'),
   ];
   if (cookies.length > 0) {
-    await context.addCookies(cookies);
-    log(`seeded ${cookies.length} configured cookies`);
+    const seeded = await addOnlyMissingCookies(cookies, 'config seed');
+    log(`seeded ${seeded}/${cookies.length} missing configured cookies`);
   }
 }
 
@@ -586,7 +606,6 @@ async function startBrowser() {
       // Login/lookup pages are temporary and should not force a high permanent limit.
       '--renderer-process-limit=4',
       '--js-flags=--max-old-space-size=256',
-      '--blink-settings=imagesEnabled=false',
       '--disk-cache-size=33554432',
     ];
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
@@ -722,9 +741,8 @@ async function getXiaohongshuPage() {
 
 // Long-lived tabs we intentionally keep. Everything else is a leak / leftover.
 // douyinPage is only for QR login and is released after login finishes.
-// douyinLookupPage is temporary and released after nickname lookup.
 function browserKeepPages() {
-  return [page, douyinPage, douyinIMPage, douyinLookupPage, xiaohongshuPage]
+  return [page, douyinPage, douyinIMPage, xiaohongshuPage, ...douyinTemporaryPages]
     .filter((p) => p && !p.isClosed());
 }
 
@@ -736,7 +754,7 @@ function pageRole(p) {
   if (p === page) return 'main';
   if (p === douyinPage) return 'douyin-login';
   if (p === douyinIMPage) return 'douyin-im';
-  if (p === douyinLookupPage) return 'douyin-lookup';
+  if (douyinTemporaryPages.has(p)) return 'douyin-temp';
   if (p === xiaohongshuPage) return 'xiaohongshu';
   return 'orphan';
 }
@@ -758,6 +776,7 @@ async function logBrowserPagesDiag(reason = 'manual') {
     `browserDiag(${reason}): pages=${pages.length} keep=${keep.size} `
     + `nodeHeapMB=${Math.round(mem.heapUsed / 1024 / 1024)} `
     + `nodeRssMB=${Math.round((mem.rss || 0) / 1024 / 1024)} `
+    + `douyinTemp=${douyinTemporaryPages.size} profileScan=${profileScanRunning ? 1 : 0} `
     + `| ${rows.join(' || ') || '(none)'}`,
   );
 }
@@ -790,7 +809,6 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     const url = pageUrlSafe(p);
     if (/^https:\/\/(?:[^/]+\.)?weverse\.io(?:\/|$)/i.test(url)) continue;
     if (/^https:\/\/(?:www\.)?(?:x\.com|twitter\.com)(?:\/|$)/i.test(url)) continue;
-
     if (/^https:\/\/(?:www\.)?instagram\.com(?:\/|$)/i.test(url)) continue;
     // Protect IM / passport / QR even if our ref was lost after restart churn.
     if (/im\.douyin\.com|passport\.|\/login|qrcode|qr\.|scan|website-login|captcha|verify/i.test(url)) continue;
@@ -815,8 +833,9 @@ async function pruneBrowserTabs({ reason = 'manual' } = {}) {
     closed += 1;
   }
   if (closed > 0) log(`pruneBrowserTabs(${reason}): closed ${closed} orphan tab(s); keep=${keep.size}`);
-  // If douyin lookup page was closed externally, drop ref.
-  if (douyinLookupPage && douyinLookupPage.isClosed()) douyinLookupPage = undefined;
+  for (const temporaryPage of douyinTemporaryPages) {
+    if (temporaryPage.isClosed()) douyinTemporaryPages.delete(temporaryPage);
+  }
   if (douyinPage && douyinPage.isClosed()) douyinPage = undefined;
 }
 
@@ -834,24 +853,39 @@ async function getDouyinIMPage() {
   return douyinIMPage;
 }
 
-async function getDouyinLookupPage() {
-  await startBrowser();
-  if (!douyinLookupPage || douyinLookupPage.isClosed()) {
-    douyinLookupPage = await newBackgroundPage(context);
-    douyinLookupPage.setDefaultTimeout(15_000);
-  }
-  return douyinLookupPage;
+async function closePageBounded(targetPage) {
+  if (!targetPage || targetPage.isClosed()) return;
+  await Promise.race([
+    targetPage.close({ runBeforeUnload: false }).catch(() => {}),
+    sleep(2_000),
+  ]);
 }
 
-// After nickname lookup finishes, prefer closing the temp page so it does not
-// sit as an idle multi-hundred-MB renderer.
-async function releaseDouyinLookupPage() {
-  if (!douyinLookupPage || douyinLookupPage.isClosed()) {
-    douyinLookupPage = undefined;
-    return;
+async function closeDouyinTemporaryPages() {
+  const pages = [...douyinTemporaryPages];
+  await Promise.allSettled(pages.map((targetPage) => closePageBounded(targetPage)));
+  for (const targetPage of pages) douyinTemporaryPages.delete(targetPage);
+}
+
+// Every profile navigation gets an isolated disposable page. A timeout closes
+// that exact page, which cancels Playwright waits/body reads instead of leaving
+// orphan promises alive after Promise.race has returned.
+async function withDouyinTemporaryPage(label, task, timeoutMs = 40_000) {
+  await startBrowser();
+  const targetPage = await newBackgroundPage(context);
+  targetPage.setDefaultTimeout(15_000);
+  douyinTemporaryPages.add(targetPage);
+  try {
+    return await withHardTimeout(
+      Promise.resolve().then(() => task(targetPage)),
+      timeoutMs,
+      label,
+      () => closePageBounded(targetPage),
+    );
+  } finally {
+    await closePageBounded(targetPage);
+    douyinTemporaryPages.delete(targetPage);
   }
-  try { await douyinLookupPage.close(); } catch {}
-  douyinLookupPage = undefined;
 }
 
 // Douyin works path is Cookie+HTTP only. Login page is temporary — close after QR flow.
@@ -1507,8 +1541,7 @@ async function resolveDouyinNickname(secUserId, userId) {
       return nickname;
     }
     if (sec) {
-      const lookupPage = await getDouyinLookupPage();
-      try {
+      const navigatedNickname = await withDouyinTemporaryPage(`douyin nickname ${sec.slice(0, 12)}`, async (lookupPage) => {
         const profileResponse = lookupPage.waitForResponse(
           (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
           { timeout: 15_000 },
@@ -1527,14 +1560,11 @@ async function resolveDouyinNickname(secUserId, userId) {
           const match = String(value || '').trim().match(/^(.+?)的抖音(?:主页)?/);
           return match?.[1]?.trim() || '';
         }).catch(() => '');
-        const navigatedNickname = renderedNickname || pageTitleNickname;
-        if (navigatedNickname && !['抖音', '抖音精选'].includes(navigatedNickname)) {
-          rememberDouyinContact({ uid, secUid: sec, nickname: navigatedNickname }, { persist: true });
-          return navigatedNickname;
-        }
-      } finally {
-        // Do not keep a heavy profile renderer idle between lookups.
-        await releaseDouyinLookupPage();
+        return renderedNickname || pageTitleNickname;
+      }, 30_000);
+      if (navigatedNickname && !['抖音', '抖音精选'].includes(navigatedNickname)) {
+        rememberDouyinContact({ uid, secUid: sec, nickname: navigatedNickname }, { persist: true });
+        return navigatedNickname;
       }
     }
     const fallback = cachedIdentity.accountID ? `抖音号 ${cachedIdentity.accountID}` : '';
@@ -1896,6 +1926,8 @@ async function startDouyinIM() {
 
 async function douyinPageSnapshot(targetPage, secUserId) {
   return targetPage.evaluate((fallbackSecUserId) => {
+    const browserError = location.protocol === 'chrome-error:'
+      || /(?:site can.t be reached|网页无法打开|无法访问此网站)/i.test(document.body?.innerText || '');
     const postSelector = 'a[href*="/video/"],a[href*="/note/"]';
     const roots = [
       document.querySelector('[data-e2e="user-post-list"]'),
@@ -1923,9 +1955,31 @@ async function douyinPageSnapshot(targetPage, secUserId) {
       || (liveCandidates.length === 1 ? liveCandidates[0] : '');
     const liveMatch = live.match(/live\.douyin\.com\/(\d+)/);
     const liveActive = Boolean(document.querySelector('[data-e2e="user-info-living"]'));
-    const nickname = document.querySelector('[data-e2e="user-title"], h1, h2')?.textContent?.trim() || '';
-    return { cards, nickname, liveActive, liveId: liveMatch?.[1] || '' };
+    const nickname = browserError ? '' : (document.querySelector('[data-e2e="user-title"], h1, h2')?.textContent?.trim() || '');
+    const html = document.documentElement?.innerHTML || '';
+    return {
+      cards, nickname, liveActive, liveId: liveMatch?.[1] || '',
+      url: location.href,
+      title: document.title || '',
+      challenge: html.includes('byted_acrawler') || html.includes('__ac_signature'),
+      browserError,
+    };
   }, secUserId);
+}
+
+async function resetDouyinRiskCookies(targetPage) {
+  const now = Date.now();
+  if (!context || now - douyinRiskResetAt < 60 * 60_000) return false;
+  douyinRiskResetAt = now;
+  const names = ['__ac_nonce', '__ac_signature', '__ac_referer', 's_v_web_id', 'web_sign_token'];
+  for (const name of names) {
+    await context.clearCookies({ name }).catch(() => {});
+  }
+  log(`douyin works resetting ${names.length} anti-bot cookies while preserving login session`);
+  await targetPage.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await targetPage.waitForTimeout(10_000);
+  await persistStorageState({ force: true, reason: 'douyin-risk-reset' }).catch(() => {});
+  return true;
 }
 
 function emitDouyinAccountState(account, secUserId, profileUrl, posts, profileLive, snapshot = {}) {
@@ -1986,8 +2040,21 @@ async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
   const browser = await targetPage.evaluate(() => ({
     userAgent: navigator.userAgent,
     msToken: window.localStorage?.getItem('xmst') || '',
+    webid: (() => {
+      // Douyin persists its browser identity inside SDK JSON rather than a
+      // dedicated localStorage key. Reusing it is essential: a fresh random
+      // webid for every creator eventually trips whole-session risk control.
+      for (let index = 0; index < window.localStorage.length; index += 1) {
+        const value = window.localStorage.getItem(window.localStorage.key(index)) || '';
+        const match = value.match(/"webid"\s*:\s*"?(\d{15,22})"?/)
+          || value.match(/"user_unique_id"\s*:\s*"?(\d{15,22})"?/);
+        if (match) return match[1];
+      }
+      return '';
+    })(),
   }));
   const chromeVersion = String(browser.userAgent || '').match(/Chrome\/([\d.]+)/)?.[1] || '125.0.0.0';
+  const webid = browser.webid || String(Math.floor(7_000_000_000_000_000_000 + Math.random() * 200_000_000_000_000_000));
   const queries = secUserIds.map((secUserId) => {
     const params = new URLSearchParams({
       device_platform: 'webapp', aid: '6383', channel: 'channel_pc_web',
@@ -1997,7 +2064,7 @@ async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
       browser_online: 'true', engine_name: 'Blink', engine_version: chromeVersion,
       os_name: 'Windows', os_version: '10', cpu_core_num: '8', device_memory: '8', platform: 'PC',
       screen_width: '1920', screen_height: '1080', effective_type: '4g', round_trip_time: '50',
-      webid: String(Math.floor(7_000_000_000_000_000_000 + Math.random() * 200_000_000_000_000_000)),
+      webid,
       msToken: browser.msToken || Array.from(randomBytes(107), (value) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[value % 64]).join(''),
       sec_user_id: secUserId, count: '18', max_cursor: '', locate_query: 'false',
       publish_video_strategy_type: '2',
@@ -2017,8 +2084,12 @@ async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
             credentials: 'include', signal: controller.signal,
             headers: { accept: 'application/json, text/plain, */*', 'cache-control': 'no-cache' },
           });
-          const body = await response.json().catch(() => null);
-          if (response.status || attempt > 0) return { ...request, http: response.status, body, message: '' };
+          const contentType = response.headers.get('content-type') || '';
+          const raw = await response.text();
+          let body = null;
+          try { body = raw ? JSON.parse(raw) : null; } catch {}
+          const message = body ? '' : `non-json response type=${contentType || 'unknown'} bytes=${raw.length} preview=${raw.slice(0, 120).replace(/\s+/g, ' ')}`;
+          if (response.status || attempt > 0) return { ...request, http: response.status, body, message };
         } catch (error) {
           if (attempt > 0) return { ...request, http: 0, body: null, message: error?.message || String(error) };
           await new Promise((resolve) => setTimeout(resolve, 300));
@@ -2028,7 +2099,14 @@ async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
       }
       return { ...request, http: 0, body: null, message: 'request failed' };
     };
-    return Promise.all(requests.map(requestOne));
+    const results = [];
+    for (const request of requests) {
+      results.push(await requestOne(request));
+      // Avoid a six-request burst with one browser identity. The real profile
+      // page loads creator feeds serially as the user navigates.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return results;
   }, queries);
   return new Map(payloads.map((payload) => {
     const status_code = Number(payload?.body?.status_code);
@@ -2042,31 +2120,42 @@ async function fetchAwemePostsBrowserAPI(targetPage, secUserIds) {
 }
 
 async function scanDouyinLiveProfile(account, secUserId, profileUrl) {
-  const lookupPage = await getDouyinLookupPage();
-  const profileResponse = lookupPage.waitForResponse(
-    (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
-    { timeout: 15_000 },
-  ).catch(() => undefined);
-  // This request is signed by Douyin's own page runtime. It remains usable
-  // when the unsigned server-side works endpoint returns HTTP 403.
-  const postsResponse = lookupPage.waitForResponse(
-    (response) => response.url().includes('/aweme/v1/web/aweme/post/'),
-    { timeout: 15_000 },
-  ).catch(() => undefined);
-  await lookupPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 });
-  const [profileReply, postsReply] = await Promise.all([profileResponse, postsResponse]);
-  const profileBody = await profileReply?.json().catch(() => undefined);
-  const postsBody = await postsReply?.json().catch(() => undefined);
-  const profileLive = extractProfileLive(profileBody);
-  const snapshot = await douyinPageSnapshot(lookupPage, secUserId).catch(() => ({}));
-  const posts = resolveDouyinProfilePosts(postsBody, snapshot, secUserId);
-  return { profileLive, snapshot, posts };
+  return withDouyinTemporaryPage(`douyin profile ${String(account.name || secUserId).slice(0, 24)}`, async (lookupPage) => {
+    const profileResponse = lookupPage.waitForResponse(
+      (response) => response.url().includes('/aweme/v1/web/user/profile/other/'),
+      { timeout: 35_000 },
+    ).catch(() => undefined);
+    // This request is signed by Douyin's own page runtime. It remains usable
+    // when the unsigned server-side works endpoint returns HTTP 403.
+    const postsResponse = lookupPage.waitForResponse(
+      (response) => response.url().includes('/aweme/v1/web/aweme/post/'),
+      { timeout: 35_000 },
+    ).catch(() => undefined);
+    // The first response can be Douyin's JS challenge page. It writes a fresh
+    // __ac_signature and reloads automatically; keep both response waits alive
+    // across that reload instead of abandoning the fallback on the first goto.
+    const navigationError = await lookupPage.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 25_000 })
+      .then(() => '').catch((error) => error.message || String(error));
+    await lookupPage.waitForTimeout(8_000);
+    const [profileReply, postsReply] = await Promise.all([profileResponse, postsResponse]);
+    const profileBody = await profileReply?.json().catch(() => undefined);
+    const postsBody = await postsReply?.json().catch(() => undefined);
+    const profileLive = extractProfileLive(profileBody);
+    const snapshot = await douyinPageSnapshot(lookupPage, secUserId).catch(() => ({}));
+    const posts = resolveDouyinProfilePosts(postsBody, snapshot, secUserId);
+    if (posts.length === 0) {
+      log(`douyin profile fallback empty user=${account.name || secUserId.slice(0, 12)} url=${snapshot.url || lookupPage.url()} challenge=${snapshot.challenge ? 'yes' : 'no'} title=${snapshot.title || '-'} navigation=${navigationError || 'ok'}`);
+    }
+    return { profileLive, snapshot, posts };
+  }, 55_000);
 }
 
 async function scanDouyinAccount(account, cookieHeader = '', liveOnly = false, worksResult) {
   const secUserId = String(account.secUserId || '').trim();
   if (!secUserId) return;
-  const profileUrl = account.profileUrl || `https://www.douyin.com/user/${encodeURIComponent(secUserId)}`;
+  // Old mobile share links contain expiring device/share parameters and may
+  // redirect to iesdouyin.com. Always scan the stable canonical creator URL.
+  const profileUrl = `https://www.douyin.com/user/${encodeURIComponent(secUserId)}`;
   const nameHint = account.name || secUserId.slice(0, 12);
 
   try {
@@ -2197,7 +2286,9 @@ async function scanAllDouyinInner(liveOnly = false) {
   let accounts = liveOnly ? settings.douyinAccounts.filter((account) =>
     account.liveEnabled !== false && !String(account.liveId || '').trim() &&
     douyinLiveProfileBackoff.due(String(account.secUserId || '').trim())) : settings.douyinAccounts;
-  // Rotate profile-based live discovery one account at a time so works polls keep priority.
+  // Unknown live IDs still require a profile visit. Rotate one per
+  // cadence tick so this slower job cannot occupy the shared scan lock long
+  // enough to drop the next works poll.
   if (liveOnly && accounts.length > 1) accounts = accounts.slice(0, 1);
   if (accounts.length === 0) return;
   if (douyinScanning) return;
@@ -2220,6 +2311,40 @@ async function scanAllDouyinInner(liveOnly = false) {
           worksPage,
           accounts.map((account) => String(account.secUserId || '').trim()).filter(Boolean),
         );
+        const results = [...worksResults.values()];
+        const silentlyBlocked = results.length > 0 && results.every((result) =>
+          result.status_code !== 0 && /bytes=0/.test(result.message || ''));
+        if (silentlyBlocked) {
+          // Refresh the shared anti-bot cookies once through a real creator
+          // navigation, then retry the lightweight works calls for all accounts.
+          const probe = accounts[0];
+          const probeSec = String(probe.secUserId || '').trim();
+          log(`douyin works session silently blocked; refreshing browser challenge via ${probe.name || probeSec.slice(0, 12)}`);
+          const refreshed = await scanDouyinLiveProfile(
+            probe,
+            probeSec,
+            probe.profileUrl || `https://www.douyin.com/user/${encodeURIComponent(probeSec)}`,
+          ).catch((error) => {
+            log(`douyin browser challenge refresh failed: ${error.message}`);
+            return undefined;
+          });
+          worksResults = await fetchAwemePostsBrowserAPI(
+            worksPage,
+            accounts.map((account) => String(account.secUserId || '').trim()).filter(Boolean),
+          );
+          if (refreshed?.posts?.length > 0 && !worksResults.get(probeSec)?.posts?.length) {
+            worksResults.set(probeSec, { posts: refreshed.posts, status_code: 0, message: '', http: 200, source: 'profile' });
+          }
+          const retryResults = [...worksResults.values()];
+          const stillSilentlyBlocked = retryResults.length > 0 && retryResults.every((result) =>
+            result.status_code !== 0 && /bytes=0/.test(result.message || ''));
+          if (stillSilentlyBlocked && await resetDouyinRiskCookies(worksPage)) {
+            worksResults = await fetchAwemePostsBrowserAPI(
+              worksPage,
+              accounts.map((account) => String(account.secUserId || '').trim()).filter(Boolean),
+            );
+          }
+        }
       } catch (error) {
         log(`douyin direct works browser runtime unavailable: ${error.message}`);
       }
@@ -2231,21 +2356,22 @@ async function scanAllDouyinInner(liveOnly = false) {
         // Playwright can occasionally leave goto/evaluate or response-body
         // promises pending even after their own timeout. Never let one creator
         // freeze the global scan lock and disable every subsequent poll.
-        await withHardTimeout(scanDouyinAccount(account, cookie, liveOnly, worksResults.get(String(account.secUserId || '').trim())), 50_000, `douyin scan ${accountKey}`);
+        await withHardTimeout(
+          scanDouyinAccount(account, cookie, liveOnly, worksResults.get(String(account.secUserId || '').trim())),
+          75_000,
+          `douyin scan ${accountKey}`,
+          closeDouyinTemporaryPages,
+        );
       } catch (error) {
         log(`douyin account scan aborted user=${account.name || accountKey}: ${error.message}`);
         emit('douyin_account_error', {
           secUserId: String(account.secUserId || ''),
           message: `抖音作品扫描超时，已跳过本轮：${error.message}`,
         });
-      } finally {
-        // A fresh temporary page isolates the next creator from a poisoned or
-        // half-navigated renderer and guarantees the page is not retained.
-        await releaseDouyinLookupPage();
       }
     }
   } finally {
-    await releaseDouyinLookupPage();
+    await closeDouyinTemporaryPages();
     douyinScanning = false;
   }
 }
@@ -3392,71 +3518,92 @@ async function gotoWithRetry(targetPage, url, { timeout = 45_000, attempts = 2 }
   throw lastError || new Error(`goto failed: ${url}`);
 }
 
-async function weiboCookiesLookLoggedIn() {
-  if (!context) return false;
+async function probeWeiboSession(kind, url) {
   try {
-    const cookies = await context.cookies(['https://m.weibo.cn/', 'https://weibo.com/', 'https://.weibo.cn/', 'https://.weibo.com/']);
-    const map = new Map(cookies.map((c) => [c.name, c.value]));
-    // Any of the durable session markers is enough for "still logged in".
-    return Boolean(
-      map.get('SSOLoginState')
-      || (map.get('SUB') && map.get('SUBP'))
-      || (map.get('WBPSESS') && map.get('SUB'))
-      || map.get('SCF'),
-    );
-  } catch {
-    return false;
+    if (kind === 'web' && page && !page.isClosed() && /^https:\/\/(?:www\.)?weibo\.com(?:\/|$)/i.test(page.url())) {
+      // BrowserContext.request can lag behind host-only cookies created by a
+      // live page (notably weibo.com/WBPSESS after QR SSO). Probe from the
+      // actual same-origin page so the check sees exactly what Chromium sends.
+      const result = await page.evaluate(async (targetURL) => {
+        try {
+          const response = await fetch(targetURL, {
+            credentials: 'include',
+            signal: AbortSignal.timeout(15_000),
+            headers: { accept: 'application/json, text/plain, */*' },
+          });
+          return {
+            status: response.status,
+            url: response.url,
+            body: await response.json().catch(() => null),
+          };
+        } catch (error) {
+          return { error: String(error?.message || error) };
+        }
+      }, url);
+      if (result?.error) return { state: 'unreachable', detail: result.error.slice(0, 180) };
+      return classifyWeiboProbe(kind, result || {});
+    }
+    const response = await context.request.get(url, {
+      timeout: 15_000,
+      failOnStatusCode: false,
+    });
+    const body = await response.json().catch(() => null);
+    return classifyWeiboProbe(kind, { status: response.status(), url: response.url(), body });
+  } catch (error) {
+    return { state: 'unreachable', detail: String(error?.message || error).slice(0, 180) };
   }
 }
 
-async function mobileLoginState() {
-  // Prefer page check; fall back to cookie markers when m.weibo.cn is slow/blocked.
-  try {
-    await gotoWithRetry(page, 'https://m.weibo.cn/', { timeout: 45_000, attempts: 2 });
-    await page.waitForTimeout(800);
+async function normalizeWeiboWebCookies() {
+  const cookies = await context.cookies(['https://weibo.com/']);
+  const hostSession = cookies.find((cookie) => cookie.name === 'WBPSESS' && cookie.domain === 'weibo.com');
+  const domainSession = cookies.find((cookie) => cookie.name === 'WBPSESS' && cookie.domain === '.weibo.com');
+  if (hostSession?.value && domainSession?.value && hostSession.value !== domainSession.value) {
+    // The current login flow creates a host-only WBPSESS after the first
+    // weibo.com visit. Keeping an older domain-wide WBPSESS sends two values;
+    // the page may look logged in while API endpoints parse the stale one.
+    await context.clearCookies({ name: 'WBPSESS', domain: '.weibo.com', path: domainSession.path || '/' });
+    log('removed stale duplicate .weibo.com/WBPSESS in favor of fresh host-only session');
+  }
+}
+
+async function verifyWeiboSessions() {
+  await normalizeWeiboWebCookies();
+  const [web, mobile] = await Promise.all([
+    probeWeiboSession('web', 'https://weibo.com/ajax/config/get_config'),
+    probeWeiboSession('mobile', 'https://m.weibo.cn/api/config'),
+  ]);
+  log(`weibo session probe web=${web.state}(${web.detail}) mobile=${mobile.state}(${mobile.detail})`);
+  return { web, mobile, status: summarizeWeiboProbes(web, mobile) };
+}
+
+async function preheatWeiboPages() {
+  for (const url of ['https://m.weibo.cn/', 'https://weibo.com/']) {
     try {
-      const ok = await page.evaluate(async () => {
-        const response = await fetch('/api/config', { credentials: 'include' });
-        if (!response.ok) return false;
-        const body = await response.json();
-        return Boolean(body?.data?.login);
-      });
-      if (ok) return true;
-    } catch {}
-  } catch (error) {
-    log(`mobileLoginState page check failed: ${error.message}`);
+      await gotoWithRetry(page, url, { timeout: 30_000, attempts: 2 });
+      await page.waitForTimeout(600);
+    } catch (error) {
+      log(`preheat ${new URL(url).host} failed: ${error.message}`);
+    }
   }
-  const cookieOk = await weiboCookiesLookLoggedIn();
-  if (cookieOk) log('mobileLoginState: page slow/failed, cookies still look logged-in');
-  return cookieOk;
 }
 
-async function preheatAndPublish(reason) {
-  // Soft navigation: one failure must not kill cookie publish if we already have session cookies.
-  try {
-    await gotoWithRetry(page, 'https://m.weibo.cn/', { timeout: 45_000, attempts: 2 });
-    await page.waitForTimeout(600);
-  } catch (error) {
-    log(`preheat m.weibo.cn skipped: ${error.message}`);
+async function publishVerifiedWeiboCookies(reason, health) {
+  const mobileCookies = health.mobile.state === 'valid'
+    ? await context.cookies(['https://m.weibo.cn/']) : [];
+  const webCookies = health.web.state === 'valid'
+    ? await context.cookies(['https://weibo.com/']) : [];
+  if (webCookies.length === 0 && mobileCookies.length === 0) {
+    throw new Error('微博认证 API 未验证任何可发布 Cookie');
   }
-  try {
-    await gotoWithRetry(page, 'https://weibo.com/', { timeout: 45_000, attempts: 2 });
-    await page.waitForTimeout(600);
-  } catch (error) {
-    log(`preheat weibo.com skipped: ${error.message}`);
-  }
-
-  const mobileCookies = await context.cookies(['https://m.weibo.cn/']);
-  const webCookies = await context.cookies(['https://weibo.com/']);
-  // If navigations failed hard and cookie jars are empty, surface error to caller.
-  if (webCookies.length === 0 && mobileCookies.length === 0 && !(await weiboCookiesLookLoggedIn())) {
-    throw new Error('预热失败且无可用微博 Cookie（m.weibo.cn / weibo.com 均不可达）');
-  }
-  const webCookie = formatCookies(webCookies);
-  const mobileCookie = formatCookies(mobileCookies);
   await persistStorageState();
-  emit('cookies', { webCookie, mobileCookie, reason });
-  log(`published refreshed cookies (${webCookies.length} web, ${mobileCookies.length} mobile)`);
+  emit('cookies', {
+    webCookie: formatCookies(webCookies),
+    mobileCookie: formatCookies(mobileCookies),
+    reason,
+    verified: true,
+  });
+  log(`published verified cookies (${webCookies.length} web, ${mobileCookies.length} mobile)`);
 }
 
 async function findQRCode() {
@@ -3469,9 +3616,10 @@ async function findQRCode() {
   // This works even in headless shell where visibility checks fail.
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
-    if (await locator.count() === 0) continue;
     try {
-      await locator.waitFor({ state: 'attached', timeout: 5_000 });
+      // The login shell renders before React mounts the QR image. Waiting here
+      // is essential; a synchronous count() produces false "not found" errors.
+      await locator.waitFor({ state: 'attached', timeout: 10_000 });
       const src = await locator.getAttribute('src', { timeout: 3_000 });
       if (src) {
         const response = await page.request.get(src);
@@ -3485,7 +3633,6 @@ async function findQRCode() {
   // Fallback: screenshot the visible img element.
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
-    if (await locator.count() === 0) continue;
     try {
       await locator.waitFor({ state: 'attached', timeout: 5_000 });
       return await locator.screenshot({ type: 'png' });
@@ -3493,47 +3640,97 @@ async function findQRCode() {
       // Try the next known selector.
     }
   }
+  // Last resort: the page can switch from <img> to canvas without notice.
+  // A viewport screenshot still gives the administrator a scannable login UI.
+  try {
+    return await page.screenshot({ type: 'png', fullPage: false });
+  } catch {}
   return null;
 }
 
-async function waitForLogin(previousSession) {
-  const deadline = Date.now() + 10 * 60_000;
-  while (!shuttingDown && Date.now() < deadline) {
-    await page.waitForTimeout(2_000);
-    const cookies = await context.cookies();
-    const values = new Map(cookies.map((cookie) => [cookie.name, cookie.value]));
-    if (values.get('SSOLoginState') || (values.get('WBPSESS') && values.get('WBPSESS') !== previousSession)) {
-      return true;
-    }
-  }
-  return false;
+async function weiboSSOFingerprint() {
+  const relevant = new Set(['SUB', 'SUBP', 'SCF', 'ALF', 'SSOLoginState']);
+  return (await context.cookies(['https://weibo.com/', 'https://passport.weibo.com/', 'https://m.weibo.cn/']))
+    .filter((cookie) => relevant.has(cookie.name))
+    .map((cookie) => `${cookie.domain}\t${cookie.name}\t${cookie.value}`)
+    .sort()
+    .join('\n');
 }
 
-async function requestQRCode() {
+async function waitForLogin(timeoutMs = 110_000, baselineSSO = '') {
+  const deadline = Date.now() + timeoutMs;
+  let finalizedSSO = false;
+  while (!shuttingDown && Date.now() < deadline) {
+    await page.waitForTimeout(2_000);
+    let health = await verifyWeiboSessions();
+    // The QR flow exists specifically to restore the web session used by
+    // super-topic sign-in. A valid mobile cookie must not finish it early.
+    if (health.web.state === 'valid') return health;
+    if (!finalizedSSO) {
+      const currentSSO = await weiboSSOFingerprint();
+      if (currentSSO && currentSSO !== baselineSSO) {
+        // QR confirmation first updates passport/SUB cookies. weibo.com only
+        // creates its host-only WBPSESS after a real page visit, so complete
+        // that SSO hop here instead of requiring the admin to open the site.
+        finalizedSSO = true;
+        log('QR scan changed SSO cookies; finalizing weibo.com web session');
+        await preheatWeiboPages();
+        health = await verifyWeiboSessions();
+        if (health.web.state === 'valid') return health;
+      }
+    }
+  }
+  return null;
+}
+
+async function requestQRCode({ panel = false } = {}) {
   if (qrRunning || shuttingDown) return;
-  if (Date.now() - lastQRCodeAt < qrCooldownMs) {
+  if (!panel && Date.now() - lastQRCodeAt < qrCooldownMs) {
     emit('status', { status: 'qrcode_cooldown', message: '微博登录二维码仍在冷却期内' });
     return;
   }
   qrRunning = true;
   lastQRCodeAt = Date.now();
   try {
-    const before = new Map((await context.cookies()).map((cookie) => [cookie.name, cookie.value]));
-    await gotoWithRetry(page, 'https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog', {
-      timeout: 45_000,
-      attempts: 2,
+    // Capture this navigation's qrcode/image response. Reading an existing DOM
+    // img can return the previous token when React reuses the login shell.
+    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10_000 });
+    const qrResponsePromise = page.waitForResponse(
+      (response) => response.url().includes('/sso/v2/qrcode/image') && response.status() === 200,
+      { timeout: 30_000 },
+    );
+    await gotoWithRetry(
+      page,
+      `https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog&_=${Date.now()}`,
+      { timeout: 45_000, attempts: 2 },
+    );
+    const qrResponse = await qrResponsePromise;
+    const qrPayload = await qrResponse.json().catch(() => null);
+    const qrID = String(qrPayload?.data?.qrid || '').trim();
+    const qrImageURL = String(qrPayload?.data?.image || '').trim();
+    if (!qrID || !qrImageURL) throw new Error('微博二维码接口未返回本轮 qrid/image');
+    const imageResponse = await page.request.get(qrImageURL, {
+      headers: { referer: page.url() },
+      timeout: 15_000,
     });
-    const image = await findQRCode();
+    const image = imageResponse.ok() ? await imageResponse.body() : null;
     if (!image) throw new Error('未找到微博登录二维码');
-    emit('qrcode', { imageBase64: image.toString('base64'), expiresIn: 600 });
-    log('login QR code published; waiting for administrator scan');
-    const loggedIn = await waitForLogin(before.get('WBPSESS'));
-    if (!loggedIn) {
+    const baselineSSO = await weiboSSOFingerprint();
+    if (!panel) emit('qrcode', { imageBase64: image.toString('base64'), expiresIn: 120 });
+    if (panel) await page.bringToFront();
+    log(`fresh login QR published qrid=${qrID.slice(0, 8)}…; waiting for administrator scan`);
+    const loginHealth = await waitForLogin(panel ? 10 * 60_000 : 110_000, baselineSSO);
+    if (!loginHealth) {
       emit('status', { status: 'qrcode_expired', message: '微博登录二维码已过期' });
       return;
     }
-    await preheatAndPublish('login_restored');
-    emit('status', { status: 'healthy', message: '微博浏览器登录态已恢复' });
+    await preheatWeiboPages();
+    const health = await verifyWeiboSessions();
+    if (health.web.state !== 'valid') {
+      throw new Error(`扫码后认证 API 校验未通过 web=${health.web.detail} mobile=${health.mobile.detail}`);
+    }
+    await publishVerifiedWeiboCookies('login_restored', health);
+    emit('status', { status: health.status, message: '微博浏览器登录态已恢复并通过 API 校验' });
   } catch (error) {
     if (!shuttingDown) emit('error', { message: `二维码登录失败: ${error.message}` });
   } finally {
@@ -3546,33 +3743,35 @@ async function refresh({ allowQRCode = true, reason = 'scheduled' } = {}) {
   refreshRunning = true;
   try {
     await startBrowser();
-    if (await mobileLoginState()) {
-      await preheatAndPublish(reason);
-      emit('status', { status: 'healthy', message: '微博浏览器登录态有效' });
-    } else {
+    // Visiting both sites lets a still-valid passport SSO session rotate SUB
+    // before we make the authoritative API checks.
+    await preheatWeiboPages();
+    const health = await verifyWeiboSessions();
+    if (health.status === 'healthy' || health.status === 'partial') {
+      await publishVerifiedWeiboCookies(reason, health);
+      const detail = `web=${health.web.state} mobile=${health.mobile.state}`;
+      emit('status', {
+        status: health.status,
+        message: health.status === 'healthy' ? `微博浏览器登录态有效（${detail}）` : `微博浏览器登录态部分可用（${detail}）`,
+      });
+      if (allowQRCode && health.web.state === 'invalid') {
+        log('web session invalid while mobile remains valid; requesting QR login');
+        void requestQRCode();
+      }
+    } else if (health.status === 'login_required') {
       emit('status', { status: 'login_required', message: '微博浏览器登录态已失效' });
       if (allowQRCode) void requestQRCode();
+    } else {
+      emit('status', {
+        status: 'network_error',
+        message: `微博认证检查网络不可达，不发布旧 Cookie：web=${health.web.detail} mobile=${health.mobile.detail}`,
+      });
     }
   } catch (error) {
-    // Transient page.goto timeouts while cookies still valid: warn in log, keep healthy if possible.
-    const cookieOk = await weiboCookiesLookLoggedIn().catch(() => false);
-    if (cookieOk) {
-      log(`refresh soft-fail (cookies still valid): ${error.message}`);
-      try {
-        const mobileCookies = await context.cookies(['https://m.weibo.cn/']);
-        const webCookies = await context.cookies(['https://weibo.com/']);
-        if (webCookies.length + mobileCookies.length > 0) {
-          emit('cookies', {
-            webCookie: formatCookies(webCookies),
-            mobileCookie: formatCookies(mobileCookies),
-            reason: `${reason}_soft`,
-          });
-        }
-      } catch {}
-      emit('status', { status: 'healthy', message: `微博 Cookie 仍有效（页面刷新超时已忽略）：${error.message}` });
-    } else {
-      emit('error', { message: `刷新微博登录态失败: ${error.message}` });
-    }
+    // Cookie names in Chromium are not proof of a live server-side session.
+    // Keep the last known-good snapshot, but never republish or claim healthy.
+    log(`refresh degraded: ${error.message}`);
+    emit('status', { status: 'network_error', message: `刷新微博登录态失败，已保留旧快照但未发布：${error.message}` });
   } finally {
     refreshRunning = false;
   }
@@ -3694,7 +3893,24 @@ wss.on('connection', (socket) => {
           }
           break;
         }
-
+        case 'weibo_panel_open':
+        case 'weibo_panel_sync': {
+          socket.send(JSON.stringify({ type: 'panel_ack', requestId: command.requestId, accepted: true }));
+          if (qrRunning) {
+            await page?.bringToFront();
+            break;
+          }
+          if (refreshRunning) break;
+          await refresh({ allowQRCode: false, reason: 'panel_sync' });
+          const health = await verifyWeiboSessions();
+          if (health.web.state === 'valid') {
+            await publishVerifiedWeiboCookies('login_restored', health);
+            await page.bringToFront();
+          } else if (cmd === 'weibo_panel_open' && health.web.state === 'invalid') {
+            await requestQRCode({ panel: true });
+          }
+          break;
+        }
         case 'start':
           settings = {
             ...settings,
@@ -4203,8 +4419,10 @@ wss.on('connection', (socket) => {
   });
 });
 
-wss.on('listening', () => {
+wss.on('listening', async () => {
   const address = wss.address();
+  await fs.mkdir(path.resolve('storage'), { recursive: true });
+  await fs.writeFile(path.resolve('storage/browser-sidecar.json'), JSON.stringify({ port: address.port, pid: process.pid }), { mode: 0o600 });
   process.stdout.write(`PORT:${address.port}\n`);
 });
 

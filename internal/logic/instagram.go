@@ -195,15 +195,11 @@ func (b *Bot) runInstagramLoop(ctx context.Context) {
 									if ctx.Err() != nil {
 										return
 									}
-									for _, group := range instagramMessageGroups(sub, event) {
-										if strings.EqualFold(b.cfg.MediaDelivery, "local") {
-											for i, item := range group {
-												if segment, ok := item.(napcat.MessageSegment); ok && (segment.Type == "image" || segment.Type == "video") {
-													segment.Data["file"] = b.mediaPathForMessage(nil, segment.Data["file"])
-													group[i] = segment
-												}
-											}
-										}
+									groups := instagramMessageGroups(sub, event)
+									if strings.EqualFold(b.cfg.MediaDelivery, "local") {
+										b.localizeMessageGroups(groups)
+									}
+									for _, group := range groups {
 										b.napcat.SendGroupMessage(sub.GroupID, group)
 									}
 									status.Forwarded++

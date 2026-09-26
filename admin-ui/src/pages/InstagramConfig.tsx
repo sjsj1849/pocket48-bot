@@ -35,6 +35,7 @@ export function InstagramConfig({ defaultGroup }: { defaultGroup: string }) {
  function reset(){setSelected(undefined);setEditing('');setDraft(defaults);setGroup(defaultGroup)}
  if(!settings)return <div>{error?<p className="inline-error">{error}</p>:<p className="muted">正在加载 Instagram 配置…</p>}</div>
  return <div className="platform-config x-config">
+  <p className="inline-error" role="alert">当前不可用：Instagram 的平台限流与自动化风控会阻断稳定采集。此页面仅保留用于诊断和后续适配，请勿在生产环境启用监控。</p>
   {error&&<p className="inline-error" role="alert">{error}</p>}{message&&<p className="platform-notice" role="status">{message}</p>}
   <section className="platform-section"><h3>登录与运行</h3>
    <p className="muted">{data?.sessionConfigured?`已保存登录态${data.sessionUsername ? ` · @${data.sessionUsername}` : ''}`:'尚未保存 Instagram 登录态。公开账号可尝试读取，Story 和私密账号需要登录且具备访问权限。'} 首次启用只建立基线，不补发历史帖子。</p>
@@ -50,7 +51,7 @@ export function InstagramConfig({ defaultGroup }: { defaultGroup: string }) {
    <button className="secondary-button" disabled={!!busy||!/^\d{6,8}$/.test(code)} onClick={()=>void action('verify',async()=>{await api('instagram/session',{method:'POST',body:JSON.stringify({code})});setCode('');setData(await api<Result>('instagram/settings'));setMessage('二次验证成功，会话已保存')})}>提交验证码</button>
    <PlatformField label="Instagram Cookie" description="在自己的浏览器登录 Instagram 后，粘贴 Cookie 字符串或 Cookie 导出的 JSON。验证后保存；留空不会覆盖现有登录态。"><textarea aria-label="Instagram Cookie" value={cookies} onChange={e=>setCookies(e.target.value)} autoComplete="off" rows={3}/></PlatformField>
    <div className="inline-actions"><button className="secondary-button" disabled={!!busy||!cookies} onClick={()=>void action('import',async()=>{await api('instagram/session',{method:'POST',body:JSON.stringify({cookies})});setCookies('');setData(await api<Result>('instagram/settings'));setMessage('登录态验证通过并已保存')})}>验证并导入登录态</button><button className="secondary-button" disabled={!!busy||!data?.sessionConfigured} onClick={()=>void action('check',async()=>{await api('instagram/session');setMessage('登录态有效')})}>检查登录态</button><button className="secondary-button" disabled={!!busy||!data?.sessionConfigured} onClick={()=>void action('clear',async()=>{await api('instagram/session',{method:'DELETE'});setData(await api<Result>('instagram/settings'));setMessage('已清除登录态')})}>清除登录态</button></div>
-   <PlatformToggle label="启用 Instagram 监控" description="监控订阅账号的新帖子，图片随文字发送，视频单独发送。" checked={settings.enabled} onChange={enabled=>setSettings({...settings,enabled})}/>
+   <PlatformToggle label="启用 Instagram 监控" description="当前不可用；开关仅为诊断和未来适配保留。" checked={settings.enabled} onChange={enabled=>setSettings({...settings,enabled})}/>
    <PlatformField label="检查间隔（秒）" description="60–3600 秒，建议 300 秒。"><input type="number" min="60" max="3600" value={settings.pollSeconds} onChange={e=>setSettings({...settings,pollSeconds:Number(e.target.value)})}/></PlatformField>
    <PlatformField label="网络代理（可选）" description="留空使用服务器网络。"><input value={settings.proxyURL||''} placeholder="http:// 或 socks5://" onChange={e=>setSettings({...settings,proxyURL:e.target.value})}/></PlatformField>
    <div className="inline-actions"><button className="primary-button" disabled={!!busy} onClick={()=>void action('save',()=>save(settings))}>保存运行设置</button></div>

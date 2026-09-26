@@ -4,7 +4,7 @@ import { PlatformField, PlatformToggle } from '../components/PlatformField'
 
 type Settings = { enabled: boolean; weekly: boolean; monthly: boolean; firstHalf: boolean; annual: boolean; sendTime: string; communityId: number; communityName: string; enabledAt?: string }
 type Status = { settings: Settings; emailTo: string; emailEnabled: boolean; memberCount: number; recordingStarted: string; state?: { lastSuccess?: string; error?: string }; backfill: { running: boolean; total: number; done: number; records: number; error?: string } }
-type Report = { period: { title: string }; complete: boolean; unknownRootReplies: number; members: Array<{ id: string; name: string; posts: number; replies: number; imageMessages: number; images: number; videoMessages: number; lives: number; teammateReplies: number; postPhotos:number; postComments:number; postLikes:number; commentPosts:number; likePosts:number; fanReplies:number; memberReplies:number; selfReplies:number; unknownReplies:number; videos:number; moments:number }> }
+type Report = { period: { title: string }; complete: boolean; unknownRootReplies: number; members: Array<{ id: string; name: string; posts: number; replies: number; imageMessages: number; images: number; videoMessages: number; lives: number; liveChats: number; liveChatLives: number; teammateReplies: number; postPhotos:number; postComments:number; postLikes:number; commentPosts:number; likePosts:number; fanReplies:number; memberReplies:number; selfReplies:number; unknownReplies:number; videos:number; moments:number }> }
 
 export function WeverseReportConfig() {
   const [data, setData] = useState<Status>()
@@ -36,7 +36,7 @@ export function WeverseReportConfig() {
   }
   return <section className="platform-section">
     <h3>成员活动周报 / 月报 / 半年报 / 年报</h3>
-    <p className="muted">持续记录成员发帖、回复、图片、视频和直播。回复按直接被回复者区分粉丝、队友和自己；另保留队友主帖下回复统计。累计评论、点赞采用最新采集值，Moment 历史可能缺失。半年报、年报包含逐月对照图。定期报告发送邮件，附件包含 Excel 明细表和 PNG 汇总图片。</p>
+    <p className="muted">持续记录成员发帖、回复、图片、视频、直播和成员直播弹幕。回复按直接被回复者区分粉丝、队友和自己；另保留队友主帖下回复及直播弹幕互动统计。累计评论、点赞采用最新采集值，Moment 历史可能缺失。半年报、年报包含逐月对照图。定期报告发送邮件，附件包含 Excel 明细表和 PNG 汇总图片。</p>
     {error && <p role="alert" className="inline-error">{error}</p>}
     {message && <p role="status" className="wv-notice">{message}</p>}
     {settings && <>
@@ -71,7 +71,7 @@ export function WeverseReportConfig() {
         <p className="muted">{report.period.title}</p>
         {!report.complete && <p className="wv-notice">本期历史尚未完整回采，以下数字仅代表已采集记录，不代表成员全部发布量。</p>}
         {!!report.unknownRootReplies && <p className="muted">{report.unknownRootReplies} 条回复暂缺主帖作者，未计入队友帖回复。</p>}
-        <div style={{ overflowX: 'auto' }}><table className="data-table"><thead><tr><th>成员</th><th>发帖</th><th>回复</th><th>帖子照片</th><th>累计评论</th><th>累计点赞</th><th>粉丝 / 队友 / 自己 / 未知</th><th>视频</th><th>Moment*</th><th>直播</th><th>队友帖回复</th></tr></thead><tbody>{report.members.map(m => <tr key={m.id}><td>{m.name}</td><td>{m.posts}</td><td>{m.replies}</td><td>{m.postPhotos}</td><td>{m.posts && !m.commentPosts ? "缺失" : `${m.postComments}${m.commentPosts<m.posts ? "（部分）" : ""}`}</td><td>{m.posts && !m.likePosts ? "缺失" : `${m.postLikes}${m.likePosts<m.posts ? "（部分）" : ""}`}</td><td>{m.fanReplies} / {m.memberReplies} / {m.selfReplies} / {m.unknownReplies}</td><td>{m.videos}</td><td>{m.moments}*</td><td>{m.lives}</td><td>{m.teammateReplies}</td></tr>)}</tbody></table></div>
+        <div style={{ overflowX: 'auto' }}><table className="data-table"><thead><tr><th>成员</th><th>发帖</th><th>回复</th><th>帖子照片</th><th>累计评论</th><th>累计点赞</th><th>粉丝 / 队友 / 自己 / 未知</th><th>视频</th><th>Moment*</th><th>直播</th><th>直播弹幕</th><th>参与直播</th><th>队友帖回复</th></tr></thead><tbody>{report.members.map(m => <tr key={m.id}><td>{m.name}</td><td>{m.posts}</td><td>{m.replies}</td><td>{m.postPhotos}</td><td>{m.posts && !m.commentPosts ? "缺失" : `${m.postComments}${m.commentPosts<m.posts ? "（部分）" : ""}`}</td><td>{m.posts && !m.likePosts ? "缺失" : `${m.postLikes}${m.likePosts<m.posts ? "（部分）" : ""}`}</td><td>{m.fanReplies} / {m.memberReplies} / {m.selfReplies} / {m.unknownReplies}</td><td>{m.videos}</td><td>{m.moments}*</td><td>{m.lives}</td><td>{m.liveChats}</td><td>{m.liveChatLives}</td><td>{m.teammateReplies}</td></tr>)}</tbody></table></div>
       </>}
     </>}
   </section>
