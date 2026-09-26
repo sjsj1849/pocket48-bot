@@ -48,7 +48,7 @@ func TestXLSXIsReadableXMLAndDoesNotExecuteChatFormulas(t *testing.T) {
 			t.Fatal("chat content became an Excel formula")
 		}
 	}
-	if sheets != 7 {
+	if sheets != 10 {
 		t.Fatal("missing workbook detail sheets", sheets)
 	}
 }

@@ -26,6 +26,7 @@ type weiboAuthEvent struct {
 	WebCookie        string            `json:"webCookie,omitempty"`
 	MobileCookie     string            `json:"mobileCookie,omitempty"`
 	Reason           string            `json:"reason,omitempty"`
+	Verified         bool              `json:"verified,omitempty"`
 	ImageBase64      string            `json:"imageBase64,omitempty"`
 	ExpiresIn        int               `json:"expiresIn,omitempty"`
 	Status           string            `json:"status,omitempty"`
@@ -100,7 +101,7 @@ type WeiboAuthBridge struct {
 	stopRun  bool
 	wg       sync.WaitGroup
 
-	onCookies     func(webCookie, mobileCookie, reason string)
+	onCookies     func(webCookie, mobileCookie, reason string, verified bool)
 	onQRCode      func(imageBase64 string, expiresIn int)
 	onStatus      func(status, message string)
 	onError       func(error)
@@ -126,7 +127,7 @@ func NewWeiboAuthBridge(cfg *config.Config) *WeiboAuthBridge {
 }
 
 func (b *WeiboAuthBridge) SetCallbacks(
-	onCookies func(webCookie, mobileCookie, reason string),
+	onCookies func(webCookie, mobileCookie, reason string, verified bool),
 	onQRCode func(imageBase64 string, expiresIn int),
 	onStatus func(status, message string),
 	onError func(error),
@@ -344,8 +345,12 @@ func (b *WeiboAuthBridge) readLoop() {
 		}
 		switch event.Type {
 		case "cookies":
+			if !event.Verified {
+				log.Printf("[Weibo-auth] ignored unverified cookies event (reason=%s)", event.Reason)
+				continue
+			}
 			if b.onCookies != nil {
-				b.onCookies(event.WebCookie, event.MobileCookie, event.Reason)
+				b.onCookies(event.WebCookie, event.MobileCookie, event.Reason, event.Verified)
 			}
 			b.signalCookies()
 		case "qrcode":
@@ -415,6 +420,20 @@ func (b *WeiboAuthBridge) RequestRefresh(reason string) error {
 	return b.send(weiboAuthCommand{Cmd: "refresh", AllowQRCode: true, Reason: reason})
 }
 
+// RequestRefreshAndWait registers the waiter before sending the command, so a
+// fast cookies event cannot be lost between RequestRefresh and WaitCookies.
+func (b *WeiboAuthBridge) RequestRefreshAndWait(reason string, timeout time.Duration) (bool, error) {
+	ch := make(chan struct{})
+	b.cookieWaitersMu.Lock()
+	b.cookieWaiters = append(b.cookieWaiters, ch)
+	b.cookieWaitersMu.Unlock()
+	if err := b.RequestRefresh(reason); err != nil {
+		b.removeCookieWaiter(ch)
+		return false, err
+	}
+	return b.waitCookieChannel(ch, timeout), nil
+}
+
 func (b *WeiboAuthBridge) signalCookies() {
 	b.cookieWaitersMu.Lock()
 	waiters := b.cookieWaiters
@@ -432,32 +451,38 @@ func (b *WeiboAuthBridge) signalCookies() {
 // WaitCookies blocks until the next cookies event or timeout.
 // Returns true if a cookies event was observed (not necessarily healthy).
 func (b *WeiboAuthBridge) WaitCookies(timeout time.Duration) bool {
-	if timeout <= 0 {
-		timeout = 45 * time.Second
-	}
 	ch := make(chan struct{})
 	b.cookieWaitersMu.Lock()
 	b.cookieWaiters = append(b.cookieWaiters, ch)
 	b.cookieWaitersMu.Unlock()
+	return b.waitCookieChannel(ch, timeout)
+}
 
+func (b *WeiboAuthBridge) waitCookieChannel(ch chan struct{}, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-ch:
 		return true
 	case <-timer.C:
-		// remove self if still pending
-		b.cookieWaitersMu.Lock()
-		kept := b.cookieWaiters[:0]
-		for _, w := range b.cookieWaiters {
-			if w != ch {
-				kept = append(kept, w)
-			}
-		}
-		b.cookieWaiters = kept
-		b.cookieWaitersMu.Unlock()
+		b.removeCookieWaiter(ch)
 		return false
 	}
+}
+
+func (b *WeiboAuthBridge) removeCookieWaiter(ch chan struct{}) {
+	b.cookieWaitersMu.Lock()
+	defer b.cookieWaitersMu.Unlock()
+	kept := b.cookieWaiters[:0]
+	for _, waiter := range b.cookieWaiters {
+		if waiter != ch {
+			kept = append(kept, waiter)
+		}
+	}
+	b.cookieWaiters = kept
 }
 
 func douyinAccountsFromConfig(cfg *config.Config) []douyinAccountCommand {
@@ -625,7 +650,11 @@ func (b *Bot) startWeiboAuthBridge() {
 	}
 }
 
-func (b *Bot) handleWeiboAuthCookies(webCookie, mobileCookie, reason string) {
+func (b *Bot) handleWeiboAuthCookies(webCookie, mobileCookie, reason string, verified bool) {
+	if !verified {
+		log.Printf("[Weibo-auth] refused unverified browser cookies (reason=%s)", reason)
+		return
+	}
 	webCookie = strings.TrimSpace(webCookie)
 	mobileCookie = strings.TrimSpace(mobileCookie)
 	changed := false
@@ -648,6 +677,9 @@ func (b *Bot) handleWeiboAuthCookies(webCookie, mobileCookie, reason string) {
 	}
 	if reason == "login_restored" {
 		b.notifyAdminsQQ("✅ 微博浏览器登录态已恢复，weibo.com 与 m.weibo.cn Cookie 已热更新。")
+		// A QR scan may complete after the original 50-second recovery waiter.
+		// Retry immediately instead of waiting for the next 15-minute tick.
+		go b.tryWeiboSuperAutoSign()
 	}
 }
 

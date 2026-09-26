@@ -2,10 +2,12 @@ package napcat
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pocket48-bot/internal/config"
@@ -19,6 +21,9 @@ type Client struct {
 	sendChan   chan APIRequest
 	mu         sync.Mutex
 	writerOnce sync.Once
+	requestSeq atomic.Uint64
+	pendingMu  sync.Mutex
+	pending    map[string]chan apiResponse
 
 	OnGroupMessage   func(event *Event)
 	OnPrivateMessage func(event *Event)
@@ -38,7 +43,15 @@ func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		cfg:      cfg,
 		sendChan: make(chan APIRequest, 2000), // Buffered channel
+		pending:  make(map[string]chan apiResponse),
 	}
+}
+
+type apiResponse struct {
+	Status  string          `json:"status"`
+	RetCode int             `json:"retcode"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
 }
 
 func (c *Client) Connect() error {
@@ -158,6 +171,10 @@ func (c *Client) readLoop() {
 			return
 		}
 
+		if c.handleAPIResponse(message) {
+			continue
+		}
+
 		var event Event
 		if err := json.Unmarshal(message, &event); err != nil {
 			log.Printf("unmarshal error: %v", err)
@@ -166,6 +183,40 @@ func (c *Client) readLoop() {
 
 		c.handleEvent(&event)
 	}
+}
+
+// handleAPIResponse completes the request identified by OneBot's echo field.
+// NapCat may execute media sends asynchronously, so websocket write completion
+// alone is not a delivery-order guarantee.
+func (c *Client) handleAPIResponse(message []byte) bool {
+	var envelope struct {
+		Echo json.RawMessage `json:"echo"`
+	}
+	if err := json.Unmarshal(message, &envelope); err != nil || len(envelope.Echo) == 0 || string(envelope.Echo) == "null" {
+		return false
+	}
+	var echo string
+	if err := json.Unmarshal(envelope.Echo, &echo); err != nil {
+		echo = strings.Trim(string(envelope.Echo), `"`)
+	}
+	if echo == "" {
+		return false
+	}
+	var response apiResponse
+	if err := json.Unmarshal(message, &response); err != nil {
+		return false
+	}
+	c.pendingMu.Lock()
+	waiter := c.pending[echo]
+	if waiter != nil {
+		delete(c.pending, echo)
+	}
+	c.pendingMu.Unlock()
+	if waiter == nil {
+		return true
+	}
+	waiter <- response
+	return true
 }
 
 func (c *Client) handleEvent(event *Event) {
@@ -189,9 +240,18 @@ func (c *Client) handleEvent(event *Event) {
 }
 
 func (c *Client) writeLoop() {
-	// Keep API requests FIFO. Multiple workers still serialize on the websocket
-	// mutex but may acquire it out of order, which is visible for media bursts.
+	// Keep API requests FIFO through the actual OneBot response. A websocket
+	// write only means NapCat accepted the command; remote media may still be
+	// downloading and used to overtake/lag other messages in the same QQ chat.
 	for req := range c.sendChan {
+		if req.Echo == "" {
+			req.Echo = fmt.Sprintf("bot48-%d", c.requestSeq.Add(1))
+		}
+		waiter := make(chan apiResponse, 1)
+		c.pendingMu.Lock()
+		c.pending[req.Echo] = waiter
+		c.pendingMu.Unlock()
+		started := time.Now()
 		for {
 			c.mu.Lock()
 			conn := c.conn
@@ -224,6 +284,21 @@ func (c *Client) writeLoop() {
 			}
 
 			break
+		}
+
+		select {
+		case response := <-waiter:
+			elapsed := time.Since(started).Round(time.Millisecond)
+			if response.Status != "ok" || response.RetCode != 0 {
+				log.Printf("[NAPCAT] Delivery failed action=%s elapsed=%s retcode=%d message=%s", req.Action, elapsed, response.RetCode, response.Message)
+			} else {
+				log.Printf("[NAPCAT] Delivered action=%s elapsed=%s", req.Action, elapsed)
+			}
+		case <-time.After(15 * time.Minute):
+			c.pendingMu.Lock()
+			delete(c.pending, req.Echo)
+			c.pendingMu.Unlock()
+			log.Printf("[NAPCAT] Delivery response timeout action=%s elapsed=%s; releasing FIFO queue", req.Action, time.Since(started).Round(time.Second))
 		}
 	}
 }

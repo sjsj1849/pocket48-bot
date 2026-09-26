@@ -91,7 +91,7 @@ func TestUnifiedSuperTopicsMergeAndAtomicEdit(t *testing.T) {
 		t.Fatal("editing topic membership must not silently change global switches")
 	}
 
-	added := callUnifiedSuperTopics(t, server, http.MethodPost, `{"oid":"`+newOID+`","name":"新增超话","signEnabled":true,"reportEnabled":true,"groupName":"旧分组"}`)
+	added := callUnifiedSuperTopics(t, server, http.MethodPost, `{"oid":"https://m.weibo.cn/p/index?containerid=1022%3A`+newOID+`_-_feed","name":"新增超话","signEnabled":true,"reportEnabled":true,"groupName":"旧分组"}`)
 	if added.Code != http.StatusOK || reloads != 2 {
 		t.Fatalf("add status=%d reloads=%d body=%s", added.Code, reloads, added.Body.String())
 	}

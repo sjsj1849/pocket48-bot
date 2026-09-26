@@ -186,6 +186,24 @@ func TestPendingBaselineRestartAndMemberSelection(t *testing.T) {
 		t.Fatal("unknown event allowed")
 	}
 }
+
+func TestPendingDoesNotResendOldPostStillVisibleInFeed(t *testing.T) {
+	published := time.Date(2026, 9, 18, 12, 40, 0, 0, time.Local)
+	sub := Subscription{ID: "s", CommunityID: 235, GroupID: 123, Posts: true, Enabled: true}
+	post := Event{ID: "post:old-visible", Kind: "post", CommunityID: 235, MemberID: "jiwoo", Time: published.UnixMilli()}
+	var state Runtime
+
+	if pending := Pending(&state, sub, []Event{post}, published); len(pending) != 0 {
+		t.Fatal("initial baseline sent history", pending)
+	}
+	if pending := Pending(&state, sub, []Event{post}, published.Add(8*24*time.Hour)); len(pending) != 0 {
+		t.Fatal("already seen old post was resent during retention refresh", pending)
+	}
+	if pending := Pending(&state, sub, []Event{post}, published.Add(8*24*time.Hour+time.Minute)); len(pending) != 0 {
+		t.Fatal("old post was resent after its dedupe key should have been refreshed", pending)
+	}
+}
+
 func TestEventsChangedNotificationAndNestedReplies(t *testing.T) {
 	var revision atomic.Int32
 	now := time.Now().UnixMilli()
@@ -269,7 +287,9 @@ func TestPagingAndTranslation(t *testing.T) {
 		if r.URL.Query().Get("fields") != "translated.type(manual).fieldSet(translatedForComment)" {
 			t.Error("wrong comment translation fields")
 		}
-		respond(w, Object{"translated": Object{"body": "你好", "userLanguage": "zh_CN"}})
+		// Weverse currently returns the BCP 47 spelling zh-CN. Keep accepting
+		// older underscore/lowercase variants after normalization as well.
+		respond(w, Object{"translated": Object{"body": "你好", "userLanguage": "zh-CN"}})
 	})
 	items, err := c.pages(context.Background(), "/pages?count=100", "next", "time", now.Add(-time.Minute))
 	if err != nil || len(items) != 2 {
@@ -279,6 +299,42 @@ func TestPagingAndTranslation(t *testing.T) {
 	c.TranslateEvent(context.Background(), &event)
 	if event.Body != "안녕" || event.Translation != "你好" || event.TranslationError != "" {
 		t.Fatal(event)
+	}
+}
+
+func TestEventsIncludesOtherArtistLiveChat(t *testing.T) {
+	now := time.Now().UnixMilli()
+	host := Object{"memberId": "host", "artistOfficialProfile": Object{"officialName": "HOST"}}
+	guest := Object{"memberId": "guest", "artistOfficialProfile": Object{"officialName": "GUEST"}}
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/member/v1.1/community-235/artistMembers":
+			respond(w, []any{host, guest})
+		case "/post/v1.0/community-235/liveTab":
+			respond(w, Object{"onAirLivePosts": Object{"data": []any{Object{"postId": "1-2"}}}})
+		case "/post/v1.0/post-1-2":
+			respond(w, Object{
+				"postId": "1-2", "publishedAt": now, "author": Object{"memberId": "host", "profileName": "호스트"},
+				"extension": Object{"video": Object{"type": "LIVE", "status": "ONAIR", "onAirStartAt": now}, "mediaInfo": Object{"chat": Object{"chatId": "chat"}}},
+			})
+		case "/chat/v1.0/chat-chat/artistMessages":
+			respond(w, Object{"data": []any{
+				Object{"messageTime": now + 1, "content": "안녕", "profile": Object{"memberId": "guest", "profileType": "ARTIST"}, "extras": Object{"translation": []any{Object{"lang": "zh-CN", "content": "你好"}}}},
+				Object{"messageTime": now + 2, "content": "host", "profile": Object{"memberId": "host", "profileType": "ARTIST"}},
+				Object{"messageTime": now + 3, "content": "fan", "profile": Object{"memberId": "fan", "profileType": "FAN"}},
+			}})
+		default:
+			t.Error("unexpected endpoint", r.URL.Path)
+			w.WriteHeader(500)
+		}
+	})
+	mustWrite(t, c.Dir, "settings.json", Settings{Subscriptions: []Subscription{{ID: "s", CommunityID: 235, Slug: "hearts2hearts", Live: true, Enabled: true}}})
+	events, err := c.Events(context.Background())
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if events[0].Kind != "live" || events[1].Kind != "live_chat" || events[1].MemberID != "guest" || events[1].LiveHostMemberID != "host" || events[1].Translation != "你好" {
+		t.Fatalf("unexpected live events: %+v", events)
 	}
 }
 func TestLivePublicSearch(t *testing.T) {

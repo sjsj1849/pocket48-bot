@@ -173,6 +173,14 @@ func xService(configPath string, now time.Time) *serviceState {
 		card.Status = "down"
 		card.StatusText = "扫描异常"
 		card.LastEvent = status.Error
+		if xAutoRecoveringError(status.ErrorCode) {
+			card.Status = "attention"
+			card.StatusText = "自动恢复中"
+			card.SuppressAlert = true
+			if retry, err := time.Parse(time.RFC3339, status.NextRetryAt); err == nil {
+				card.LastEvent = fmt.Sprintf("%s；%s 自动重试", status.Error, retry.Local().Format("15:04:05"))
+			}
+		}
 		return card
 	}
 	if now.Sub(checked) > time.Duration(cfg.PollSeconds)*time.Second+4*time.Minute {
@@ -187,4 +195,13 @@ func xService(configPath string, now time.Time) *serviceState {
 	}
 	card.LastEvent = fmt.Sprintf("扫描完成：%d 条帖子，%d 个订阅；新内容 %d 条已入推送队列", status.Events, count, status.Forwarded)
 	return card
+}
+
+func xAutoRecoveringError(code string) bool {
+	switch code {
+	case "account_unavailable", "timeout", "collection_failed", "timeline_unavailable":
+		return true
+	default:
+		return false
+	}
 }

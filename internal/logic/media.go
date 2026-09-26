@@ -11,6 +11,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"pocket48-bot/internal/napcat"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,7 @@ import (
 
 const (
 	mediaCacheDir    = "/tmp/bot48/mediacache"
-	mediaFileTTL     = 5 * time.Minute
+	mediaFileTTL     = 30 * time.Minute
 	mediaCleanupIntv = 5 * time.Minute
 )
 
@@ -303,4 +304,65 @@ func (b *Bot) localMediaPath(url string) string {
 		return url // fallback
 	}
 	return local
+}
+
+// localizeMessageGroups downloads all media in a notification concurrently,
+// then rewrites its OneBot segments in one pass. This keeps NapCat from doing
+// slow remote downloads while later messages are already being processed.
+func (b *Bot) localizeMessageGroups(groups [][]interface{}) {
+	urls := make(map[string]struct{})
+	for _, group := range groups {
+		for _, item := range group {
+			segment, ok := item.(napcat.MessageSegment)
+			if !ok || (segment.Type != "image" && segment.Type != "video") {
+				continue
+			}
+			for _, key := range []string{"file", "cover"} {
+				if raw := strings.TrimSpace(segment.Data[key]); strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
+					urls[raw] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(urls) == 0 {
+		return
+	}
+
+	localized := make(map[string]string, len(urls))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 6)
+	for raw := range urls {
+		raw := raw
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limit <- struct{}{}
+			local, err := b.downloadMedia(raw)
+			<-limit
+			if err != nil {
+				log.Printf("[Media] Prefetch failed, retaining remote URL: %v", err)
+				local = raw
+			}
+			mu.Lock()
+			localized[raw] = local
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	for _, group := range groups {
+		for i, item := range group {
+			segment, ok := item.(napcat.MessageSegment)
+			if !ok || (segment.Type != "image" && segment.Type != "video") {
+				continue
+			}
+			for _, key := range []string{"file", "cover"} {
+				if local := localized[segment.Data[key]]; local != "" {
+					segment.Data[key] = local
+				}
+			}
+			group[i] = segment
+		}
+	}
 }

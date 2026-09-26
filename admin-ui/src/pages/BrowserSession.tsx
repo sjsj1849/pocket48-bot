@@ -22,6 +22,8 @@ export function BrowserSession() {
   const [xMessage, setXMessage] = useState('')
   const [xConfigured, setXConfigured] = useState(false)
   const [xLoginMessage, setXLoginMessage] = useState('')
+  const [weiboBusy, setWeiboBusy] = useState(false)
+  const [weiboMessage, setWeiboMessage] = useState('')
   const [fit, setFit] = useState(true)
   const [connected, setConnected] = useState(false)
   const [quality, setQuality] = useState<QualityMode>('smooth')
@@ -93,6 +95,15 @@ export function BrowserSession() {
     } catch (reason) { setError(reason) }
     finally { setXBusy(false) }
   }
+  async function weiboAction(action: 'open' | 'sync') {
+    setWeiboBusy(true); setError(null); setWeiboMessage('')
+    try {
+      if (action === 'open' && !rfb.current) await connect()
+      await api('browser/weibo', { method: 'POST', body: JSON.stringify({ action }) })
+      setWeiboMessage(action === 'open' ? '正在打开微博。未登录时请在下方扫码并确认；二维码过期可点击网页中的刷新。登录完成后自动验证、同步 Cookie 并尝试补签。' : '已请求验证并同步；成功后机器人会通知管理员。若仍停留在登录页，请先完成扫码确认。')
+    } catch (reason) { setError(reason) }
+    finally { setWeiboBusy(false) }
+  }
   if (error && !status) return <main className="page-content"><ErrorState error={error} retry={() => void load()} /></main>
   return (
     <main className="page-content browser-page">
@@ -101,6 +112,8 @@ export function BrowserSession() {
       <section className="browser-toolbar x-browser-auth"><div><button className="primary-button" disabled={!status?.available || xBusy || connecting} onClick={() => void xAction('open')}>X 登录</button><button className="secondary-button" disabled={!status?.available || xBusy} onClick={() => void xAction('sync')}>同步 X 登录态</button><span className={`status-pill ${xConfigured ? 'healthy' : 'attention'}`}>{xConfigured ? '会话已保存' : '等待登录'}</span></div><p>在下方网页完成邮箱验证码验证，登录后保存会话供监控使用。</p></section>
       {xMessage ? <p role="status">{xMessage}</p> : null}
       {xLoginMessage ? <p role="status">{xLoginMessage}</p> : null}
+      <section className="browser-toolbar"><div><button className="primary-button" disabled={!status?.available || weiboBusy || connecting} onClick={() => void weiboAction('open')}>微博登录</button><button className="secondary-button" disabled={!status?.available || weiboBusy} onClick={() => void weiboAction('sync')}>同步微博 Cookie</button></div><p>使用当前浏览器保存的登录态，无需输入网址。登录后自动同步；超过等待时间可点击同步。</p></section>
+      {weiboMessage ? <p role="status">{weiboMessage}</p> : null}
       {error ? <div className="inline-error">{error instanceof Error ? error.message : '浏览器连接失败'}</div> : null}
       <section className="browser-toolbar browser-navigation"><div><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('up')}>向上翻页</button><button className="secondary-button" disabled={!connected} onClick={() => scrollRemote('down')}>向下翻页</button><button className="secondary-button" disabled={!connected} onClick={changeFit}>{fit ? '原始大小' : '适应窗口'}</button></div><p>鼠标滚轮可滚动网页；手机可用翻页按钮滚动当前弹窗，输入框保持原样。原始大小模式可拖动桌面的滚动条。</p></section>
       <section className="browser-canvas" ref={screen}><div className="browser-placeholder"><div className="browser-symbol"><Monitor size={28} /></div><strong>{status?.available ? '浏览器桌面已就绪' : '等待浏览器侧卡启动'}</strong><p>{status?.available ? '打开会话后可直接扫码或拖动验证滑块' : 'Bot 启动统一浏览器侧卡后，这里会自动检测到会话'}</p>{status?.available ? <button className="primary-button" onClick={() => void connect()}><MousePointer2 size={16} />打开交互会话</button> : null}</div></section>

@@ -29,6 +29,37 @@ func TestUnseenDouyinPosts(t *testing.T) {
 	}
 }
 
+func TestDouyinWorksAlertsWhenAllAccountsFailAndRecovers(t *testing.T) {
+	var alerts []string
+	m := &DouyinMonitor{
+		cfg: &config.Config{DouyinSubscriptions: map[int64]map[string]*config.DouyinConfig{
+			100: {
+				"a": {SecUserID: "a"},
+				"b": {SecUserID: "b"},
+			},
+		}},
+		worksFailures: make(map[string]time.Time),
+		notifyAdmins:  func(message string) { alerts = append(alerts, message) },
+	}
+	m.noteDouyinWorksFailure("a", "抖音作品浏览器接口拉取失败：status_code=-1")
+	if len(alerts) != 0 {
+		t.Fatalf("partial failure alerted: %#v", alerts)
+	}
+	m.noteDouyinWorksFailure("b", "抖音作品浏览器接口拉取失败：status_code=-1")
+	m.noteDouyinWorksFailure("b", "抖音作品浏览器接口拉取失败：status_code=-1")
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "全链路异常") {
+		t.Fatalf("whole-path alert mismatch: %#v", alerts)
+	}
+	m.noteDouyinWorksSuccess("a")
+	if len(alerts) != 1 {
+		t.Fatalf("partial recovery notified: %#v", alerts)
+	}
+	m.noteDouyinWorksSuccess("b")
+	if len(alerts) != 2 || !strings.Contains(alerts[1], "已恢复") {
+		t.Fatalf("recovery alert mismatch: %#v", alerts)
+	}
+}
+
 func TestCanonicalDouyinPostURL(t *testing.T) {
 	if got := canonicalDouyinPostURL(douyinPost{ID: "123", Type: "note", URL: "https://example.com/long"}); got != "https://www.douyin.com/note/123" {
 		t.Fatalf("note URL=%q", got)
@@ -136,13 +167,28 @@ func TestDouyinOnlineAndEndedOnlyOnce(t *testing.T) {
 		t.Fatalf("duplicate ROOM_ENDED sends=%d", sends)
 	}
 	endSegments, ok := queuedMessages[1].([]interface{})
-	if !ok || len(endSegments) < 2 {
+	if !ok || len(endSegments) != 1 {
 		t.Fatalf("end message=%#v", queuedMessages[1])
 	}
-	endText, ok := endSegments[1].(napcat.MessageSegment)
+	endText, ok := endSegments[0].(napcat.MessageSegment)
 	endedAt := m.liveStates["room-1"].DetectedEndedAt
-	if !ok || !strings.Contains(endText.Data["text"], endedAt.In(time.Local).Format("2006-01-02 15:04:05")) {
+	if !ok || endText.Type != "text" || strings.HasPrefix(endText.Data["text"], "\n") || !strings.Contains(endText.Data["text"], endedAt.In(time.Local).Format("2006-01-02 15:04:05")) {
 		t.Fatalf("end notification has no detected timestamp: %#v", queuedMessages[1])
+	}
+}
+
+func TestDouyinLiveAtAllOnlyOnStart(t *testing.T) {
+	m := newDouyinLiveTestMonitor(t)
+	target := douyinLiveTarget{groupID: 100, cfg: config.DouyinConfig{SecUserID: "creator", Name: "主播", AtAll: true}}
+	state := douyinLiveState{LiveID: "room-1", Name: "主播", DetectedStartedAt: time.Now(), DetectedEndedAt: time.Now()}
+
+	start := m.formatLiveNotification(target, state, true)
+	if len(start) != 2 || start[0].(napcat.MessageSegment).Type != "at" {
+		t.Fatalf("start notification must @all: %#v", start)
+	}
+	end := m.formatLiveNotification(target, state, false)
+	if len(end) != 1 || end[0].(napcat.MessageSegment).Type != "text" {
+		t.Fatalf("end notification must not @all: %#v", end)
 	}
 }
 

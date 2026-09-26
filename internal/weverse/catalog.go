@@ -15,11 +15,13 @@ type Community struct {
 	Members []string `json:"members"`
 }
 type Member struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Image              string `json:"image,omitempty"`
-	latestMomentPostID string
-	latestMomentAt     int64
+	ID                         string `json:"id"`
+	Name                       string `json:"name"`
+	Image                      string `json:"image,omitempty"`
+	latestMomentPostID         string
+	latestMomentAt             int64
+	latestMomentMembershipOnly bool
+	latestMomentLocked         bool
 }
 type catalogCache struct {
 	At    time.Time   `json:"at"`
@@ -118,7 +120,9 @@ func (c *Client) Members(ctx context.Context, id int64) ([]Member, error) {
 				return nil, fmt.Errorf("成员名称格式已变更")
 			}
 			latest := obj(x["artistLatestMoment"])
-			result = append(result, Member{ID: id, Name: name, Image: image, latestMomentPostID: str(latest["postId"]), latestMomentAt: num(latest["publishedAt"])})
+			membershipOnly, _ := latest["membershipOnly"].(bool)
+			locked, _ := latest["locked"].(bool)
+			result = append(result, Member{ID: id, Name: name, Image: image, latestMomentPostID: str(latest["postId"]), latestMomentAt: num(latest["publishedAt"]), latestMomentMembershipOnly: membershipOnly, latestMomentLocked: locked})
 		}
 	}
 	return result, nil

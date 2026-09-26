@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -449,7 +450,6 @@ func normalizeContainerID(uid, containerID string) string {
 	}
 	return canonical
 }
-
 
 // Reconfigure replaces all monitored weibo subscriptions with the new set.
 func (m *WeiboMonitor) AddConfig(groupID int64, uid string, atAll bool, lastID string, onNew func(string, string)) error {
@@ -1995,6 +1995,12 @@ type WeiboSuperSignResult struct {
 	Rank        int // 今日签到排名，若已签到可能为0
 }
 
+var ErrWeiboAuthExpired = errors.New("微博 Web Cookie 已失效")
+
+func IsWeiboAuthExpired(err error) bool {
+	return errors.Is(err, ErrWeiboAuthExpired)
+}
+
 type WeiboSuperCountResult struct {
 	OID                string
 	Name               string
@@ -2149,6 +2155,9 @@ func (m *WeiboMonitor) SignWeiboSuperTopic(oid string) (*WeiboSuperSignResult, e
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("%w: super checkin http=%d", ErrWeiboAuthExpired, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("super checkin http=%d", resp.StatusCode)
 	}
@@ -2156,6 +2165,15 @@ func (m *WeiboMonitor) SignWeiboSuperTopic(oid string) (*WeiboSuperSignResult, e
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	finalURL := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = strings.ToLower(resp.Request.URL.String())
+	}
+	bodyLower := strings.ToLower(string(body))
+	if strings.Contains(finalURL, "passport.weibo") || strings.Contains(finalURL, "/visitor/") ||
+		strings.Contains(bodyLower, "sina visitor system") {
+		return nil, fmt.Errorf("%w: 签到请求被重定向到游客系统", ErrWeiboAuthExpired)
 	}
 
 	var result struct {

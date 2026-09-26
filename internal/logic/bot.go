@@ -359,6 +359,27 @@ type emailAttachment struct {
 	Data []byte
 }
 
+// writeMIMEBase64 writes RFC 2045-compliant base64 with CRLF and lines no
+// longer than 76 characters. Encoding HTML/plain parts prevents SMTP relays
+// and mail clients from rewriting long UTF-8/CSS lines into visible garbage.
+func writeMIMEBase64(buf *bytes.Buffer, data []byte) {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	for len(encoded) > 0 {
+		lineLength := 76
+		if len(encoded) < lineLength {
+			lineLength = len(encoded)
+		}
+		buf.WriteString(encoded[:lineLength])
+		buf.WriteString("\r\n")
+		encoded = encoded[lineLength:]
+	}
+}
+
+func writeMIMETextPart(buf *bytes.Buffer, boundary, contentType, body string) {
+	fmt.Fprintf(buf, "--%s\r\nContent-Type: %s; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n", boundary, contentType)
+	writeMIMEBase64(buf, []byte(body))
+}
+
 // sendAdminHTMLEmail sends a general HTML report (not an "alert" badge).
 // Optional attachments may be text (txt) or binary (png).
 func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody string, attachments ...emailAttachment) error {
@@ -408,8 +429,8 @@ func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody st
 	if hasAttach {
 		fmt.Fprintf(&buf, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", mixedBoundary)
 		fmt.Fprintf(&buf, "--%s\r\nContent-Type: multipart/alternative; boundary=%q\r\n\r\n", mixedBoundary, altBoundary)
-		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, plainBody)
-		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, htmlBody)
+		writeMIMETextPart(&buf, altBoundary, "text/plain", plainBody)
+		writeMIMETextPart(&buf, altBoundary, "text/html", htmlBody)
 		fmt.Fprintf(&buf, "--%s--\r\n", altBoundary)
 		for _, a := range attachments {
 			if len(a.Data) == 0 && strings.TrimSpace(a.Text) == "" {
@@ -438,33 +459,19 @@ func sendAdminHTMLEmail(cfg *config.Config, subjectTitle, htmlBody, plainBody st
 				fmt.Fprintf(&buf, "--%s\r\nContent-Type: %s; name=%q\r\n", mixedBoundary, ct, name)
 				fmt.Fprintf(&buf, "Content-Disposition: attachment; filename=%s\r\n", dispName)
 				buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
-				// RFC 2045: base64 lines <= 76 chars
-				enc := base64.StdEncoding.EncodeToString(a.Data)
-				for i := 0; i < len(enc); i += 76 {
-					end := i + 76
-					if end > len(enc) {
-						end = len(enc)
-					}
-					buf.WriteString(enc[i:end])
-					buf.WriteString("\r\n")
-				}
+				writeMIMEBase64(&buf, a.Data)
 			} else {
 				fmt.Fprintf(&buf, "--%s\r\nContent-Type: %s; name=%q\r\n", mixedBoundary, ct, name)
 				fmt.Fprintf(&buf, "Content-Disposition: attachment; filename=%s\r\n", dispName)
-				buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-				buf.WriteString(a.Text)
-				if !strings.HasSuffix(a.Text, "\n") {
-					buf.WriteString("\r\n")
-				} else {
-					buf.WriteString("\r\n")
-				}
+				buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+				writeMIMEBase64(&buf, []byte(a.Text))
 			}
 		}
 		fmt.Fprintf(&buf, "--%s--\r\n", mixedBoundary)
 	} else {
 		fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", altBoundary)
-		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, plainBody)
-		fmt.Fprintf(&buf, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", altBoundary, htmlBody)
+		writeMIMETextPart(&buf, altBoundary, "text/plain", plainBody)
+		writeMIMETextPart(&buf, altBoundary, "text/html", htmlBody)
 		fmt.Fprintf(&buf, "--%s--\r\n", altBoundary)
 	}
 
@@ -613,26 +620,27 @@ type Bot struct {
 	douyinMonitor      *DouyinMonitor
 	xiaohongshuMonitor *XiaohongshuMonitor
 
-	lastMsgTime            map[int64]int64
-	cursorLoaded           map[int64]bool
-	onMicState             map[int64]bool
-	onMicLastCheck         map[int64]time.Time
-	userDetailCache        map[int64]cachedUserDetail
-	roomInfoCache          map[int64]cachedRoomInfo
-	seenMessageIDs         map[string]time.Time
-	qchatOwnerIdentities   map[int64]storage.QChatIdentity
-	qchatIdentityLoaded    map[int64]bool
-	qchatPendingIdentities map[string]qchatPendingIdentity
-	qchatRESTIdentities    map[string]qchatRESTIdentity
-	roomMediaWG            sync.WaitGroup
-	roomRealtimeOrderMu    sync.Mutex
-	roomRealtimeTails      map[int64]chan struct{}
-	pendingPocketSMSMobile string
-	pocketAuthExpired      bool
-	lastWeiboAuthErrorAt   time.Time
-	lastWeiboAuthRestartAt time.Time
-	weiboAutoSignMu        sync.Mutex
-	mu                     sync.RWMutex
+	lastMsgTime                      map[int64]int64
+	cursorLoaded                     map[int64]bool
+	onMicState                       map[int64]bool
+	onMicLastCheck                   map[int64]time.Time
+	userDetailCache                  map[int64]cachedUserDetail
+	roomInfoCache                    map[int64]cachedRoomInfo
+	seenMessageIDs                   map[string]time.Time
+	qchatOwnerIdentities             map[int64]storage.QChatIdentity
+	qchatIdentityLoaded              map[int64]bool
+	qchatPendingIdentities           map[string]qchatPendingIdentity
+	qchatRESTIdentities              map[string]qchatRESTIdentity
+	roomMediaWG                      sync.WaitGroup
+	roomRealtimeOrderMu              sync.Mutex
+	roomRealtimeTails                map[int64]chan struct{}
+	pendingPocketSMSMobile           string
+	pocketAuthExpired                bool
+	lastWeiboAuthErrorAt             time.Time
+	lastWeiboAuthRestartAt           time.Time
+	lastWeiboAutoSignFailureNotifyAt time.Time
+	weiboAutoSignMu                  sync.Mutex
+	mu                               sync.RWMutex
 
 	isMonitoring      bool
 	isLiveMonitoring  bool
@@ -895,6 +903,7 @@ func (b *Bot) reloadSubscriptions() {
 	b.cfg.WeiboSuperTopics = cfg.WeiboSuperTopics
 	b.cfg.WeiboSuperCountTopics = cfg.WeiboSuperCountTopics
 	b.cfg.WeiboSuperCountGroups = cfg.WeiboSuperCountGroups
+	b.cfg.WeiboSuperCountImageGroups = cfg.WeiboSuperCountImageGroups
 
 	// Bot / alert / report (no process spawn)
 	b.cfg.BoundGroupID = cfg.BoundGroupID
@@ -1054,6 +1063,8 @@ func (b *Bot) Start() error {
 	go b.runWeverseLoop(weverseCtx)
 	go b.runXLoop(weverseCtx)
 	go b.runInstagramLoop(weverseCtx)
+	go b.runMelonLoop(weverseCtx)
+	go b.runMelonMusicWaveLoop(weverseCtx)
 	go b.runWeiboSuperAutoSignLoop()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()

@@ -65,18 +65,20 @@ type Settings struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 }
 type Status struct {
-	LastCheck   string            `json:"lastCheck"`
-	LastSuccess string            `json:"lastSuccess"`
-	StartedAt   string            `json:"startedAt"`
-	Events      int               `json:"events"`
-	Forwarded   int               `json:"forwarded"`
-	Error       string            `json:"error,omitempty"`
-	ErrorCode   string            `json:"errorCode,omitempty"`
-	Targets     map[string]string `json:"targets"`
+	LastCheck           string            `json:"lastCheck"`
+	LastSuccess         string            `json:"lastSuccess"`
+	StartedAt           string            `json:"startedAt"`
+	NextRetryAt         string            `json:"nextRetryAt,omitempty"`
+	Events              int               `json:"events"`
+	Forwarded           int               `json:"forwarded"`
+	ConsecutiveFailures int               `json:"consecutiveFailures,omitempty"`
+	Error               string            `json:"error,omitempty"`
+	ErrorCode           string            `json:"errorCode,omitempty"`
+	Targets             map[string]string `json:"targets"`
 }
 
 func LoadSettings(dir string) (Settings, error) {
-	s := Settings{PollSeconds: 120, Subscriptions: []Subscription{}}
+	s := Settings{PollSeconds: 300, Subscriptions: []Subscription{}}
 	e := Read(dir, "settings.json", &s)
 	return s, e
 }

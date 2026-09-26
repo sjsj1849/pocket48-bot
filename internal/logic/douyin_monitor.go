@@ -148,6 +148,11 @@ type DouyinMonitor struct {
 	captchaHits      []time.Time
 	captchaLastAlert time.Time
 
+	// Works health: alert when every enabled creator has failed inside one
+	// polling window, then notify again only after every creator recovers.
+	worksFailures   map[string]time.Time
+	worksAlertSince time.Time
+
 	// IM disconnect watchdog: silent sidecar/bot restart → email only if still down after auto-heal.
 	imDisconnectedAt      time.Time
 	imLastDisconnectAlert time.Time
@@ -193,6 +198,7 @@ func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins fu
 			return keyring.Get(douyinLiveCookieService, account)
 		},
 		imConversations: make(map[string]douyinIMTarget),
+		worksFailures:   make(map[string]time.Time),
 		imWatchdogStop:  make(chan struct{}),
 	}
 	m.loadLiveStatesFromDisk()
@@ -465,11 +471,79 @@ func (m *DouyinMonitor) HandleBrowserEvent(event douyinBrowserEvent) {
 	case "account_error", "error":
 		log.Printf("[Douyin] %s %s: %s", event.Type, event.SecUserID, event.Message)
 		m.noteDouyinCaptchaError(event.SecUserID, event.Message)
+		m.noteDouyinWorksFailure(event.SecUserID, event.Message)
 	case "status":
 		log.Printf("[Douyin] status=%s message=%s", event.Status, event.Message)
 		if event.Status == "login_error" {
 			m.notifyAdmins("⚠️ 抖音登录二维码生成失败：" + event.Message)
 		}
+	}
+}
+
+func (m *DouyinMonitor) enabledDouyinWorksAccountsLocked() map[string]bool {
+	result := make(map[string]bool)
+	for _, group := range m.cfg.DouyinSubscriptions {
+		for sec, item := range group {
+			if item != nil && !item.Disabled && !item.WorksDisabled {
+				if id := strings.TrimSpace(firstNonEmptyText(item.SecUserID, sec)); id != "" {
+					result[id] = true
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (m *DouyinMonitor) noteDouyinWorksFailure(secUserID, message string) {
+	if !strings.Contains(message, "抖音作品") {
+		return
+	}
+	secUserID = strings.TrimSpace(secUserID)
+	if secUserID == "" {
+		return
+	}
+	const window = 10 * time.Minute
+	now := time.Now()
+	m.mu.Lock()
+	enabled := m.enabledDouyinWorksAccountsLocked()
+	if !enabled[secUserID] {
+		m.mu.Unlock()
+		return
+	}
+	for sec, failedAt := range m.worksFailures {
+		if !enabled[sec] || now.Sub(failedAt) > window {
+			delete(m.worksFailures, sec)
+		}
+	}
+	m.worksFailures[secUserID] = now
+	failed, total := len(m.worksFailures), len(enabled)
+	shouldAlert := total > 0 && failed == total && m.worksAlertSince.IsZero()
+	if shouldAlert {
+		m.worksAlertSince = now
+	}
+	m.mu.Unlock()
+	log.Printf("[Douyin] works health failures=%d/%d window=%s", failed, total, window)
+	if shouldAlert && m.notifyAdmins != nil {
+		m.notifyAdmins(fmt.Sprintf("⚠️ 抖音作品监控全链路异常\n%d/%d 个启用账号在最近 %s 内均拉取失败，新作品将无法通知。\n最近错误：%s", failed, total, window, truncateDouyinLogText(message, 180)))
+	}
+}
+
+func (m *DouyinMonitor) noteDouyinWorksSuccess(secUserID string) {
+	secUserID = strings.TrimSpace(secUserID)
+	if secUserID == "" {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	delete(m.worksFailures, secUserID)
+	alertSince := m.worksAlertSince
+	recovered := !alertSince.IsZero() && len(m.worksFailures) == 0
+	if recovered {
+		m.worksAlertSince = time.Time{}
+	}
+	m.mu.Unlock()
+	if recovered && m.notifyAdmins != nil {
+		m.notifyAdmins(fmt.Sprintf("✅ 抖音作品监控已恢复\n全部启用账号均已重新取得作品列表，本次异常持续约 %s。", now.Sub(alertSince).Round(time.Minute)))
 	}
 }
 
@@ -558,6 +632,8 @@ func firstNonEmptyText(values ...string) string {
 
 const douyinIMRecoveryMarkerPath = "storage/douyin-im-recovery.json"
 
+const douyinIMPostRestartAlertDelay = 3 * time.Minute
+
 type douyinIMRecoveryMarker struct {
 	Reason      string `json:"reason"`
 	RestartedAt int64  `json:"restarted_at_ms"`
@@ -601,7 +677,7 @@ func touchDouyinIMRecoveryAlerted(marker *douyinIMRecoveryMarker) {
 // StartIMWatchdog monitors prolonged IM disconnect and escalates silently:
 // 1) after 45s: restart weibo-auth sidecar (IM lives there)
 // 2) after 2m still down: exit process so systemd restarts bot (writes recovery marker)
-// 3) email ONLY if still down ~90s after auto restarts (manual intervention needed)
+// 3) email ONLY if still down 3m after auto restarts (manual intervention needed)
 func (m *DouyinMonitor) StartIMWatchdog() {
 	m.imWatchdogOnce.Do(func() {
 		if m.imWatchdogStop == nil {
@@ -642,9 +718,9 @@ func (m *DouyinMonitor) tickIMWatchdog() {
 
 	// After bot restart for IM: marker survives process death. Only then may we email.
 	if marker := readDouyinIMRecoveryMarker(); marker != nil {
-		// Wait for IM to come back after boot before paging a human (was 3m; user: too slow).
+		// Allow IM up to three minutes to reconnect after boot before paging a human.
 		sinceRestart := now.Sub(time.UnixMilli(marker.RestartedAt))
-		if sinceRestart >= 90*time.Second {
+		if sinceRestart >= douyinIMPostRestartAlertDelay {
 			lastAlert := time.Time{}
 			if marker.AlertedAt > 0 {
 				lastAlert = time.UnixMilli(marker.AlertedAt)
@@ -1426,6 +1502,7 @@ func (m *DouyinMonitor) handlePosts(event douyinBrowserEvent) {
 		return
 	}
 	sec := strings.TrimSpace(event.SecUserID)
+	m.noteDouyinWorksSuccess(sec)
 	type dispatch struct {
 		groupID int64
 		cfg     config.DouyinConfig
@@ -2003,7 +2080,7 @@ func (m *DouyinMonitor) formatLiveNotification(target douyinLiveTarget, state do
 		}
 	}
 	segments := make([]interface{}, 0, 2)
-	if target.cfg.AtAll {
+	if online && target.cfg.AtAll {
 		segments = append(segments, napcat.AtSegment("all"))
 		text = "\n" + text
 	}

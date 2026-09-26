@@ -19,11 +19,11 @@ func WeverseReportHTML(r weverse.Report) string {
 	if !r.Complete {
 		body.WriteString(`<p class="note" style="color:#a15c00">历史尚未完整回采：以下为已采集数量，缺失不代表未发布。</p>`)
 	}
-	header := `<tr><th>成员</th><th>帖子</th><th>帖内照片</th><th>累计评论</th><th>累计点赞</th><th>回复</th><th>粉丝</th><th>队友</th><th>自己</th><th>未知</th><th>视频</th><th>Moment</th><th>直播</th></tr>`
+	header := `<tr><th>成员</th><th>帖子</th><th>帖内照片</th><th>累计评论</th><th>累计点赞</th><th>回复</th><th>粉丝</th><th>队友</th><th>自己</th><th>未知</th><th>视频</th><th>Moment</th><th>直播</th><th>直播弹幕</th><th>参与直播</th></tr>`
 	table := func(members []weverse.MemberCount) {
 		rows := make([][]reportMetricCell, len(members))
 		for i, m := range members {
-			rows[i] = []reportMetricCell{metric(int64(m.Posts)), metric(int64(m.PostPhotos)), {Text: weverse.EngagementText(m.PostComments, m.CommentPosts, m.Posts), Value: m.PostComments, Known: m.CommentPosts == m.Posts}, {Text: weverse.EngagementText(m.PostLikes, m.LikePosts, m.Posts), Value: m.PostLikes, Known: m.LikePosts == m.Posts}, metric(int64(m.Replies)), metric(int64(m.FanReplies)), metric(int64(m.MemberReplies)), metric(int64(m.SelfReplies)), metric(int64(m.UnknownReplies)), metric(int64(m.Videos)), {Text: fmt.Sprintf("%d*", m.Moments), Value: int64(m.Moments), Known: true}, metric(int64(m.Lives))}
+			rows[i] = []reportMetricCell{metric(int64(m.Posts)), metric(int64(m.PostPhotos)), {Text: weverse.EngagementText(m.PostComments, m.CommentPosts, m.Posts), Value: m.PostComments, Known: m.CommentPosts == m.Posts}, {Text: weverse.EngagementText(m.PostLikes, m.LikePosts, m.Posts), Value: m.PostLikes, Known: m.LikePosts == m.Posts}, metric(int64(m.Replies)), metric(int64(m.FanReplies)), metric(int64(m.MemberReplies)), metric(int64(m.SelfReplies)), metric(int64(m.UnknownReplies)), metric(int64(m.Videos)), {Text: fmt.Sprintf("%d*", m.Moments), Value: int64(m.Moments), Known: true}, metric(int64(m.Lives)), metric(int64(m.LiveChats)), metric(int64(m.LiveChatLives))}
 		}
 		body.WriteString(`<table><thead>` + header + `</thead><tbody>`)
 		for i, m := range members {
@@ -70,27 +70,44 @@ func WeverseReportHTML(r weverse.Report) string {
 		}
 		table(month.Members)
 	}
-	matrix := func(title, axis string, direct bool) {
-		fmt.Fprintf(&body, `<h2>%s</h2><p class="note">行：回复者；列：%s。连续斜线表示自己，空白表示已采集记录中没有互动。</p><table class="interaction-matrix"><colgroup><col style="width:140px"><col span="8"></colgroup><thead><tr><th class="matrix-corner"><span class="corner-column">%s</span><span class="corner-row">回复者</span></th>`, title, axis, axis)
-		for _, m := range r.Members {
-			fmt.Fprintf(&body, `<th>%s</th>`, html.EscapeString(m.Name))
+	matrix := func(title, axis, rowAxis, kind string) {
+		targets := make([]weverse.LiveChatTarget, 0, len(r.Members))
+		if kind == "live_chat" {
+			targets = append(targets, r.LiveChatTargets...)
+		} else {
+			for _, m := range r.Members {
+				targets = append(targets, weverse.LiveChatTarget{ID: m.ID, Name: m.Name, IsMember: true})
+			}
+		}
+		note := "连续斜线表示自己，空白表示已采集记录中没有互动。"
+		if kind == "live_chat" {
+			note = "单元格为“弹幕条数 / 参与直播场次”；连续斜线表示自己，空白表示已采集记录中没有互动。团体或未识别发起账号单独列示。"
+		}
+		fmt.Fprintf(&body, `<h2>%s</h2><p class="note">行：%s；列：%s。%s</p><table class="interaction-matrix"><colgroup><col style="width:140px"><col span="%d"></colgroup><thead><tr><th class="matrix-corner"><span class="corner-column">%s</span><span class="corner-row">%s</span></th>`, title, rowAxis, axis, note, len(targets), axis, rowAxis)
+		for _, target := range targets {
+			fmt.Fprintf(&body, `<th>%s</th>`, html.EscapeString(target.Name))
 		}
 		body.WriteString(`</tr></thead><tbody>`)
 		for _, m := range r.Members {
 			fmt.Fprintf(&body, `<tr><th scope="row">%s</th>`, html.EscapeString(m.Name))
-			for _, target := range r.Members {
+			for _, target := range targets {
 				text := ""
 				class := ""
-				if m.ID == target.ID {
+				if target.IsMember && m.ID == target.ID {
 					text = ""
 					class = "matrix-self"
 				} else {
 					count := m.Teammates[target.ID]
-					if direct {
+					if kind == "direct" {
 						count = m.ReplyMembers[target.ID]
+					} else if kind == "live_chat" {
+						count = m.LiveChatHosts[target.ID]
 					}
 					if count > 0 {
 						text = fmt.Sprint(count)
+						if kind == "live_chat" {
+							text = fmt.Sprintf("%d条 / %d场", count, m.LiveChatHostLives[target.ID])
+						}
 					}
 				}
 				fmt.Fprintf(&body, `<td class="%s">%s</td>`, class, text)
@@ -99,8 +116,9 @@ func WeverseReportHTML(r weverse.Report) string {
 		}
 		body.WriteString(`</tbody></table>`)
 	}
-	matrix("直接回复了哪位成员", "被回复成员", true)
-	matrix("在哪位队友的帖子下回复", "主帖作者", false)
+	matrix("直接回复了哪位成员", "被回复成员", "回复者", "direct")
+	matrix("在哪位队友的帖子下回复", "主帖作者", "回复者", "post")
+	matrix("在哪位成员的直播中发送弹幕", "直播发起成员", "弹幕成员", "live_chat")
 	body.WriteString(`<h2>直播时长</h2><table><tr><th>成员</th><th>已知直播时长 / 有时长场次</th><th>已确认单人直播时长 / 场次</th></tr>`)
 	for _, m := range r.Members {
 		total, solo := "未取得时长", "未确认单人"
@@ -150,7 +168,7 @@ func WeverseReportHTML(r weverse.Report) string {
 	}
 	body.WriteString(`</table>`)
 	return fmt.Sprintf(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>body{font-family:Arial,"Microsoft YaHei",sans-serif;background:#f5f7fb;color:#172033;margin:0;padding:16px}#report-card{max-width:880px;margin:auto;background:white;padding:20px}h1{font-size:23px}h2{font-size:17px;margin:24px 0 12px}table{width:100%%;border-collapse:collapse;font-size:11px}th,td{padding:9px 4px;border-bottom:1px solid #e7ebf1;text-align:right}th{background:#edf4ff}td:first-child,th:first-child{text-align:left}tr:nth-child(even){background:#f8fafc}.metric-max{color:#1d4ed8;background:#eff6ff;font-weight:800}.metric-min{color:#c2410c;background:#fff7ed;font-weight:800}.interaction-matrix{table-layout:fixed}.interaction-matrix th,.interaction-matrix td{text-align:center;border:1px solid #dce3ee;height:25px}.interaction-matrix th:first-child{text-align:left}.interaction-matrix .matrix-corner{position:relative;height:58px;padding:0;background:#edf4ff}.matrix-corner:after{content:"";position:absolute;inset:0;background:linear-gradient(to top right,transparent calc(50%% - .6px),#8994a5 50%%,transparent calc(50%% + .6px));pointer-events:none}.corner-column{position:absolute;right:8px;top:8px}.corner-row{position:absolute;left:8px;bottom:8px}.interaction-matrix tbody{position:relative}.interaction-matrix tbody:after{content:"";position:absolute;top:0;bottom:0;left:140px;right:0;pointer-events:none;background-image:url("data:image/svg+xml,%%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100' preserveAspectRatio='none'%%3E%%3Cpath d='M0 0L100 100' stroke='%%238994a5' stroke-width='1.3' vector-effect='non-scaling-stroke'/%%3E%%3C/svg%%3E");background-size:100%% 100%%;z-index:1}.interaction-matrix .matrix-self{background:#eef1f5}.note{font-size:12px;line-height:1.8;color:#667085;white-space:pre-line}ul{line-height:1.8;font-size:13px}</style></head><body><article id="report-card"><h1>%s · %s</h1><p class="note">%s 至 %s（北京时间） · %d 位成员
-* Moment 为已采集数量；历史可能过期。整张图中各月均采用同一统计口径。</p>%s<h2>统计范围</h2><p class="note">%s</p><p class="note">Excel 含逐月成员数据、直接回复矩阵、队友主帖矩阵、活动原文和累计互动采集时间。</p></article></body></html>`, html.EscapeString(r.Community), html.EscapeString(r.DisplayTitle()), r.Period.Start.Format("2006-01-02"), r.Period.End.Add(-time.Second).Format("2006-01-02"), len(r.Members), body.String(), html.EscapeString(r.CoverageNote()))
+* Moment 为已采集数量；历史可能过期。整张图中各月均采用同一统计口径。</p>%s<h2>统计范围</h2><p class="note">%s</p><p class="note">Excel 含逐月成员数据、直接回复矩阵、队友主帖矩阵、直播弹幕条数矩阵、参与直播场次矩阵与明细、活动原文和累计互动采集时间。</p></article></body></html>`, html.EscapeString(r.Community), html.EscapeString(r.DisplayTitle()), r.Period.Start.Format("2006-01-02"), r.Period.End.Add(-time.Second).Format("2006-01-02"), len(r.Members), body.String(), html.EscapeString(r.CoverageNote()))
 }
 func SendWeverseReport(cfg *config.Config, r weverse.Report) error {
 	xlsx, e := r.XLSX()

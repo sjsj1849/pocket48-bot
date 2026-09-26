@@ -32,10 +32,24 @@ func TestReportDirectTargetsMonthlyBreakdownAndPostOnlyPhotos(t *testing.T) {
 	live.Kind = "live"
 	live.PostID = "l"
 	live.LiveDuration = 120
-	r := AggregateReport(ReportSettings{CommunityID: 235}, p, members, []Event{base, fan, teammate, self, unknown, moment, live, fan})
+	chat := Event{CommunityID: 235, MemberID: "a", Author: "A", PostID: "live-b", Time: p.Start.AddDate(0, 2, 0).UnixMilli(), Kind: "live_chat", ID: "live_chat:one", LiveHostMemberID: "b", LiveHostAuthor: "B"}
+	chatAgain := chat
+	chatAgain.ID = "live_chat:two"
+	chatOtherLive := chat
+	chatOtherLive.ID = "live_chat:three"
+	chatOtherLive.PostID = "live-b-2"
+	groupChat := chat
+	groupChat.ID = "live_chat:group"
+	groupChat.PostID = "live-group"
+	groupChat.LiveHostMemberID = "group-account"
+	groupChat.LiveHostAuthor = "Official"
+	r := AggregateReport(ReportSettings{CommunityID: 235}, p, members, []Event{base, fan, teammate, self, unknown, moment, live, fan, chat, chatAgain, chatOtherLive, groupChat})
 	m := r.Members[0]
-	if m.Posts != 1 || m.PostPhotos != 2 || m.PostComments != 0 || m.PostLikes != 42 || m.CommentPosts != 1 || m.Replies != 4 || m.FanReplies != 1 || m.MemberReplies != 1 || m.SelfReplies != 1 || m.UnknownReplies != 1 || m.ReplyMembers["b"] != 1 || m.Videos != 2 || m.Moments != 1 || m.LiveSeconds != 120 || m.SoloLives != 0 {
+	if m.Posts != 1 || m.PostPhotos != 2 || m.PostComments != 0 || m.PostLikes != 42 || m.CommentPosts != 1 || m.Replies != 4 || m.FanReplies != 1 || m.MemberReplies != 1 || m.SelfReplies != 1 || m.UnknownReplies != 1 || m.ReplyMembers["b"] != 1 || m.Videos != 2 || m.Moments != 1 || m.LiveSeconds != 120 || m.SoloLives != 0 || m.LiveChats != 4 || m.LiveChatLives != 3 || m.LiveChatHosts["b"] != 3 || m.LiveChatHostLives["b"] != 2 || m.LiveChatHosts["group-account"] != 1 || m.LiveChatHostLives["group-account"] != 1 {
 		t.Fatalf("incorrect distinct statistics: %+v", m)
+	}
+	if len(r.LiveChatTargets) != 3 || r.LiveChatTargets[2].Name != "团体账号：Official" || r.LiveChatTargets[2].IsMember {
+		t.Fatalf("special live host missing from matrix: %+v", r.LiveChatTargets)
 	}
 	if len(r.Months) != 12 || r.Months[0].Members[0].Posts != 1 || r.Months[1].Members[0].Replies != 4 {
 		t.Fatal("missing monthly comparison", r.Months)

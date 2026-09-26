@@ -32,6 +32,8 @@ type Event struct {
 	ParentMemberID           string            `json:"parentMemberId,omitempty"`
 	ParentContextUnavailable bool              `json:"parentContextUnavailable,omitempty"`
 	ParentProfileType        string            `json:"parentProfileType,omitempty"`
+	MembershipOnly           bool              `json:"membershipOnly,omitempty"`
+	PasswordProtected        bool              `json:"passwordProtected,omitempty"`
 	PostContext              *AIPostContext    `json:"postContext,omitempty"`
 	Translation              string            `json:"translation,omitempty"`
 	ParentTranslation        string            `json:"parentTranslation,omitempty"`
@@ -43,6 +45,9 @@ type Event struct {
 	LiveStartedAt            int64             `json:"liveStartedAt,omitempty"`
 	LiveEndedAt              int64             `json:"liveEndedAt,omitempty"`
 	LiveDuration             int64             `json:"liveDuration,omitempty"`
+	LiveChatID               string            `json:"liveChatId,omitempty"`
+	LiveHostMemberID         string            `json:"liveHostMemberId,omitempty"`
+	LiveHostAuthor           string            `json:"liveHostAuthor,omitempty"`
 	Time                     int64             `json:"time"`
 	PostID                   string            `json:"postId"`
 	CommentID                string            `json:"commentId,omitempty"`
@@ -92,7 +97,9 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 	if kind == "live" && num(video["onAirStartAt"]) > 0 {
 		timestamp = num(video["onAirStartAt"])
 	}
-	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id}
+	membershipOnly, _ := p["membershipOnly"].(bool)
+	locked, _ := p["locked"].(bool)
+	e := Event{ID: kind + ":" + id, Kind: kind, CommunityID: cid, MemberID: text(author, "memberId", "id"), Author: str(author["profileName"]), Body: body, PostID: id, Time: timestamp, URL: "https://weverse.io/" + slug + "/" + section + "/" + id, MembershipOnly: membershipOnly, PasswordProtected: locked}
 	if kind == "moment" {
 		e.URL = "https://weverse.io/" + slug + "/moment/" + e.MemberID + "/post/" + id
 	}
@@ -134,6 +141,14 @@ func eventFromPost(p Object, slug string, cid int64) (Event, error) {
 		} else {
 			e.CoverURL = ""
 		}
+	}
+	// Membership-only content must never be redistributed. Keep only enough
+	// metadata to notify that it exists and to deduplicate the notification.
+	if e.MembershipOnly || e.PasswordProtected {
+		e.Body = ""
+		e.Images = nil
+		e.Videos = nil
+		e.CoverURL = ""
 	}
 	return e, nil
 }
@@ -253,6 +268,10 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 					if e = c.call(ctx, ep, true, &full); e != nil {
 						return e
 					}
+					// Weverse may retain locked=true in an otherwise successfully
+					// unlocked response. The explicit verified password means its body
+					// and attachments are safe to parse as ordinary password content.
+					full["locked"] = false
 					p = full
 				}
 			}
@@ -280,14 +299,45 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			// of the notification feed, which may omit an artist's notification.
 			for _, member := range members {
 				id := member.latestMomentPostID
-				if !idRE.MatchString(id) || (!since.IsZero() && member.latestMomentAt > 0 && member.latestMomentAt < since.UnixMilli()) {
+				// A restricted Moment may have been skipped by an older bot version.
+				// Keep exposing the current restricted item until the runtime cursor has
+				// recorded it; Pending still establishes a baseline on first setup.
+				if !idRE.MatchString(id) || (!(member.latestMomentMembershipOnly || member.latestMomentLocked) && !since.IsZero() && member.latestMomentAt > 0 && member.latestMomentAt < since.UnixMilli()) {
 					continue
 				}
 				if _, ok := all["moment:"+id]; ok {
 					continue
 				}
+				if member.latestMomentMembershipOnly {
+					all["moment:"+id] = Event{
+						ID:             "moment:" + id,
+						Kind:           "moment",
+						CommunityID:    cid,
+						MemberID:       member.ID,
+						Author:         member.Name,
+						PostID:         id,
+						Time:           member.latestMomentAt,
+						URL:            "https://weverse.io/" + s.Slug + "/moment/" + member.ID + "/post/" + id,
+						MembershipOnly: true,
+					}
+					continue
+				}
+				if member.latestMomentLocked {
+					ep, passwordErr := c.withPostPassword("/post/v1.0/post-" + id + "?fieldSet=postV1")
+					if passwordErr != nil {
+						return nil, passwordErr
+					}
+					if !strings.Contains(ep, "lockPassword=") {
+						all["moment:"+id] = Event{ID: "moment:" + id, Kind: "moment", CommunityID: cid, MemberID: member.ID, Author: member.Name, PostID: id, Time: member.latestMomentAt, URL: "https://weverse.io/" + s.Slug + "/moment/" + member.ID + "/post/" + id, PasswordProtected: true}
+						continue
+					}
+				}
 				var post Object
 				if err := c.call(ctx, "/post/v1.0/post-"+id+"?fieldSet=postV1", true, &post); err != nil {
+					if errors.Is(err, ErrPostPassword) && member.latestMomentLocked {
+						all["moment:"+id] = Event{ID: "moment:" + id, Kind: "moment", CommunityID: cid, MemberID: member.ID, Author: member.Name, PostID: id, Time: member.latestMomentAt, URL: "https://weverse.io/" + s.Slug + "/moment/" + member.ID + "/post/" + id, PasswordProtected: true}
+						continue
+					}
 					if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 						continue
 					}
@@ -309,8 +359,33 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 				return nil, fmt.Errorf("直播列表格式已变更")
 			}
 			for _, p := range onAir {
-				if err := addPost(p); err != nil {
+				id := text(obj(p), "postId", "id")
+				if !idRE.MatchString(id) {
+					return nil, fmt.Errorf("直播缺少内容编号")
+				}
+				var full Object
+				if err := c.call(ctx, "/post/v1.0/post-"+id+"?fieldSet=postV1", true, &full); err != nil {
 					return nil, err
+				}
+				if err := addPost(full); err != nil {
+					return nil, err
+				}
+				live, err := eventFromPost(full, s.Slug, cid)
+				if err != nil {
+					return nil, err
+				}
+				if live.ID == "" {
+					continue
+				}
+				if name := artistNames[live.MemberID]; name != "" {
+					live.Author = name
+				}
+				chats, err := c.liveChatEvents(ctx, full, live, s.Slug, cid, artistNames, since, 20)
+				if err != nil {
+					return nil, err
+				}
+				for _, chat := range chats {
+					all[chat.ID] = chat
 				}
 			}
 		}
@@ -422,10 +497,10 @@ func Matches(s Subscription, e Event) bool {
 	if !s.Enabled || s.CommunityID != e.CommunityID {
 		return false
 	}
-	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_end" && e.Kind != "live_replay" && e.Kind != "moment" {
+	if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_end" && e.Kind != "live_replay" && e.Kind != "live_chat" && e.Kind != "moment" {
 		return false
 	}
-	if ((e.Kind == "post" || e.Kind == "moment") && !s.Posts) || (e.Kind == "comment" && !s.Comments) || ((e.Kind == "live" || e.Kind == "live_end" || e.Kind == "live_replay") && !s.Live) {
+	if ((e.Kind == "post" || e.Kind == "moment") && !s.Posts) || (e.Kind == "comment" && !s.Comments) || ((e.Kind == "live" || e.Kind == "live_end" || e.Kind == "live_replay" || e.Kind == "live_chat") && !s.Live) {
 		return false
 	}
 	if len(s.MemberIDs) == 0 {

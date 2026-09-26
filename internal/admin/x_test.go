@@ -36,6 +36,19 @@ func TestXServiceReflectsActualScan(t *testing.T) {
 	if got := xService(path, now); got.LastEvent != "会话失效" || got.Status != "down" {
 		t.Fatal("collector errors must be visible")
 	}
+	status.Error = "X 账号暂不可用，请检查登录状态或等待限流恢复"
+	status.ErrorCode = "account_unavailable"
+	status.NextRetryAt = now.Add(5 * time.Minute).Format(time.RFC3339)
+	_ = xmonitor.Write(dir, "status.json", status)
+	if got := xService(path, now); got.StatusText != "自动恢复中" || !got.SuppressAlert || shouldAlertService(*got) {
+		t.Fatalf("rate limits should be visible but silent: %+v", got)
+	}
+	status.Error = "X 登录态需包含 auth_token 和 ct0"
+	status.ErrorCode = "invalid_session"
+	_ = xmonitor.Write(dir, "status.json", status)
+	if got := xService(path, now); got.SuppressAlert || !shouldAlertService(*got) {
+		t.Fatalf("login failures still require email: %+v", got)
+	}
 	cfg.Enabled = false
 	_ = xmonitor.SaveSettings(dir, cfg)
 	if got := xService(path, now); got == nil || got.StatusText != "未启用" {

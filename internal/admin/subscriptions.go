@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -183,6 +184,68 @@ type weiboStoredSub struct {
 	LastID string `json:"last_id,omitempty"`
 }
 
+var weiboUIDPattern = regexp.MustCompile(`^\d{5,20}$`)
+var weiboUIDContainerPattern = regexp.MustCompile(`^(?:100505|107603)(\d{5,20})(?:\D.*)?$`)
+
+// normalizeWeiboUID accepts the legacy numeric UID as well as common desktop
+// and mobile Weibo profile/post links whose path or query contains the UID.
+func normalizeWeiboUID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if weiboUIDPattern.MatchString(raw) {
+		return raw
+	}
+	// A copied link can be surrounded by explanatory text. Pull out the URL so
+	// url.Parse still sees the correct host and path.
+	if start := strings.Index(raw, "http://"); start >= 0 {
+		raw = strings.Fields(raw[start:])[0]
+	} else if start := strings.Index(raw, "https://"); start >= 0 {
+		raw = strings.Fields(raw[start:])[0]
+	} else if strings.HasPrefix(strings.ToLower(raw), "weibo.com/") ||
+		strings.HasPrefix(strings.ToLower(raw), "www.weibo.com/") ||
+		strings.HasPrefix(strings.ToLower(raw), "m.weibo.cn/") ||
+		strings.HasPrefix(strings.ToLower(raw), "weibo.cn/") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(strings.TrimRight(raw, "，。；;、)]}＞>"))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if host != "weibo.com" && host != "weibo.cn" && !strings.HasSuffix(host, ".weibo.com") && !strings.HasSuffix(host, ".weibo.cn") {
+		return ""
+	}
+	query := parsed.Query()
+	for _, key := range []string{"uid", "value"} {
+		if candidate := strings.TrimSpace(query.Get(key)); weiboUIDPattern.MatchString(candidate) {
+			return candidate
+		}
+	}
+	if containerID := strings.TrimSpace(query.Get("containerid")); containerID != "" {
+		if match := weiboUIDContainerPattern.FindStringSubmatch(containerID); len(match) == 2 {
+			return match[1]
+		}
+	}
+	parts := strings.FieldsFunc(parsed.EscapedPath(), func(r rune) bool { return r == '/' })
+	for index, part := range parts {
+		candidate, unescapeErr := url.PathUnescape(part)
+		if unescapeErr != nil {
+			continue
+		}
+		// Older desktop profile links use /p/100505{uid}/home.
+		if match := weiboUIDContainerPattern.FindStringSubmatch(candidate); len(match) == 2 {
+			return match[1]
+		}
+		if !weiboUIDPattern.MatchString(candidate) {
+			continue
+		}
+		// /u/{uid}, /profile/{uid}, and desktop /{uid}/{post-id} links.
+		if index == 0 || (index > 0 && (parts[index-1] == "u" || parts[index-1] == "profile")) {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]json.RawMessage
 	if err := readJSONFile(s.opts.ConfigPath, &raw); err != nil {
@@ -237,9 +300,9 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		body.UID = strings.TrimSpace(body.UID)
-		if body.GroupID <= 0 || !regexp.MustCompile(`^\d{5,20}$`).MatchString(body.UID) {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号和微博 UID（纯数字）"})
+		body.UID = normalizeWeiboUID(body.UID)
+		if body.GroupID <= 0 || body.UID == "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号，以及微博 UID 或包含 UID 的完整微博链接"})
 			return
 		}
 		gk := strconv.FormatInt(body.GroupID, 10)
@@ -267,7 +330,7 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		body.UID = strings.TrimSpace(body.UID)
+		body.UID = normalizeWeiboUID(body.UID)
 		oldUID := strings.TrimSpace(body.OldUID)
 		if oldUID == "" {
 			oldUID = body.UID
@@ -286,8 +349,8 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		if !oldGSpecified {
 			oldG = body.GroupID
 		}
-		if body.GroupID <= 0 || !regexp.MustCompile(`^\d{5,20}$`).MatchString(body.UID) || oldUID == "" {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号和微博 UID"})
+		if body.GroupID <= 0 || body.UID == "" || oldUID == "" {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号，以及微博 UID 或完整微博链接"})
 			return
 		}
 		ogk := strconv.FormatInt(oldG, 10)

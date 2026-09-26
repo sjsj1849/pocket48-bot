@@ -32,10 +32,32 @@ func (r Report) XLSX() ([]byte, error) {
 	for _, e := range r.TeammateReplies {
 		details = append(details, []any{e.Author, e.Owner, e.PostID, e.Body, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.URL})
 	}
-	activity := [][]any{{"成员", "类型", "北京时间", "帖子编号", "回复编号", "内容原文", "被回复者", "被回复原文", "图片张数", "视频数", "链接", "被回复者ID", "被回复者类型", "帖子累计评论", "帖子累计点赞", "互动采集时间", "直播时长秒", "评论采集时间", "点赞采集时间"}}
+	activity := [][]any{{"成员", "类型", "北京时间", "帖子编号", "回复编号", "内容原文", "中文翻译", "被回复者", "被回复原文", "图片张数", "视频数", "链接", "被回复者ID", "被回复者类型", "直播发起成员", "直播发起成员ID", "聊天室ID", "帖子累计评论", "帖子累计点赞", "互动采集时间", "直播时长秒", "评论采集时间", "点赞采集时间"}}
 	for _, e := range r.Events {
-		kind := map[string]string{"post": "发帖", "comment": "回复", "live": "开播", "moment": "Moment"}[e.Kind]
-		activity = append(activity, []any{e.Author, kind, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.PostID, e.CommentID, e.Body, e.ParentAuthor, e.ParentBody, len(e.Images), len(e.Videos), e.URL, e.ParentMemberID, e.ParentProfileType, countValue(e.PostComments), countValue(e.PostLikes), metricTime(e.MetricsAt), e.LiveDuration, metricTime(e.CommentsAt), metricTime(e.LikesAt)})
+		kind := map[string]string{"post": "发帖", "comment": "回复", "live": "开播", "live_chat": "直播弹幕", "moment": "Moment"}[e.Kind]
+		activity = append(activity, []any{e.Author, kind, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.PostID, e.CommentID, e.Body, e.Translation, e.ParentAuthor, e.ParentBody, len(e.Images), len(e.Videos), e.URL, e.ParentMemberID, e.ParentProfileType, e.LiveHostAuthor, e.LiveHostMemberID, e.LiveChatID, countValue(e.PostComments), countValue(e.PostLikes), metricTime(e.MetricsAt), e.LiveDuration, metricTime(e.CommentsAt), metricTime(e.LikesAt)})
+	}
+	liveMatrix := [][]any{{"       直播发起成员\n弹幕成员"}}
+	liveSessionMatrix := [][]any{{"       直播发起成员\n弹幕成员"}}
+	for _, target := range r.LiveChatTargets {
+		liveMatrix[0] = append(liveMatrix[0], target.Name)
+		liveSessionMatrix[0] = append(liveSessionMatrix[0], target.Name)
+	}
+	for _, m := range r.Members {
+		messageRow := []any{m.Name}
+		sessionRow := []any{m.Name}
+		for _, target := range r.LiveChatTargets {
+			messageRow = append(messageRow, interactionCell(m.ID, target.ID, m.LiveChatHosts[target.ID]))
+			sessionRow = append(sessionRow, interactionCell(m.ID, target.ID, m.LiveChatHostLives[target.ID]))
+		}
+		liveMatrix = append(liveMatrix, messageRow)
+		liveSessionMatrix = append(liveSessionMatrix, sessionRow)
+	}
+	liveDetails := [][]any{{"弹幕成员", "直播发起成员", "直播编号", "聊天室ID", "内容原文", "中文翻译", "北京时间", "直播链接"}}
+	for _, e := range r.Events {
+		if e.Kind == "live_chat" {
+			liveDetails = append(liveDetails, []any{e.Author, e.LiveHostAuthor, e.PostID, e.LiveChatID, e.Body, e.Translation, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.URL})
+		}
 	}
 	notes := [][]any{{"统计说明", "内容"}, {"社区", r.Community}, {"报表", r.DisplayTitle()}, {"开始（含）", r.Period.Start.Format(time.RFC3339)}, {"结束（不含）", r.Period.End.Format(time.RFC3339)}, {"完整覆盖", fmt.Sprint(r.Complete)}, {"口径与采集范围", r.CoverageNote()}}
 	direct := [][]any{{"       被回复成员\n回复者"}}
@@ -55,7 +77,7 @@ func (r Report) XLSX() ([]byte, error) {
 			monthly = append(monthly, append([]any{month.Month}, reportMemberRow(m)...))
 		}
 	}
-	return writeWorkbook([]workbookSheet{{"成员汇总", summary}, {"队友帖回复矩阵", matrix}, {"队友帖回复明细", details}, {"全部活动", activity}, {"统计说明", notes}, {"直接回复成员矩阵", direct}, {"逐月成员数据", monthly}})
+	return writeWorkbook([]workbookSheet{{"成员汇总", summary}, {"队友帖回复矩阵", matrix}, {"队友帖回复明细", details}, {"直播弹幕矩阵", liveMatrix}, {"参与直播场次矩阵", liveSessionMatrix}, {"直播弹幕明细", liveDetails}, {"全部活动", activity}, {"统计说明", notes}, {"直接回复成员矩阵", direct}, {"逐月成员数据", monthly}})
 }
 func xmlText(s string) string {
 	s = strings.Map(func(r rune) rune {
@@ -100,7 +122,7 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 			for k, v := range row {
 				cell := fmt.Sprintf("%s%d", columnName(k), j+1)
 				style := ""
-				if s.name == "队友帖回复矩阵" || s.name == "直接回复成员矩阵" {
+				if s.name == "队友帖回复矩阵" || s.name == "直接回复成员矩阵" || s.name == "直播弹幕矩阵" || s.name == "参与直播场次矩阵" {
 					if j == k && j > 0 {
 						style = ` s="1"`
 					}
@@ -153,10 +175,10 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 }
 
 func reportColumns() []any {
-	return []any{"成员", "帖子总数", "帖子照片张数", "帖子累计评论", "帖子累计点赞", "回复总数", "回复粉丝", "回复其他成员", "回复自己", "被回复者未知", "视频数", "Moment已采集数", "直播次数", "队友帖下回复数", "已知直播时长秒", "有时长直播数", "确认单人直播时长秒", "确认单人直播数"}
+	return []any{"成员", "帖子总数", "帖子照片张数", "帖子累计评论", "帖子累计点赞", "回复总数", "回复粉丝", "回复其他成员", "回复自己", "被回复者未知", "视频数", "Moment已采集数", "直播次数", "直播弹幕数", "参与他人直播场次", "队友帖下回复数", "已知直播时长秒", "有时长直播数", "确认单人直播时长秒", "确认单人直播数"}
 }
 func reportMemberRow(m MemberCount) []any {
-	return []any{m.Name, m.Posts, m.PostPhotos, engagementExcelValue(m.PostComments, m.CommentPosts, m.Posts), engagementExcelValue(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives, m.TeammateReplies, knownDuration(m.LiveSeconds, m.TimedLives, "未取得时长"), m.TimedLives, knownDuration(m.SoloLiveSeconds, m.SoloLives, "未确认单人"), m.SoloLives}
+	return []any{m.Name, m.Posts, m.PostPhotos, engagementExcelValue(m.PostComments, m.CommentPosts, m.Posts), engagementExcelValue(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives, m.LiveChats, m.LiveChatLives, m.TeammateReplies, knownDuration(m.LiveSeconds, m.TimedLives, "未取得时长"), m.TimedLives, knownDuration(m.SoloLiveSeconds, m.SoloLives, "未确认单人"), m.SoloLives}
 }
 func countValue(v *int64) any {
 	if v == nil {

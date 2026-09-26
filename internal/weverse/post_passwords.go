@@ -18,6 +18,7 @@ type PostPassword struct {
 	URL        string `json:"url"`
 	Password   string `json:"password,omitempty"`
 	VerifiedAt string `json:"verifiedAt"`
+	Source     string `json:"source,omitempty"`
 }
 
 func ParsePostURL(raw string) (string, string, error) {
@@ -26,6 +27,9 @@ func ParsePostURL(raw string) (string, string, error) {
 		return "", "", fmt.Errorf("请填写 Weverse 帖子链接")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) == 5 && slugRE.MatchString(parts[0]) && parts[1] == "moment" && idRE.MatchString(parts[2]) && parts[3] == "post" && idRE.MatchString(parts[4]) {
+		return parts[4], "https://weverse.io/" + strings.Join(parts, "/"), nil
+	}
 	if len(parts) < 3 || !slugRE.MatchString(parts[0]) || (parts[1] != "artist" && parts[1] != "fanpost") || !idRE.MatchString(parts[2]) {
 		return "", "", fmt.Errorf("请填写 Weverse 帖子链接，支持带评论的链接")
 	}
@@ -70,6 +74,19 @@ func (c *Client) withPostPassword(ep string) (string, error) {
 	return ep, nil
 }
 
+func (c *Client) hasPostPassword(id string) (bool, error) {
+	rows, e := LoadPostPasswords(c.Dir)
+	if e != nil {
+		return false, e
+	}
+	for _, row := range rows {
+		if row.PostID == id && row.Password != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // Verify before persisting. Explicit candidates override any previous stored password.
 func (c *Client) SavePostPassword(ctx context.Context, raw, password string) (PostPassword, error) {
 	id, link, e := ParsePostURL(raw)
@@ -88,15 +105,19 @@ func (c *Client) SavePostPassword(ctx context.Context, raw, password string) (Po
 		return PostPassword{}, fmt.Errorf("接口未返回目标帖子，未保存密码")
 	}
 	row := PostPassword{PostID: id, URL: link, Password: password, VerifiedAt: time.Now().Format(time.RFC3339)}
+	return savePostPasswordRow(c.Dir, row)
+}
+
+func savePostPasswordRow(dir string, row PostPassword) (PostPassword, error) {
 	postPasswordMu.Lock()
 	defer postPasswordMu.Unlock()
-	rows, e := LoadPostPasswords(c.Dir)
+	rows, e := LoadPostPasswords(dir)
 	if e != nil {
 		return PostPassword{}, e
 	}
 	found := false
 	for i := range rows {
-		if rows[i].PostID == id {
+		if rows[i].PostID == row.PostID {
 			rows[i] = row
 			found = true
 		}
@@ -107,7 +128,7 @@ func (c *Client) SavePostPassword(ctx context.Context, raw, password string) (Po
 		}
 		rows = append(rows, row)
 	}
-	if e = Write(c.Dir, "post-passwords.json", rows); e != nil {
+	if e = Write(dir, "post-passwords.json", rows); e != nil {
 		return PostPassword{}, e
 	}
 	row.Password = ""
