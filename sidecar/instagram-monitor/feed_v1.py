@@ -3,6 +3,31 @@ import instaloader
 import requests
 
 
+def user_reels_graphql(profile):
+    """Reuse media in the Reels page instead of resolving every shortcode."""
+    def wrap(node):
+        media = node.get('media') or {}
+        if not all(key in media for key in ('pk', 'code', 'media_type', 'taken_at')):
+            raise FeedError('scan_incomplete')
+        owner = str((media.get('user') or {}).get('pk') or '')
+        collaborators = [str(user.get('pk')) for user in media.get('coauthor_producers') or []]
+        if owner != str(profile.userid) and str(profile.userid) not in collaborators:
+            raise FeedError('user_unavailable')
+        media = {**media, 'has_liked': media.get('has_liked', False),
+                 'like_count': media.get('like_count', 0)}
+        return instaloader.Post.from_iphone_struct(profile._context, media)
+
+    return instaloader.NodeIterator(
+        context=profile._context, query_hash=None,
+        edge_extractor=lambda data: data['data']['xdt_api__v1__clips__user__connection_v2'],
+        node_wrapper=wrap,
+        query_variables={'data': {'page_size': 12, 'include_feed_video': True,
+                                 'target_user_id': str(profile.userid)}},
+        query_referer=f'https://www.instagram.com/{profile.username}/',
+        doc_id='7845543455542541',
+    )
+
+
 class FeedError(Exception):
     def __init__(self, code):
         self.code = code

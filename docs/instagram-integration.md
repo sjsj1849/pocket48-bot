@@ -58,3 +58,36 @@ HTTP 429 或 401/403 带“wait a few minutes”会冻结所有采集请求，�
 参考 [instagram_monitor 3.4](https://github.com/misiektoja/instagram_monitor/blob/main/RELEASE_NOTES.md#changes-in-34-16-jun-2026) 的做法，Instagram 请求默认改用锁定版本 `curl_cffi`，使用固定 Chrome TLS/HTTP2 身份，并让 User-Agent 与连接身份一致。实现保留 Requests 的请求准备、Cookie 域名/路径判断和跳转流程，关闭底层隐藏重试；每个实际跳转仍先进入持久请求预算。代理、超时、证书校验及响应 Cookie 均继续生效。其他平台和媒体 CDN 不经过该适配器。
 
 这只能减少 Linux 默认 TLS 特征导致的误拦截，不能解除账号或出口 IP 已存在的限制。当前冷却不会被提前清除。冷却结束后执行一次同账号、同出口的少量对照：先调用浏览器连接方式；若它失败，立即停止并跳过原方式；若它成功，才以原 Requests 方式读取同一 feed，各一次并保存脱敏结果，不发送 QQ 消息。验证使用独立的一次尝试，不重置原有请求记录。实际浏览器连接方式仍收到平台限流，因此按规则跳过原方式对照并保存结果；这说明当前限制并非只由 Python 默认 TLS 特征造成。
+# 2026-10-01 Update
+
+Compared against `misiektoja/instagram_monitor` v4.0.2 (commit
+`2c29cd4ee27876698a110338807f3d22347b742a`). The installed Instaloader 4.15.3
+already includes the current profile and post metadata GraphQL fixes, so no
+duplicate library monkey patches are needed.
+
+- Cache verified profile metadata for ten minutes to avoid duplicate profile
+  reads from lookup and collection. Clear this cache when importing a session.
+- Read Reels media from the existing GraphQL page instead of resolving every
+  shortcode. Preserve mixed albums and video variants from list responses.
+- Persist account-wide challenge state across workers; stop further requests
+  until a different session is imported. Actual 429 cooldowns remain in effect
+  even after importing a different session.
+- Distinguish the retired profile endpoint's `feedback_required` from account
+  restrictions. Record response status and endpoint path without query strings,
+  credentials or response bodies in `request-state.json`.
+
+Live validation on October 1 still returned HTTP 429 for the stored session.
+
+### Public guest web path
+
+Public profile lookup and post discovery now first use the same low-cost web
+flow as RSSHub: load the public profile HTML, read its current profile ID/LSD
+token, then request `PolarisProfilePostsQuery`. This avoids routine use of the
+saved account session for public Posts and Reels; private profiles and Stories
+continue to use the authenticated collector. A malformed/retired guest response
+may fall back to the existing collector, but HTTP 429, checkpoint and challenge
+errors always stop at the shared persistent cooldown and never trigger another
+backend request.
+This is a platform rejection, not proof that replacing the monitor restores
+access. Monitoring remains disabled with no configured subscriptions. Python
+worker changes apply on the next invocation without rebuilding the Go binary.

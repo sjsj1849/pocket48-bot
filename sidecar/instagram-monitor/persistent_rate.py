@@ -5,6 +5,7 @@ before sending so a killed worker cannot erase its request budget.
 """
 import contextlib
 import datetime
+import hashlib
 import json
 import os
 import tempfile
@@ -22,6 +23,10 @@ class RateBlocked(Exception):
         self.until = until
         self.reason = reason
         self.retry_at = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).isoformat()
+
+
+class SessionBlocked(Exception):
+    code = 'checkpoint_required'
 
 
 def atomic_write(path, data):
@@ -57,9 +62,25 @@ class PersistentLimiter:
         raise RateBlocked(self.state['blockedUntil'], reason)
 
     def gate(self):
+        if self.state.get('sessionBlocked'):
+            raise SessionBlocked()
         until = self.state.get('blockedUntil', 0)
         if until > self.now():
             raise RateBlocked(until, self.state.get('reason', 'rate_limit'))
+
+    def bind_session(self, cookies):
+        if not isinstance(cookies, dict):
+            return
+        value = cookies.get('sessionid') or ''
+        fingerprint = hashlib.sha256(value.encode()).hexdigest() if value else ''
+        previous = self.state.get('sessionFingerprint')
+        if previous is not None and previous != fingerprint:
+            self.state.pop('sessionBlocked', None)
+            if self.state.get('reason') == 'checkpoint_required':
+                self.state['reason'] = ''
+        # Importing another session does not clear actual 429 cooldowns.
+        self.state['sessionFingerprint'] = fingerprint
+        self.save()
 
     def reserve_http(self):
         self.gate()
@@ -135,9 +156,23 @@ class PersistentLimiter:
                 limiter.reserve_http()
             response = original(session, request, **kwargs)
             if is_instagram:
+                limiter.state['lastResponse'] = {
+                    'at': limiter.now(), 'path': urlparse(url).path,
+                    'status': response.status_code,
+                }
+                limiter.save()
                 limited = response.status_code == 429
-                if response.status_code in (401, 403):
-                    limited = b'wait a few minutes' in response.content[:65536].lower()
+                body = response.content[:65536].lower()
+                if response.status_code in (400, 401, 403):
+                    limited = limited or b'wait a few minutes' in body
+                    retired = urlparse(url).path.rstrip('/') == '/api/v1/users/web_profile_info'
+                    if any(marker in body for marker in (b'challenge_required', b'checkpoint_required')):
+                        limiter.state['sessionBlocked'] = True
+                        limiter.state['reason'] = 'checkpoint_required'
+                        limiter.save()
+                        raise SessionBlocked()
+                    if b'feedback_required' in body and not retired:
+                        limited = True
                 if limited:
                     limiter.server_limit(response.headers.get('Retry-After'))
             return response

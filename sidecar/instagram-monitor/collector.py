@@ -12,9 +12,11 @@ import tempfile
 import time
 
 import instaloader
-from persistent_rate import PersistentLimiter, RateBlocked
-from feed_v1 import user_posts_v1, FeedError
+import requests
+from persistent_rate import PersistentLimiter, RateBlocked, SessionBlocked
+from feed_v1 import user_posts_v1, user_reels_graphql, FeedError
 from browser_transport import browser_transport
+from guest_web import public_profile, public_posts, GuestWebError
 
 
 class Failure(Exception):
@@ -81,6 +83,22 @@ def resolve_profile(context, name, directory=None):
     # web_profile_info can return 429 even with a valid session. Authenticated
     # search provides the stable ID; the Profile then loads metadata via GraphQL.
     if context.is_logged_in:
+        metadata_path = directory / 'profile-metadata.json' if directory else None
+        metadata = json.loads(metadata_path.read_text()) if metadata_path and metadata_path.exists() else {}
+        saved = metadata.get(name) or {}
+        if (0 <= time.time() - saved.get('at', 0) < 600
+                and isinstance(saved.get('node'), dict)
+                and str(saved['node'].get('username', '')).lower() == name):
+            profile = instaloader.Profile(context, saved['node'])
+            profile._has_full_metadata = True
+            return profile
+
+        def remember(profile):
+            if metadata_path and isinstance(profile._node, dict):
+                metadata[name] = {'at': time.time(), 'node': profile._node}
+                write_private(metadata_path, metadata)
+            return profile
+
         cache_path = directory / "profile-cache.json" if directory else None
         cache = json.loads(cache_path.read_text()) if cache_path and cache_path.exists() else {}
         cached_id = cache.get(name)
@@ -89,13 +107,14 @@ def resolve_profile(context, name, directory=None):
             profile._obtain_metadata()
             if str(profile.userid) != cached_id or profile.username.lower() != name:
                 raise Failure("user_unavailable")
-            return profile
+            return remember(profile)
         for profile in instaloader.TopSearchResults(context, name).get_profiles():
             if profile.username.lower() == name.lower():
                 if cache_path:
                     cache[name] = str(profile.userid)
                     write_private(cache_path, cache)
-                return profile
+                profile._obtain_metadata()
+                return remember(profile)
         raise Failure("user_unavailable")
     return instaloader.Profile.from_username(context, name)
 
@@ -106,6 +125,10 @@ def profile_data(profile):
             "protected": profile.is_private}
 
 
+def guest_profile(session, name):
+    return public_profile(session, name)
+
+
 def timestamp_ms(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=datetime.timezone.utc)
@@ -113,6 +136,9 @@ def timestamp_ms(value):
 
 
 def post_data(post, author, forced_kind=None):
+    raw = post._node.get('iphone_struct')
+    if isinstance(raw, dict):
+        return raw_post_data(raw, author, forced_kind)
     kind = forced_kind or ("reel" if post._node.get("product_type") == "clips" else "post")
     media = []
     if post.typename == "GraphSidecar":
@@ -130,6 +156,38 @@ def post_data(post, author, forced_kind=None):
     return {"id": str(post.mediaid), "kind": kind, "author": author,
             "body": post.caption or "", "url": "https://www.instagram.com/p/" + post.shortcode + "/",
             "time": timestamp_ms(post.date_utc), "media": media, "mediaOrderKnown": True}
+
+
+def raw_post_data(item, author, forced_kind=None):
+    """Parse list payloads without lazily asking Instagram for media details."""
+    kind = forced_kind or ('reel' if item.get('product_type') == 'clips' else 'post')
+    media = []
+    nodes = item.get('carousel_media') if item.get('media_type') == 8 else [item]
+    if not nodes:
+        raise Failure('scan_incomplete')
+    for node in nodes:
+        candidates = (node.get('image_versions2') or {}).get('candidates') or []
+        images = [image for image in candidates if image.get('url')]
+        cover = max(images, key=lambda image: int(image.get('width') or 0) * int(image.get('height') or 0))['url'] if images else ''
+        if node.get('media_type') == 2:
+            videos = [video for video in node.get('video_versions') or [] if video.get('url')]
+            if not videos:
+                raise Failure('scan_incomplete')
+            media.append({'kind': 'video', 'cover': cover,
+                          'durationMS': int(float(node.get('video_duration') or 0) * 1000),
+                          'variants': [{'url': video['url'], 'bitrate': int(video.get('bitrate') or (int(video.get('width') or 0) * int(video.get('height') or 0)) or 1)} for video in videos]})
+        else:
+            if not cover:
+                raise Failure('scan_incomplete')
+            media.append({'kind': 'image', 'url': cover})
+    code = str(item.get('code') or '')
+    identifier = str(item.get('pk') or '')
+    if not code or not identifier or not item.get('taken_at'):
+        raise Failure('scan_incomplete')
+    return {'id': identifier, 'kind': kind, 'author': author,
+            'body': (item.get('caption') or {}).get('text') or '',
+            'url': f'https://www.instagram.com/{"reel" if kind == "reel" else "p"}/{code}/',
+            'time': int(item['taken_at']) * 1000, 'media': media, 'mediaOrderKnown': True}
 
 
 def story_data(item, author):
@@ -178,6 +236,7 @@ def execute(request, directory):
                 path.unlink(missing_ok=True)
                 (directory / "pending-2fa.json").unlink(missing_ok=True)
                 (directory / "browser-candidate.json").unlink(missing_ok=True)
+                (directory / "profile-metadata.json").unlink(missing_ok=True)
                 return {"sessionConfigured": False}
             loader = instaloader.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
                                            request_timeout=20, rate_controller=limiter.controller, iphone_support=False)
@@ -221,6 +280,7 @@ def execute(request, directory):
                 login = username(login)
                 loader.context.username = login
                 write_session(path, loader.context, login)
+                (directory / "profile-metadata.json").unlink(missing_ok=True)
                 pending_path.unlink(missing_ok=True)
                 return {"username": login, "sessionConfigured": True}
             candidate_path=directory / "browser-candidate.json"
@@ -246,6 +306,10 @@ def execute(request, directory):
                 loader.context.load_session(login, session["cookies"])
             if proxy:
                 loader.context._session.proxies.update({"http": proxy, "https": proxy})
+            guest_session = requests.Session()
+            if proxy:
+                guest_session.proxies.update({"http": proxy, "https": proxy})
+            limiter.bind_session(loader.context._session.cookies.get_dict())
             if operation in ("session_import", "session_check", "session_browser_apply") or browser_apply:
                 if operation == "session_check" and not login and not browser_apply:
                     raise Failure("login_required")
@@ -259,6 +323,7 @@ def execute(request, directory):
                 login = username(verified)
                 loader.context.username = login
                 write_session(path, loader.context, login)
+                (directory / "profile-metadata.json").unlink(missing_ok=True)
                 if browser_apply:
                     candidate_path.unlink(missing_ok=True)
                     write_private(directory/"browser-status.json",{"configured":True,"pending":False,"updatedAt":int(time.time()*1000)})
@@ -308,27 +373,48 @@ def execute(request, directory):
                 except FeedError as error:
                     write_private(probe_path,{"pending":False,"success":False,"username":name,"userId":user_id,"attempts":attempts+1,"error":error.code})
                     raise
-            profile = resolve_profile(loader.context, name, directory)
-            author = profile_data(profile)
+            guest = None
+            # Public profile pages avoid spending the authenticated account's
+            # private/Web API budget. A changed guest response may fall back;
+            # RateBlocked and SessionBlocked escape from the shared limiter.
+            if operation in ("lookup", "timeline") and not request.get("stories"):
+                try:
+                    guest = guest_profile(guest_session, name)
+                except GuestWebError as error:
+                    if error.code in ("user_unavailable", "timeout"):
+                        raise Failure(error.code)
+                    guest = None
+            profile = None if guest else resolve_profile(loader.context, name, directory)
+            author = guest["user"] if guest else profile_data(profile)
             if operation == "lookup":
-                result = {"user": author}
+                result = {"user": author, "profileAPI": "guest-web" if guest else "instaloader"}
             else:
-                if profile.is_private and not login:
+                if author["protected"] and not login:
                     raise Failure("login_required")
                 limit = min(max(int(request.get("limit", 100)), 1), 500)
                 since = request.get("since") or {}
                 events = []
                 if request.get("posts", True):
+                    if guest:
+                        try:
+                            events.extend(scan_posts(public_posts(guest_session, name, guest), author, limit, max(int(since.get("post", 0)), 0)))
+                        except GuestWebError as error:
+                            if error.code in ("timeout", "user_unavailable", "scan_incomplete"):
+                                raise Failure(error.code)
+                            guest = None
+                            profile = resolve_profile(loader.context, name, directory)
+                            author = profile_data(profile)
                     preference_path = directory / "feed-api.json"
                     preference = json.loads(preference_path.read_text()) if preference_path.exists() else {}
-                    use_v1 = login and (preference.get(name) in ("v1","v1-pending"))
+                    use_v1 = not guest and login and (preference.get(name) in ("v1","v1-pending"))
                     if use_v1:
                         items = user_posts_v1(loader,profile.userid,name)
                     else:
                         items = None
                     try:
-                        if items is None: items=profile.get_posts()
-                        events.extend(scan_posts(items, author, limit, max(int(since.get("post", 0)), 0)))
+                        if not guest:
+                            if items is None: items=profile.get_posts()
+                            events.extend(scan_posts(items, author, limit, max(int(since.get("post", 0)), 0)))
                     except RateBlocked:
                         # On the next allowed scan, test v1 instead of retrying the
                         # same failing timeline doc_id forever. Never bypass cooldown.
@@ -342,8 +428,8 @@ def execute(request, directory):
                         events.extend(scan_posts(user_posts_v1(loader,profile.userid,name),author,limit,max(int(since.get("post",0)),0)))
                         preference[name]="v1"
                         write_private(preference_path,preference)
-                if request.get("reels", True):
-                    events.extend(scan_posts(profile.get_reels(), author, limit, max(int(since.get("reel", 0)), 0), "reel"))
+                if request.get("reels", True) and not guest:
+                    events.extend(scan_posts(user_reels_graphql(profile), author, limit, max(int(since.get("reel", 0)), 0), "reel"))
                 if request.get("stories"):
                     if not login:
                         raise Failure("login_required")
@@ -355,7 +441,8 @@ def execute(request, directory):
                     key = ("story" if event["kind"] == "story" else "post", event["id"])
                     if key not in dedup or event["kind"] == "reel":
                         dedup[key] = event
-                result = {"user": author, "events": list(dedup.values())}
+                result = {"user": author, "events": list(dedup.values()),
+                          "profileAPI": "guest-web" if guest else "instaloader"}
             if login:
                 write_session(path, loader.context, login)
             if operation == "timeline": limiter.success()
@@ -374,7 +461,11 @@ def main():
         output = {"ok": True, "data": result}
     except RateBlocked as error:
         output = {"ok": False, "error": {"code": error.code, "nextRetryAt": error.retry_at, "reason": error.reason}}
+    except SessionBlocked as error:
+        output = {"ok": False, "error": {"code": error.code}}
     except FeedError as error:
+        output = {"ok": False, "error": {"code": error.code}}
+    except GuestWebError as error:
         output = {"ok": False, "error": {"code": error.code}}
     except Failure as error:
         output = {"ok": False, "error": {"code": error.code}}
