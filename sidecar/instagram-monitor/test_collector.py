@@ -30,7 +30,7 @@ class CollectorTests(unittest.TestCase):
 
     def test_authenticated_lookup_uses_exact_search_result(self):
         context = SimpleNamespace(is_logged_in=True)
-        target = SimpleNamespace(username='Hearts2Hearts')
+        target = SimpleNamespace(username='Hearts2Hearts', _obtain_metadata=lambda: None)
         with patch.object(c.instaloader, 'TopSearchResults') as search, patch.object(c.instaloader.Profile, 'from_username') as direct:
             search.return_value.get_profiles.return_value = iter([SimpleNamespace(username='hearts2hearts.fan'), target])
             self.assertIs(c.resolve_profile(context, 'hearts2hearts'), target)
@@ -39,6 +39,46 @@ class CollectorTests(unittest.TestCase):
             search.return_value.get_profiles.return_value = iter([SimpleNamespace(username='other')])
             with self.assertRaises(c.Failure):
                 c.resolve_profile(context, 'hearts2hearts')
+
+    def test_guest_rate_limit_never_falls_back_to_authenticated_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(c, 'guest_profile', side_effect=c.RateBlocked(c.time.time() + 900, 'rate_limit')), \
+                    patch.object(c, 'resolve_profile') as authenticated:
+                with self.assertRaises(c.RateBlocked):
+                    c.execute({'operation': 'lookup', 'query': 'artist'}, Path(directory))
+                authenticated.assert_not_called()
+
+    def test_profile_metadata_cache_avoids_duplicate_request_and_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            profile = SimpleNamespace(userid=42, username='artist', _node={'id': '42', 'username': 'artist'}, _obtain_metadata=lambda: None)
+            with patch.object(c.instaloader, 'TopSearchResults') as search:
+                search.return_value.get_profiles.return_value = iter([profile])
+                c.resolve_profile(SimpleNamespace(is_logged_in=True), 'artist', path)
+            with patch.object(c.instaloader.Profile, '_obtain_metadata') as obtain, patch.object(c.instaloader, 'TopSearchResults') as search:
+                cached = c.resolve_profile(SimpleNamespace(is_logged_in=True), 'artist', path)
+                self.assertEqual(cached.userid, 42)
+                obtain.assert_not_called()
+                search.assert_not_called()
+            with patch.object(c.time, 'time', return_value=c.time.time() + 601), patch.object(c.instaloader, 'Profile') as constructor:
+                constructor.return_value = profile
+                c.resolve_profile(SimpleNamespace(is_logged_in=True), 'artist', path)
+                constructor.assert_called_once()
+
+    def test_list_media_is_complete_without_per_post_detail_request(self):
+        item = {'pk': '123', 'code': 'abc', 'taken_at': 100, 'media_type': 8,
+                'caption': {'text': 'album'}, 'carousel_media': [
+                    {'media_type': 1, 'image_versions2': {'candidates': [{'url': 'small', 'width': 100, 'height': 100}, {'url': 'large', 'width': 1000, 'height': 1000}]}},
+                    {'media_type': 2, 'video_versions': [{'url': 'low', 'width': 100, 'height': 100}, {'url': 'high', 'width': 1080, 'height': 1920}]},
+                ]}
+        event = c.post_data(SimpleNamespace(_node={'iphone_struct': item}), {'id': '42'})
+        self.assertEqual(event['body'], 'album')
+        self.assertEqual(event['media'][0]['url'], 'large')
+        self.assertEqual([variant['url'] for variant in event['media'][1]['variants']], ['low', 'high'])
+        item['carousel_media'][1]['video_versions'] = []
+        with self.assertRaises(c.Failure) as error:
+            c.raw_post_data(item, {'id': '42'})
+        self.assertEqual(error.exception.code, 'scan_incomplete')
 
     def test_cookies_domain_and_secret_validation(self):
         self.assertEqual(c.parse_cookies('sessionid=abc%3A123; csrftoken=def; junk=x'), {'sessionid': 'abc%3A123', 'csrftoken': 'def'})
@@ -86,7 +126,8 @@ class CollectorTests(unittest.TestCase):
                     c.execute({'operation': 'session_browser_apply'}, directory)
                 self.assertEqual(json.loads((directory / 'session.json').read_text()), old)
                 self.assertTrue(json.loads((directory / 'browser-candidate.json').read_text())['rejected'])
-                with patch.object(c, 'resolve_profile') as profile:
+                with patch.object(c, 'guest_profile', side_effect=c.GuestWebError('guest_unavailable')), \
+                        patch.object(c, 'resolve_profile') as profile:
                     profile.return_value = SimpleNamespace(userid=42, username='artist', full_name='Artist', _node={'profile_pic_url':'https://cdn/avatar'}, is_private=False)
                     c.execute({'operation': 'lookup', 'query': 'artist'}, directory)
                     profile.assert_called_once()

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 import requests
 
-from persistent_rate import PersistentLimiter, RateBlocked
+from persistent_rate import PersistentLimiter, RateBlocked, SessionBlocked
 
 
 class Clock:
@@ -60,5 +60,35 @@ class RateTests(unittest.TestCase):
             with self.assertRaises(RateBlocked) as blocked: clock.limiter(path).reserve_http()
             self.assertEqual(blocked.exception.reason,'request_budget')
             self.assertEqual(len(clock.limiter(path).state['requests']),12)
+
+    def test_challenge_stops_other_targets_until_session_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory); clock = Clock()
+            response = requests.Response(); response.status_code = 400
+            response._content = b'{"message":"challenge_required"}'
+            first = clock.limiter(path); first.bind_session({'sessionid': 'old'})
+            with patch.object(requests.Session, 'send', return_value=response) as network:
+                with first.transport():
+                    with self.assertRaises(SessionBlocked): requests.Session().get('https://www.instagram.com/graphql/query')
+                second = clock.limiter(path); second.bind_session({'sessionid': 'old'})
+                with second.transport():
+                    with self.assertRaises(SessionBlocked): requests.Session().get('https://www.instagram.com/api/v1/feed/user/42/')
+                self.assertEqual(network.call_count, 1)
+            second.bind_session({'sessionid': 'new'})
+            second.gate()
+            with self.assertRaises(RateBlocked): second.server_limit()
+            second.bind_session({'sessionid': 'another'})
+            with self.assertRaises(RateBlocked): second.gate()
+
+    def test_retired_profile_feedback_does_not_block_the_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            response = requests.Response(); response.status_code = 400
+            response._content = b'{"message":"feedback_required"}'
+            limiter = Clock().limiter(Path(directory))
+            with patch.object(requests.Session, 'send', return_value=response):
+                with limiter.transport():
+                    requests.Session().get('https://www.instagram.com/api/v1/users/web_profile_info/?username=artist')
+                    limiter.gate()
+                    with self.assertRaises(RateBlocked): requests.Session().get('https://www.instagram.com/api/v1/feed/user/42/')
 
 if __name__ == '__main__': unittest.main()
