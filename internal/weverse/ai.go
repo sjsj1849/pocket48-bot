@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"pocket48-bot/internal/hearts2hearts"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,16 +23,25 @@ import (
 
 type AISettings struct {
 	Enabled               bool   `json:"enabled"`
+	Provider              string `json:"provider,omitempty"`
 	BaseURL               string `json:"baseUrl"`
 	Model                 string `json:"model"`
+	SiliconFlowModel      string `json:"siliconFlowModel,omitempty"`
 	IdleSeconds           int    `json:"idleSeconds"`
 	APIKey                string `json:"apiKey,omitempty"`
+	SiliconFlowAPIKey     string `json:"siliconFlowApiKey,omitempty"`
 	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
 }
 
 func LoadAISettings(dir string) (AISettings, error) {
-	s := AISettings{BaseURL: "https://proxy.jiufeng.cloud/v1", Model: "grok-4.5", IdleSeconds: 300, RequestTimeoutSeconds: 240}
+	s := AISettings{Provider: "custom", BaseURL: "https://proxy.jiufeng.cloud/v1", Model: "grok-4.5", SiliconFlowModel: "THUDM/GLM-4-9B-0414", IdleSeconds: 300, RequestTimeoutSeconds: 240}
 	err := Read(dir, "ai.json", &s)
+	if s.Provider == "" {
+		s.Provider = "custom"
+	}
+	if s.SiliconFlowModel == "" {
+		s.SiliconFlowModel = "THUDM/GLM-4-9B-0414"
+	}
 	return s, err
 }
 func SaveAISettings(dir string, s AISettings) error {
@@ -44,6 +54,9 @@ func SaveAISettings(dir string, s AISettings) error {
 	if s.APIKey == "" {
 		s.APIKey = old.APIKey
 	}
+	if s.SiliconFlowAPIKey == "" {
+		s.SiliconFlowAPIKey = old.SiliconFlowAPIKey
+	}
 	if s.RequestTimeoutSeconds == 0 {
 		s.RequestTimeoutSeconds = 240
 	}
@@ -52,17 +65,39 @@ func SaveAISettings(dir string, s AISettings) error {
 	}
 	s.BaseURL = strings.TrimRight(strings.TrimSpace(s.BaseURL), "/")
 	s.Model = strings.TrimSpace(s.Model)
+	s.Provider = strings.ToLower(strings.TrimSpace(s.Provider))
+	if s.Provider == "" {
+		s.Provider = "custom"
+	}
+	s.SiliconFlowModel = strings.TrimSpace(s.SiliconFlowModel)
+	if s.SiliconFlowModel == "" {
+		s.SiliconFlowModel = "THUDM/GLM-4-9B-0414"
+	}
+	if s.Provider != "custom" && s.Provider != "siliconflow" {
+		return fmt.Errorf("AI 服务仅支持自有号池或硅基流动")
+	}
 	u, err := url.Parse(s.BaseURL)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1"))) {
 		return fmt.Errorf("AI 地址需为完整 HTTPS 接口地址，例如 https://proxy.jiufeng.cloud/v1")
 	}
-	if s.Model == "" || s.IdleSeconds < 60 || s.IdleSeconds > 3600 {
+	if s.Model == "" || s.SiliconFlowModel == "" || s.IdleSeconds < 60 || s.IdleSeconds > 3600 {
 		return fmt.Errorf("模型不能为空，聊天间隔需为 60–3600 秒")
 	}
-	if s.Enabled && s.APIKey == "" {
+	if s.Enabled && s.Active().APIKey == "" {
 		return fmt.Errorf("请填写 AI API Key")
 	}
 	return Write(dir, "ai.json", s)
+}
+
+// Active returns the selected OpenAI-compatible connection while retaining
+// both providers' settings on disk for instant switching in the admin panel.
+func (s AISettings) Active() AISettings {
+	if strings.EqualFold(s.Provider, "siliconflow") {
+		s.BaseURL = "https://api.siliconflow.cn/v1"
+		s.Model = s.SiliconFlowModel
+		s.APIKey = s.SiliconFlowAPIKey
+	}
+	return s
 }
 
 func (s AISettings) RequestTimeout() time.Duration {
@@ -455,6 +490,10 @@ func AIConversation(b AIBatch) []AIEntry {
 }
 
 func SummarizeAI(ctx context.Context, cfg AISettings, b AIBatch) (string, error) {
+	return SummarizeAIWithGlossary(ctx, cfg, b, hearts2hearts.Glossary{})
+}
+
+func SummarizeAIWithGlossary(ctx context.Context, cfg AISettings, b AIBatch, glossary hearts2hearts.Glossary) (string, error) {
 	entries := AIConversation(b)
 	if b.PostID != "" {
 		if b.PostContext == nil || b.PostContext.PostID != b.PostID {
@@ -500,7 +539,11 @@ func SummarizeAI(ctx context.Context, cfg AISettings, b AIBatch) (string, error)
 			newReplyIDs = append(newReplyIDs, modelEntries[i].ID)
 		}
 	}
-	input, err := json.Marshal(map[string]any{"artists": artists, "post": b.PostContext, "replies": modelEntries, "newReplyIds": newReplyIDs, "contextNotes": aiCommunityNotes(b.CommunityID)})
+	contextNotes := aiCommunityNotes(b.CommunityID)
+	if shared := glossary.Instructions(); shared != "" {
+		contextNotes = strings.TrimSpace(contextNotes + "\n" + shared)
+	}
+	input, err := json.Marshal(map[string]any{"artists": artists, "post": b.PostContext, "replies": modelEntries, "newReplyIds": newReplyIDs, "contextNotes": contextNotes})
 	if err != nil {
 		return "", err
 	}
@@ -621,6 +664,7 @@ func validateAIDraft(raw string, entries []AIEntry) error {
 }
 
 func requestAI(ctx context.Context, cfg AISettings, instructions, input string, count int) (string, error) {
+	cfg = cfg.Active()
 	payload := map[string]any{"model": cfg.Model, "stream": true, "temperature": 0.2, "max_tokens": aiOutputTokens(count), "messages": []map[string]string{
 		{"role": "system", "content": instructions},
 		{"role": "user", "content": instructions + "\n\n" + input},

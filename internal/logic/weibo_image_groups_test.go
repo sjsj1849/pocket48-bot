@@ -6,7 +6,7 @@ import (
 	"pocket48-bot/internal/config"
 )
 
-func TestBuildWeiboSuperCountImagesCombinesConfiguredAndKeepsUnassigned(t *testing.T) {
+func TestBuildWeiboSuperCountImagesOnlyConfiguredPlans(t *testing.T) {
 	sections := []weiboSuperCountHTMLSection{
 		{GroupKey: "eight", Title: "八小妹"},
 		{GroupKey: "two", Title: "哈two哈"},
@@ -19,14 +19,15 @@ func TestBuildWeiboSuperCountImagesCombinesConfiguredAndKeepsUnassigned(t *testi
 	}
 
 	images := buildWeiboSuperCountImages(plans, sections)
-	if len(images) != 3 {
-		t.Fatalf("got %d images, want two configured plus fallback", len(images))
+	// Only configured plans produce images; unassigned groups are omitted.
+	if len(images) != 2 {
+		t.Fatalf("got %d images, want exactly the two configured plans", len(images))
 	}
 	if images[0].Title != "前两组" || len(images[0].Sections) != 2 {
 		t.Fatalf("first image mismatch: %#v", images[0])
 	}
-	if images[2].Title != "其他分组" || len(images[2].Sections) != 1 || images[2].Sections[0].GroupKey != "four" {
-		t.Fatalf("unassigned fallback mismatch: %#v", images[2])
+	if images[1].Title != "第三组" || len(images[1].Sections) != 1 {
+		t.Fatalf("second image mismatch: %#v", images[1])
 	}
 }
 

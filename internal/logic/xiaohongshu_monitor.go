@@ -15,6 +15,7 @@ import (
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/outbound"
 )
 
 var xiaohongshuProfilePattern = regexp.MustCompile(`(?i)/user/profile/([a-z0-9]+)`)
@@ -64,7 +65,7 @@ type xiaohongshuLivePending struct {
 
 type XiaohongshuMonitor struct {
 	cfg          *config.Config
-	napcat       *napcat.Client
+	outbound     outbound.Sender
 	notifyAdmins func(string)
 	browser      *WeiboAuthBridge
 	mu           sync.Mutex
@@ -79,10 +80,10 @@ type XiaohongshuMonitor struct {
 	proxyRotateAt time.Time
 }
 
-func NewXiaohongshuMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins func(string)) *XiaohongshuMonitor {
+func NewXiaohongshuMonitor(cfg *config.Config, sender outbound.Sender, notifyAdmins func(string)) *XiaohongshuMonitor {
 	return &XiaohongshuMonitor{
 		cfg:          cfg,
-		napcat:       client,
+		outbound:     sender,
 		notifyAdmins: notifyAdmins,
 		livePending:  make(map[string]xiaohongshuLivePending),
 	}
@@ -433,6 +434,31 @@ func (m *XiaohongshuMonitor) handleAccount(event xiaohongshuBrowserEvent) {
 
 // dispatchLive formats live start/end aligned with Weibo QQ layout:
 // @全体成员 (own line) / 【昵称|小红书直播】 / 正文 / 链接 / 时间戳
+// sendToTargets delivers content to an explicit target id list. An empty list
+// means the subscription has no destination configured, so nothing is sent.
+func (m *XiaohongshuMonitor) sendToTargets(targetIDs []string, content interface{}) {
+	if m == nil || m.outbound == nil || m.cfg == nil {
+		return
+	}
+	resolve := func(id string) outbound.Target {
+		t := m.cfg.ResolveTarget(id)
+		if t.Address == "" {
+			return outbound.Target{}
+		}
+		kind := outbound.GroupChat
+		if t.Kind == "private" {
+			kind = outbound.PrivateChat
+		}
+		if t.Platform == "qq" {
+			if nid, err := strconv.ParseInt(t.Address, 10, 64); err == nil {
+				return outbound.Target{Platform: "qq", Kind: kind, ID: nid, Address: t.Address}
+			}
+		}
+		return outbound.Target{Platform: t.Platform, Kind: kind, Address: t.Address}
+	}
+	outbound.SendToTargetIDs(m.outbound, resolve, targetIDs, content)
+}
+
 func (m *XiaohongshuMonitor) dispatchLive(groupID int64, item config.XiaohongshuConfig, active bool, liveURL string) {
 	name := item.Name
 	if name == "" {
@@ -454,7 +480,7 @@ func (m *XiaohongshuMonitor) dispatchLive(groupID int64, item config.Xiaohongshu
 	}
 	text := header + body + "\n" + time.Now().Format("2006-01-02 15:04:05")
 	segments = append(segments, napcat.TextSegment(text))
-	m.napcat.SendGroupMessage(groupID, segments)
+	m.sendToTargets(item.TargetIDs, segments)
 }
 
 func xiaohongshuNoteTime(id string) int64 {
@@ -591,7 +617,12 @@ func (m *XiaohongshuMonitor) dispatchNote(groupID int64, item config.Xiaohongshu
 		bodyParts = append(bodyParts, truncateRunes(note.Desc, 600))
 	}
 	if note.Type == "video" && len(bodyParts) == 0 {
-		bodyParts = append(bodyParts, "发布了新视频")
+		// 兜底文案也要带主语，否则读起来像系统公告
+		subject := strings.TrimSpace(name)
+		if subject == "" {
+			subject = "作者"
+		}
+		bodyParts = append(bodyParts, subject+"发布了新视频")
 	}
 	body := strings.Join(bodyParts, "\n")
 	link := note.URL
@@ -624,7 +655,7 @@ func (m *XiaohongshuMonitor) dispatchNote(groupID int64, item config.Xiaohongshu
 		ts = time.Unix(note.CreateTime, 0).Format("2006-01-02 15:04:05")
 	}
 	segments = append(segments, napcat.TextSegment("\n"+ts))
-	m.napcat.SendGroupMessage(groupID, segments)
+	m.sendToTargets(item.TargetIDs, segments)
 }
 
 func (m *XiaohongshuMonitor) handleQRCode(event xiaohongshuBrowserEvent) {
@@ -636,6 +667,6 @@ func (m *XiaohongshuMonitor) handleQRCode(event xiaohongshuBrowserEvent) {
 		expires = 300
 	}
 	for _, uid := range uniqueAdminIDs(m.cfg) {
-		m.napcat.SendPrivateMessage(uid, []napcat.MessageSegment{napcat.TextSegment(fmt.Sprintf("小红书登录二维码，请在约 %d 分钟内使用小红书 App 扫码。", expires/60)), napcat.ImageSegment("base64://" + event.ImageBase64)})
+		outbound.SendPrivate(m.outbound, uid, []napcat.MessageSegment{napcat.TextSegment(fmt.Sprintf("小红书登录二维码，请在约 %d 分钟内使用小红书 App 扫码。", expires/60)), napcat.ImageSegment("base64://" + event.ImageBase64)})
 	}
 }

@@ -13,23 +13,6 @@ import (
 	"time"
 )
 
-func instagramVideoURL(media instagram.Media) string {
-	best := instagram.Variant{}
-	for _, v := range media.Variants {
-		if v.URL != "" && v.Bitrate <= 2500000 && v.Bitrate > best.Bitrate {
-			best = v
-		}
-	}
-	if best.URL != "" {
-		return best.URL
-	}
-	for _, v := range media.Variants {
-		if v.URL != "" && (best.URL == "" || v.Bitrate < best.Bitrate) {
-			best = v
-		}
-	}
-	return best.URL
-}
 func instagramMessageGroups(sub instagram.Subscription, e instagram.Event) [][]interface{} {
 	name := e.Author.Name
 	if name == "" {

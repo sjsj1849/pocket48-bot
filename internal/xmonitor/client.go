@@ -28,6 +28,8 @@ func (e *Error) Error() string {
 		return "X 用户不存在或当前不可读取"
 	case "timeout":
 		return "X 请求超时，将稍后重试"
+	case "search_unavailable":
+		return "X 搜索暂不可用，将稍后重试"
 	case "invalid_session":
 		return "X 登录态需包含 auth_token 和 ct0"
 	case "insecure_session_permissions":
@@ -108,5 +110,10 @@ func (c Client) Lookup(ctx context.Context, name string) (User, error) {
 }
 func (c Client) Timeline(ctx context.Context, id string, limit int) ([]Event, error) {
 	r, e := c.Call(ctx, map[string]any{"operation": "timeline", "userId": id, "limit": limit})
+	return r.Events, e
+}
+
+func (c Client) SearchPosts(ctx context.Context, query string, limit int) ([]Event, error) {
+	r, e := c.Call(ctx, map[string]any{"operation": "posts_search", "query": query, "limit": limit})
 	return r.Events, e
 }

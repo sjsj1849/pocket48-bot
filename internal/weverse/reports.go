@@ -19,17 +19,40 @@ type ReportSettings struct {
 	CommunityID     int64  `json:"communityId"`
 	CommunityName   string `json:"communityName"`
 	EnabledAt       string `json:"enabledAt,omitempty"`
+	// ImageTargets is the global fallback list used when a community has no
+	// dedicated entry in CommunityImageTargets.
+	ImageTargets []string `json:"imageTargets,omitempty"`
+	// CommunityImageTargets maps a normalized community key (see
+	// NormalizeCommunityKey) to the targets that community's report PNG should be
+	// sent to. This is what lets Hearts2Hearts and any future community fan out
+	// to different groups / private chats.
+	CommunityImageTargets map[string][]string `json:"communityImageTargets,omitempty"`
+}
+
+// NormalizeCommunityKey is the stable key used by CommunityImageTargets.
+func NormalizeCommunityKey(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// ReportImageTargets returns the fan-out targets for one community's report PNG:
+// its own list when configured, otherwise the global fallback.
+func (s ReportSettings) ReportImageTargets(community string) []string {
+	if list, ok := s.CommunityImageTargets[NormalizeCommunityKey(community)]; ok && len(list) > 0 {
+		return list
+	}
+	return s.ImageTargets
 }
 
 func LoadReportSettings(dir string) (ReportSettings, error) {
-	s := ReportSettings{Monthly: true, FirstHalf: true, Annual: true, SendTime: "09:00", CommunityID: 235, CommunityName: "Hearts2Hearts"}
+	s := ReportSettings{Monthly: true, FirstHalf: true, Annual: true, SendTime: "00:00", CommunityID: 235, CommunityName: "Hearts2Hearts"}
 	e := Read(dir, "reports.json", &s)
+	// Scheduled reports are always released as soon as the reporting period ends.
+	// Keep the field in the JSON contract so older admin clients remain compatible.
+	s.SendTime = "00:00"
 	return s, e
 }
 func SaveReportSettings(dir string, s ReportSettings) error {
-	if _, e := time.Parse("15:04", s.SendTime); e != nil {
-		return fmt.Errorf("发送时间应为 HH:MM")
-	}
+	s.SendTime = "00:00"
 	if s.CommunityID <= 0 {
 		return fmt.Errorf("请选择有效社区")
 	}
@@ -111,10 +134,6 @@ func DueReportPeriods(s ReportSettings, now time.Time) []ReportPeriod {
 	if e != nil {
 		return nil
 	}
-	clock, e := time.Parse("15:04", s.SendTime)
-	if e != nil {
-		return nil
-	}
 	now = now.In(ReportLocation)
 	var out []ReportPeriod
 	prior := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, ReportLocation).AddDate(0, -1, 0)
@@ -135,7 +154,7 @@ func DueReportPeriods(s ReportSettings, now time.Time) []ReportPeriod {
 	}
 	for _, p := range periods {
 		on := p.Kind == "weekly" && s.Weekly || p.Kind == "monthly" && s.Monthly || p.Kind == "firstHalf" && s.FirstHalf || p.Kind == "annual" && s.Annual
-		due := p.End.Add(time.Duration(clock.Hour())*time.Hour + time.Duration(clock.Minute())*time.Minute)
+		due := p.End
 		periodEnabled := enabled
 		if p.Kind == "weekly" {
 			// Adding weekly reports must not immediately back-send a completed week.
@@ -196,8 +215,9 @@ type TeammateReply struct {
 	Body   string `json:"body"`
 }
 type ReportMonth struct {
-	Month   string        `json:"month"`
-	Members []MemberCount `json:"members"`
+	Month            string        `json:"month"`
+	Members          []MemberCount `json:"members"`
+	UnconfirmedLives int           `json:"unconfirmedLives"`
 }
 type LiveChatTarget struct {
 	ID       string `json:"id"`
@@ -207,23 +227,30 @@ type LiveChatTarget struct {
 type Report struct {
 	Months []ReportMonth `json:"months"`
 
-	MissingParentComments int              `json:"missingParentComments"`
-	AsOf                  time.Time        `json:"asOf"`
-	Period                ReportPeriod     `json:"period"`
-	Community             string           `json:"community"`
-	Members               []MemberCount    `json:"members"`
-	TeammateReplies       []TeammateReply  `json:"teammateReplies"`
-	Events                []Event          `json:"events"`
-	LiveChatTargets       []LiveChatTarget `json:"liveChatTargets"`
-	RecordingStarted      time.Time        `json:"recordingStarted"`
-	UnavailablePosts      int              `json:"unavailablePosts"`
-	UnknownRootReplies    int              `json:"unknownRootReplies"`
-	Complete              bool             `json:"complete"`
+	UnconfirmedLives        int              `json:"unconfirmedLives"`
+	MissingParentComments   int              `json:"missingParentComments"`
+	AsOf                    time.Time        `json:"asOf"`
+	Period                  ReportPeriod     `json:"period"`
+	Community               string           `json:"community"`
+	Members                 []MemberCount    `json:"members"`
+	TeammateReplies         []TeammateReply  `json:"teammateReplies"`
+	Events                  []Event          `json:"events"`
+	LiveChatTargets         []LiveChatTarget `json:"liveChatTargets"`
+	RecordingStarted        time.Time        `json:"recordingStarted"`
+	RestrictedPosts         int              `json:"restrictedPosts"`
+	RestrictedContextPosts  int              `json:"restrictedContextPosts"`
+	UnavailablePosts        int              `json:"unavailablePosts"`
+	UnavailableContextPosts int              `json:"unavailableContextPosts"`
+	UnknownRootReplies      int              `json:"unknownRootReplies"`
+	Complete                bool             `json:"complete"`
 }
 
 func (h *History) BuildReport(s ReportSettings, p ReportPeriod) (Report, error) {
 	events, e := h.Period(s.CommunityID, p.Start, p.End)
 	if e != nil {
+		return Report{}, e
+	}
+	if e = h.applyLiveAssignments(s.CommunityID, events); e != nil {
 		return Report{}, e
 	}
 	members, e := h.Members(s.CommunityID)
@@ -239,12 +266,21 @@ func (h *History) BuildReport(s ReportSettings, p ReportPeriod) (Report, error) 
 	r.Complete = false
 	var completed string
 	_ = h.db.QueryRow("SELECT value FROM metadata WHERE key=?", "backfill:"+p.Key).Scan(&completed)
-	if finished, e := time.Parse(time.RFC3339, completed); e == nil && !finished.Before(p.End) {
+	if _, e := time.Parse(time.RFC3339, completed); e == nil {
 		r.Complete = true
 	}
 	var unavailable string
 	_ = h.db.QueryRow("SELECT value FROM metadata WHERE key=?", "backfillUnavailable:"+p.Key).Scan(&unavailable)
 	r.UnavailablePosts, _ = strconv.Atoi(unavailable)
+	var unavailableContext string
+	_ = h.db.QueryRow("SELECT value FROM metadata WHERE key=?", "backfillUnavailableContext:"+p.Key).Scan(&unavailableContext)
+	r.UnavailableContextPosts, _ = strconv.Atoi(unavailableContext)
+	var restricted string
+	_ = h.db.QueryRow("SELECT value FROM metadata WHERE key=?", "backfillRestricted:"+p.Key).Scan(&restricted)
+	r.RestrictedPosts, _ = strconv.Atoi(restricted)
+	var restrictedContext string
+	_ = h.db.QueryRow("SELECT value FROM metadata WHERE key=?", "backfillRestrictedContext:"+p.Key).Scan(&restrictedContext)
+	r.RestrictedContextPosts, _ = strconv.Atoi(restrictedContext)
 	if r.UnavailablePosts > 0 {
 		r.Complete = false
 	}
@@ -252,10 +288,26 @@ func (h *History) BuildReport(s ReportSettings, p ReportPeriod) (Report, error) 
 }
 func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events []Event) Report {
 	r := Report{AsOf: time.Now(), Period: p, Community: s.CommunityName, Members: []MemberCount{}, TeammateReplies: []TeammateReply{}, Events: []Event{}}
+	events = append([]Event(nil), events...)
+	sort.SliceStable(events, func(i, j int) bool { return events[i].Time < events[j].Time })
 	index := map[string]int{}
 	owners := map[string]string{}
-	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
+	ageOrder := map[string]int{"CARMEN": 0, "JIWOO": 1, "YUHA": 2, "STELLA": 3, "JUUN": 4, "A-NA": 5, "IAN": 6, "YE-ON": 7}
+	sort.SliceStable(members, func(i, j int) bool {
+		left, leftKnown := ageOrder[strings.ToUpper(strings.TrimSpace(members[i].Name))]
+		right, rightKnown := ageOrder[strings.ToUpper(strings.TrimSpace(members[j].Name))]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		if leftKnown {
+			return left < right
+		}
+		return members[i].Name < members[j].Name
+	})
 	for _, m := range members {
+		if community := strings.TrimSpace(s.CommunityName); community != "" && strings.EqualFold(strings.TrimSpace(m.Name), community) {
+			continue
+		}
 		index[m.ID] = len(r.Members)
 		r.Members = append(r.Members, MemberCount{ID: m.ID, Name: m.Name, Teammates: map[string]int{}, ReplyMembers: map[string]int{}, LiveChatHosts: map[string]int{}, LiveChatHostLives: map[string]int{}})
 	}
@@ -271,6 +323,12 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 	liveChatLives := map[string]map[string]bool{}
 	liveChatHostLives := map[string]bool{}
 	liveChatTargets := map[string]LiveChatTarget{}
+	type liveRun struct {
+		end       int64
+		timed     bool
+		soloTimed bool
+	}
+	liveRuns := map[string]*liveRun{}
 	for _, m := range r.Members {
 		liveChatTargets[m.ID] = LiveChatTarget{ID: m.ID, Name: m.Name, IsMember: true}
 	}
@@ -279,15 +337,21 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 			continue
 		}
 		seen[e.ID] = true
+		if e.Kind == "live" && !e.LiveParticipantsConfirmed {
+			r.UnconfirmedLives++
+		}
 		i, ok := index[e.MemberID]
-		if !ok {
+		if !ok && e.Kind != "live" {
 			continue
 		}
 		if e.Kind != "post" && e.Kind != "comment" && e.Kind != "live" && e.Kind != "live_chat" && e.Kind != "moment" {
 			continue
 		}
 		r.Events = append(r.Events, e)
-		m := &r.Members[i]
+		var m *MemberCount
+		if ok {
+			m = &r.Members[i]
+		}
 		switch e.Kind {
 		case "post":
 			m.Posts++
@@ -302,12 +366,20 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 			}
 		case "comment":
 			m.Replies++
-			if e.ParentMemberID == e.MemberID {
+			targetID := e.ParentMemberID
+			targetType := e.ParentProfileType
+			if targetID == "" && e.PostContext != nil {
+				targetID = e.PostContext.MemberID
+				if !e.PostContext.AuthorIsArtist {
+					targetType = "FAN"
+				}
+			}
+			if targetID == e.MemberID {
 				m.SelfReplies++
-			} else if _, known := index[e.ParentMemberID]; known {
+			} else if _, known := index[targetID]; known {
 				m.MemberReplies++
-				m.ReplyMembers[e.ParentMemberID]++
-			} else if e.ParentProfileType == "FAN" {
+				m.ReplyMembers[targetID]++
+			} else if targetType == "FAN" {
 				m.FanReplies++
 			} else {
 				m.UnknownReplies++
@@ -324,22 +396,71 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 				r.TeammateReplies = append(r.TeammateReplies, TeammateReply{Author: m.Name, Owner: r.Members[j].Name, PostID: e.PostID, URL: e.URL, Time: e.Time, Body: e.Body})
 			}
 		case "live":
-			m.Lives++
-			if e.LiveDuration > 0 {
-				m.LiveSeconds += e.LiveDuration
-				m.TimedLives++
+			participants := []string{e.MemberID}
+			if e.LiveParticipantsConfirmed {
+				participants = e.LiveParticipants
 			}
-			if len(e.LiveParticipants) == 1 && e.LiveParticipants[0] == e.MemberID && e.LiveDuration > 0 {
-				m.SoloLives++
-				m.SoloLiveSeconds += e.LiveDuration
+			participantKey := append([]string(nil), participants...)
+			sort.Strings(participantKey)
+			startedAt := e.LiveStartedAt
+			if startedAt <= 0 {
+				startedAt = e.Time
+			}
+			day := time.UnixMilli(startedAt).In(ReportLocation).Format("2006-01-02")
+			key := day + "\x00" + strings.Join(participantKey, "\x00")
+			endAt := startedAt + e.LiveDuration*1000
+			if endAt < startedAt {
+				endAt = startedAt
+			}
+			run, merged := liveRuns[key]
+			if !merged || startedAt > run.end+int64(30*time.Minute/time.Millisecond) {
+				run = &liveRun{end: endAt}
+				liveRuns[key] = run
+				merged = false
+			} else if endAt > run.end {
+				run.end = endAt
+			}
+			for _, participantID := range participants {
+				participantIndex, known := index[participantID]
+				if !known {
+					continue
+				}
+				participant := &r.Members[participantIndex]
+				if !merged {
+					participant.Lives++
+				}
+				if e.LiveDuration > 0 {
+					participant.LiveSeconds += e.LiveDuration
+					if !run.timed {
+						participant.TimedLives++
+					}
+				}
+				if e.LiveParticipantsConfirmed && len(participants) == 1 && e.LiveDuration > 0 {
+					if !run.soloTimed {
+						participant.SoloLives++
+					}
+					participant.SoloLiveSeconds += e.LiveDuration
+				}
+			}
+			if e.LiveDuration > 0 {
+				run.timed = true
+				if e.LiveParticipantsConfirmed && len(participants) == 1 {
+					run.soloTimed = true
+				}
 			}
 		case "live_chat":
 			m.LiveChats++
-			hostID := e.LiveHostMemberID
-			if hostID == "" {
-				hostID = "__unknown_live_host__"
+			hostIDs := []string{e.LiveHostMemberID}
+			if e.LiveParticipantsConfirmed {
+				hostIDs = e.LiveParticipants
 			}
-			if hostID != e.MemberID {
+			if len(hostIDs) == 0 || hostIDs[0] == "" {
+				hostIDs = []string{"__unknown_live_host__"}
+			}
+			for _, hostID := range hostIDs {
+				if hostID == e.MemberID {
+					continue
+				}
 				m.LiveChatHosts[hostID]++
 				if _, known := liveChatTargets[hostID]; !known {
 					name := strings.TrimSpace(e.LiveHostAuthor)
@@ -398,21 +519,32 @@ func AggregateReport(s ReportSettings, p ReportPeriod, members []Member, events 
 		for start := p.Start; start.Before(p.End); start = start.AddDate(0, 1, 0) {
 			sub, _ := NewReportPeriod("monthly", start.Year(), int(start.Month()))
 			month := AggregateReport(s, sub, append([]Member(nil), members...), events)
-			r.Months = append(r.Months, ReportMonth{Month: start.Format("2006-01"), Members: month.Members})
+			r.Months = append(r.Months, ReportMonth{Month: start.Format("2006-01"), Members: month.Members, UnconfirmedLives: month.UnconfirmedLives})
 		}
 	}
 	return r
 }
-func (r Report) CoverageNote() string {
-	parts := []string{"按北京时间统计。帖子照片只统计主帖照片；视频按附件数量统计，包含帖子、回复和 Moment，排除直播回放。回复按直接被回复者区分粉丝、其他成员、自己，身份不明单列；队友帖下回复另按主帖作者统计。评论/点赞是本期发布帖子的最新已采集累计值，不是本期新增互动；缺少采集值标为缺失。Moment 只计已采集的独立内容，过期历史可能无法回采。直播按发起账号计开播；团体账号发起的直播不能可靠分配到单个成员，因此不计入八位成员的场次；时长仅统计有时长数据的直播，单人时长仅在参与成员名单明确为一人时统计，未识别参与者不推测单人。直播弹幕只统计可识别为 ARTIST、属于成员目录且不是直播发起人的消息；关系按成员 ID 与直播发起账号 ID 匹配，不根据昵称猜测。弹幕计在发送成员名下，参与直播场次按直播编号去重；团体或未识别发起账号单独列示。", "报告生成于 " + r.AsOf.In(ReportLocation).Format("2006-01-02 15:04:05") + "；累计互动的具体采集时间见 Excel 活动明细。"}
-	if r.Complete {
-		parts = append(parts, "本期可见内容已完成历史回采；已删除或无权限内容可能无法恢复。")
-	}
-	if !r.Complete {
-		parts = append(parts, "本期历史尚未完整回采，表中仅为已采集记录；缺失记录不代表成员未发布。持续记录开始于 "+r.RecordingStarted.In(ReportLocation).Format("2006-01-02 15:04:05")+"。")
+func (r Report) CoverageItems() []string {
+	parts := []string{
+		"统计时间均为北京时间；实时记录开始于 " + r.RecordingStarted.In(ReportLocation).Format("2006-01-02 15:04") + "。此前可见的帖子、回复、直播及直播弹幕已做历史回采。",
+		"Moment 仅在发布后 24 小时内开放评论和 Cheer；超过后不一定能从历史列表重新发现，因此较早 Moment 可能缺失。",
+		"累计评论和累计点赞只统计本期发布的帖子；成员回复按回复发生时间统计，包含成员在过往帖子下的新回复。",
+		"成员回复按直接对象分为粉丝、成员和自己；队友帖子回复另按主帖作者统计。",
+		"直播时长按面板确认的所属成员统计。相同成员同日、前后间隔不超过 30 分钟的连续开播合并为 1 场；总时长没有数据时记为 00:00:00，单人时长在直播完成归属确认前显示待确认。",
+		"发弹幕直播场次指至少发送过 1 条弹幕的不同直播，不表示本人参与或客串直播。",
+		"报告生成于 " + r.AsOf.In(ReportLocation).Format("2006-01-02 15:04") + "；详细记录与采集时间见 Excel。",
 	}
 	if r.UnavailablePosts > 0 {
-		parts = append(parts, fmt.Sprintf("%d 条历史帖子当前不可访问，其回复可能缺失。", r.UnavailablePosts))
+		parts = append(parts, fmt.Sprintf("本期有 %d 条帖子或直播当前不可访问，相关内容可能缺失。", r.UnavailablePosts))
+	}
+	if r.RestrictedPosts > 0 {
+		parts = append(parts, fmt.Sprintf("本期有 %d 条会员专属帖子：基础记录及列表可见的互动数已统计，正文和完整回复上下文无权限读取。", r.RestrictedPosts))
+	}
+	if r.RestrictedContextPosts > 0 {
+		parts = append(parts, fmt.Sprintf("另有 %d 条本期以前的会员专属帖子，基础记录可识别，但无权限检查其中是否新增本期成员回复。", r.RestrictedContextPosts))
+	}
+	if r.UnavailableContextPosts > 0 {
+		parts = append(parts, fmt.Sprintf("另有 %d 条本期以前的其他历史主帖当前不可访问，无法检查其中是否新增本期成员回复；不计作本期发帖缺失。", r.UnavailableContextPosts))
 	}
 	if r.MissingParentComments > 0 {
 		parts = append(parts, fmt.Sprintf("%d 条成员回复的被回复评论不可访问，已保留成员回复并计数，但相关粉丝/队友上下文无法恢复。", r.MissingParentComments))
@@ -420,7 +552,12 @@ func (r Report) CoverageNote() string {
 	if r.UnknownRootReplies > 0 {
 		parts = append(parts, fmt.Sprintf("%d 条回复未取得主帖作者，未计入队友帖回复。", r.UnknownRootReplies))
 	}
-	return strings.Join(parts, "\n")
+	return parts
+
+}
+
+func (r Report) CoverageNote() string {
+	return strings.Join(r.CoverageItems(), "\n")
 }
 
 func (r Report) DisplayTitle() string {

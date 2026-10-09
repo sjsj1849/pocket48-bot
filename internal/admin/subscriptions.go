@@ -20,9 +20,12 @@ import (
 // --- 口袋房间订阅 ---
 
 type pocketRoomSub struct {
-	GroupID int64  `json:"groupId"`
-	RoomID  int64  `json:"roomId"`
-	Name    string `json:"name,omitempty"`
+	GroupID     int64    `json:"groupId"`
+	TargetIDs   []string `json:"targetIds,omitempty"`
+	RoomID      int64    `json:"roomId"`
+	Name        string   `json:"name,omitempty"`
+	VisitNotify bool     `json:"visitNotify"`
+	KeepHistory bool     `json:"keepHistory"`
 	// Edit: move room/group. Old* used by PUT.
 	OldGroupID int64 `json:"oldGroupId,omitempty"`
 	OldRoomID  int64 `json:"oldRoomId,omitempty"`
@@ -38,6 +41,10 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 	if encoded := raw["GROUP_SUBSCRIPTIONS"]; len(encoded) > 0 {
 		_ = json.Unmarshal(encoded, &subs)
 	}
+	features := map[string]*config.PocketMemberFeatureConfig{}
+	if encoded := raw["POCKET_MEMBER_FEATURES"]; len(encoded) > 0 {
+		_ = json.Unmarshal(encoded, &features)
+	}
 	switch r.Method {
 	case http.MethodGet:
 		result := make([]pocketRoomSub, 0)
@@ -45,22 +52,41 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 		if cfg, err := config.LoadConfig(s.opts.ConfigPath); err == nil && strings.TrimSpace(cfg.PocketToken) != "" {
 			client = pocket48.NewClient(cfg)
 		}
-		for groupText, rooms := range subs {
-			gid, _ := strconv.ParseInt(groupText, 10, 64)
+		// Aggregate by room id so a room fanning out to several targets (QQ +
+		// Feishu, groups + private) shows as one entry with a target list.
+		byRoom := map[int64]*pocketRoomSub{}
+		order := make([]int64, 0)
+		for targetText, rooms := range subs {
+			targetID := targetText
+			gid, _ := strconv.ParseInt(targetText, 10, 64)
+			if strings.Contains(targetText, ":") {
+				gid = qqGroupFromTargetID(targetText)
+			}
 			for _, roomID := range rooms {
-				name := ""
-				if client != nil {
-					name = enrichPocketRoomName(client, roomID)
+				item := byRoom[roomID]
+				if item == nil {
+					item = &pocketRoomSub{RoomID: roomID, GroupID: gid}
+					if client != nil {
+						item.Name = enrichPocketRoomName(client, roomID)
+					}
+					byRoom[roomID] = item
+					order = append(order, roomID)
 				}
-				result = append(result, pocketRoomSub{GroupID: gid, RoomID: roomID, Name: name})
+				if targetID != "" && !stringInSlice(targetID, item.TargetIDs) {
+					item.TargetIDs = append(item.TargetIDs, targetID)
+				}
 			}
 		}
-		sort.Slice(result, func(i, j int) bool {
-			if result[i].GroupID == result[j].GroupID {
-				return result[i].RoomID < result[j].RoomID
+		for _, roomID := range order {
+			item := byRoom[roomID]
+			feature := features[strconv.FormatInt(roomID, 10)]
+			if feature != nil {
+				item.VisitNotify = feature.VisitNotify
+				item.KeepHistory = feature.KeepHistory
 			}
-			return result[i].GroupID < result[j].GroupID
-		})
+			result = append(result, *item)
+		}
+		sort.Slice(result, func(i, j int) bool { return result[i].RoomID < result[j].RoomID })
 		writeJSON(w, http.StatusOK, map[string]any{"subscriptions": result})
 	case http.MethodPost:
 		var body pocketRoomSub
@@ -68,19 +94,30 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		if body.GroupID <= 0 || body.RoomID <= 0 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号和口袋房间 ID"})
+		if body.RoomID <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效口袋房间 ID"})
 			return
 		}
-		gk := strconv.FormatInt(body.GroupID, 10)
-		for _, id := range subs[gk] {
-			if id == body.RoomID {
-				writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "该房间已在监控列表中"})
-				return
+		targets := pocketTargetIDs(body.TargetIDs, body.GroupID)
+		if len(targets) == 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择至少一个投递目标"})
+			return
+		}
+		for _, tk := range targets {
+			already := false
+			for _, id := range subs[tk] {
+				if id == body.RoomID {
+					already = true
+					break
+				}
+			}
+			if !already {
+				subs[tk] = append(subs[tk], body.RoomID)
 			}
 		}
-		subs[gk] = append(subs[gk], body.RoomID)
-		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+		featureKey := strconv.FormatInt(body.RoomID, 10)
+		features[featureKey] = &config.PocketMemberFeatureConfig{VisitNotify: body.VisitNotify, KeepHistory: body.KeepHistory}
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs, "POCKET_MEMBER_FEATURES": features}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
@@ -91,47 +128,52 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		oldG := body.OldGroupID
 		oldR := body.OldRoomID
-		// Allow 0 for old values (group 0 subscriptions are valid)
-		oldGSpecified := oldR > 0 || body.OldRoomID == 0
-		if !oldGSpecified || oldG <= 0 {
-			oldG = body.GroupID
-		}
 		if oldR <= 0 {
 			oldR = body.RoomID
 		}
-		if body.GroupID <= 0 || body.RoomID <= 0 || oldG <= 0 || oldR <= 0 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效的 QQ 群号与房间 ID"})
+		if body.RoomID <= 0 || oldR <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效的房间 ID"})
 			return
 		}
-		// remove old
-		ogk := strconv.FormatInt(oldG, 10)
-		rooms := subs[ogk]
-		next := rooms[:0]
-		for _, id := range rooms {
-			if id != oldR {
-				next = append(next, id)
+		targets := pocketTargetIDs(body.TargetIDs, body.GroupID)
+		if len(targets) == 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择至少一个投递目标"})
+			return
+		}
+		// Remove the room from every target, then re-add it to the chosen set.
+		for tk, rooms := range subs {
+			next := rooms[:0]
+			for _, id := range rooms {
+				if id != oldR {
+					next = append(next, id)
+				}
+			}
+			if len(next) == 0 {
+				delete(subs, tk)
+			} else {
+				subs[tk] = next
 			}
 		}
-		if len(next) == 0 {
-			delete(subs, ogk)
-		} else {
-			subs[ogk] = next
-		}
-		// add new
-		ngk := strconv.FormatInt(body.GroupID, 10)
-		exists := false
-		for _, id := range subs[ngk] {
-			if id == body.RoomID {
-				exists = true
-				break
+		for _, tk := range targets {
+			exists := false
+			for _, id := range subs[tk] {
+				if id == body.RoomID {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				subs[tk] = append(subs[tk], body.RoomID)
 			}
 		}
-		if !exists {
-			subs[ngk] = append(subs[ngk], body.RoomID)
+		oldFeatureKey := strconv.FormatInt(oldR, 10)
+		newFeatureKey := strconv.FormatInt(body.RoomID, 10)
+		if oldFeatureKey != newFeatureKey {
+			delete(features, oldFeatureKey)
 		}
-		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+		features[newFeatureKey] = &config.PocketMemberFeatureConfig{VisitNotify: body.VisitNotify, KeepHistory: body.KeepHistory}
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs, "POCKET_MEMBER_FEATURES": features}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
@@ -142,20 +184,26 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "请求格式无效"})
 			return
 		}
-		gk := strconv.FormatInt(body.GroupID, 10)
-		rooms := subs[gk]
-		next := rooms[:0]
-		for _, id := range rooms {
-			if id != body.RoomID {
-				next = append(next, id)
+		if body.RoomID <= 0 {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效房间 ID"})
+			return
+		}
+		// Remove the room from every target it is fanned out to.
+		for tk, rooms := range subs {
+			next := rooms[:0]
+			for _, id := range rooms {
+				if id != body.RoomID {
+					next = append(next, id)
+				}
+			}
+			if len(next) == 0 {
+				delete(subs, tk)
+			} else {
+				subs[tk] = next
 			}
 		}
-		if len(next) == 0 {
-			delete(subs, gk)
-		} else {
-			subs[gk] = next
-		}
-		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs}); err != nil {
+		delete(features, strconv.FormatInt(body.RoomID, 10))
+		if err := s.writeConfigAndReloadBot(map[string]any{"GROUP_SUBSCRIPTIONS": subs, "POCKET_MEMBER_FEATURES": features}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 			return
 		}
@@ -168,20 +216,22 @@ func (s *Server) handlePocketRoomSubscriptions(w http.ResponseWriter, r *http.Re
 // --- 微博 UID 订阅 ---
 
 type weiboPanelSub struct {
-	GroupID    int64  `json:"groupId"`
-	UID        string `json:"uid"`
-	Name       string `json:"name,omitempty"`
-	AtAll      bool   `json:"atAll"`
-	LastID     string `json:"lastId,omitempty"`
-	OldGroupID int64  `json:"oldGroupId,omitempty"`
-	OldUID     string `json:"oldUid,omitempty"`
+	GroupID    int64    `json:"groupId"`
+	TargetIDs  []string `json:"targetIds,omitempty"`
+	UID        string   `json:"uid"`
+	Name       string   `json:"name,omitempty"`
+	AtAll      bool     `json:"atAll"`
+	LastID     string   `json:"lastId,omitempty"`
+	OldGroupID int64    `json:"oldGroupId,omitempty"`
+	OldUID     string   `json:"oldUid,omitempty"`
 }
 
 type weiboStoredSub struct {
-	UID    string `json:"uid"`
-	Name   string `json:"name,omitempty"`
-	AtAll  bool   `json:"at_all"`
-	LastID string `json:"last_id,omitempty"`
+	UID       string   `json:"uid"`
+	TargetIDs []string `json:"targetIds,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	AtAll     bool     `json:"at_all"`
+	LastID    string   `json:"last_id,omitempty"`
 }
 
 var weiboUIDPattern = regexp.MustCompile(`^\d{5,20}$`)
@@ -280,7 +330,7 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 						nameDirty = true
 					}
 				}
-				result = append(result, weiboPanelSub{GroupID: gid, UID: id, Name: name, AtAll: item.AtAll, LastID: item.LastID})
+				result = append(result, weiboPanelSub{GroupID: gid, TargetIDs: item.TargetIDs, UID: id, Name: name, AtAll: item.AtAll, LastID: item.LastID})
 			}
 		}
 		sort.Slice(result, func(i, j int) bool {
@@ -301,8 +351,13 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 			return
 		}
 		body.UID = normalizeWeiboUID(body.UID)
+		if body.GroupID <= 0 {
+			if ids := qqGroupIDsFromTargets(body.TargetIDs); len(ids) > 0 {
+				body.GroupID = ids[0]
+			}
+		}
 		if body.GroupID <= 0 || body.UID == "" {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号，以及微博 UID 或包含 UID 的完整微博链接"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群），以及微博 UID 或包含 UID 的完整微博链接"})
 			return
 		}
 		gk := strconv.FormatInt(body.GroupID, 10)
@@ -315,6 +370,7 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		}
 		item.UID = body.UID
 		item.AtAll = body.AtAll
+		item.TargetIDs = body.TargetIDs
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		}
@@ -349,8 +405,13 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		if !oldGSpecified {
 			oldG = body.GroupID
 		}
+		if body.GroupID <= 0 {
+			if ids := qqGroupIDsFromTargets(body.TargetIDs); len(ids) > 0 {
+				body.GroupID = ids[0]
+			}
+		}
 		if body.GroupID <= 0 || body.UID == "" || oldUID == "" {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号，以及微博 UID 或完整微博链接"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群），以及微博 UID 或完整微博链接"})
 			return
 		}
 		ogk := strconv.FormatInt(oldG, 10)
@@ -376,6 +437,7 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 		}
 		item.UID = body.UID
 		item.AtAll = body.AtAll
+		item.TargetIDs = body.TargetIDs
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		} else if item.Name == "" {
@@ -416,37 +478,39 @@ func (s *Server) handleWeiboSubscriptions(w http.ResponseWriter, r *http.Request
 // --- 抖音创作者订阅 ---
 
 type douyinPanelSub struct {
-	GroupID      int64   `json:"groupId"`
-	GroupIDs     []int64 `json:"groupIds,omitempty"`
-	SecUserID    string  `json:"secUserId,omitempty"`
-	ProfileURL   string  `json:"profileUrl,omitempty"`
-	Target       string  `json:"target,omitempty"`
-	Name         string  `json:"name,omitempty"`
-	AtAll        bool    `json:"atAll"`
-	LiveID       string  `json:"liveId,omitempty"`
-	OldGroupID   int64   `json:"oldGroupId,omitempty"`
-	OldGroupIDs  []int64 `json:"oldGroupIds,omitempty"`
-	OldSec       string  `json:"oldSecUserId,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
-	WorksEnabled *bool   `json:"worksEnabled,omitempty"`
-	LiveEnabled  *bool   `json:"liveEnabled,omitempty"`
-	Source       string  `json:"source,omitempty"`
-	Status       string  `json:"status,omitempty"`
+	GroupID      int64
+	TargetIDs    []string `json:"targetIds,omitempty"`
+	GroupIDs     []int64  `json:"groupIds,omitempty"`
+	SecUserID    string   `json:"secUserId,omitempty"`
+	ProfileURL   string   `json:"profileUrl,omitempty"`
+	Target       string   `json:"target,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	AtAll        bool     `json:"atAll"`
+	LiveID       string   `json:"liveId,omitempty"`
+	OldGroupID   int64    `json:"oldGroupId,omitempty"`
+	OldGroupIDs  []int64  `json:"oldGroupIds,omitempty"`
+	OldSec       string   `json:"oldSecUserId,omitempty"`
+	Enabled      *bool    `json:"enabled,omitempty"`
+	WorksEnabled *bool    `json:"worksEnabled,omitempty"`
+	LiveEnabled  *bool    `json:"liveEnabled,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Status       string   `json:"status,omitempty"`
 }
 
 type douyinStoredSub struct {
-	SecUserID     string `json:"sec_user_id"`
-	ProfileURL    string `json:"profile_url,omitempty"`
-	Name          string `json:"name,omitempty"`
-	NameManual    bool   `json:"name_manual,omitempty"`
-	AtAll         bool   `json:"at_all"`
-	LastAwemeID   string `json:"last_aweme_id,omitempty"`
-	LastAwemeTime int64  `json:"last_aweme_time,omitempty"`
-	LiveID        string `json:"live_id,omitempty"`
-	Auto          bool   `json:"auto,omitempty"`
-	Disabled      bool   `json:"disabled,omitempty"`
-	WorksDisabled bool   `json:"works_disabled,omitempty"`
-	LiveDisabled  bool   `json:"live_disabled,omitempty"`
+	TargetIDs     []string `json:"targetIds,omitempty"`
+	SecUserID     string   `json:"sec_user_id"`
+	ProfileURL    string   `json:"profile_url,omitempty"`
+	Name          string   `json:"name,omitempty"`
+	NameManual    bool     `json:"name_manual,omitempty"`
+	AtAll         bool     `json:"at_all"`
+	LastAwemeID   string   `json:"last_aweme_id,omitempty"`
+	LastAwemeTime int64    `json:"last_aweme_time,omitempty"`
+	LiveID        string   `json:"live_id,omitempty"`
+	Auto          bool     `json:"auto,omitempty"`
+	Disabled      bool     `json:"disabled,omitempty"`
+	WorksDisabled bool     `json:"works_disabled,omitempty"`
+	LiveDisabled  bool     `json:"live_disabled,omitempty"`
 }
 
 func loadDouyinSubs(encoded json.RawMessage) map[string]map[string]*douyinStoredSub {
@@ -495,7 +559,8 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 					panel = &douyinPanelSub{
 						GroupID: gid, SecUserID: id, ProfileURL: item.ProfileURL,
 						Name: name, AtAll: item.AtAll, LiveID: item.LiveID,
-						Enabled: boolPointer(!item.Disabled), WorksEnabled: boolPointer(!item.WorksDisabled), LiveEnabled: boolPointer(!item.LiveDisabled),
+						TargetIDs: item.TargetIDs,
+						Enabled:   boolPointer(!item.Disabled), WorksEnabled: boolPointer(!item.WorksDisabled), LiveEnabled: boolPointer(!item.LiveDisabled),
 						Source: "config", Status: douyinSubscriptionStatus(s.opts.ConfigPath, item),
 					}
 					byCreator[id] = panel
@@ -510,6 +575,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 					if panel.LiveID == "" {
 						panel.LiveID = item.LiveID
 					}
+					panel.TargetIDs = mergeUniqueStrings(panel.TargetIDs, item.TargetIDs)
 				}
 				panel.GroupIDs = append(panel.GroupIDs, gid)
 			}
@@ -541,8 +607,11 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			resolveInput = strings.TrimSpace(body.Target)
 		}
 		groupIDs := normalizeDouyinGroupIDs(body.GroupIDs, body.GroupID)
+		if len(groupIDs) == 0 {
+			groupIDs = qqGroupIDsFromTargets(body.TargetIDs)
+		}
 		if len(groupIDs) == 0 || resolveInput == "" {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写 QQ 群号，以及抖音主页链接或 sec_user_id"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群），以及抖音主页链接或 sec_user_id"})
 			return
 		}
 		sec, profile, err := logic.ResolveDouyinTarget(r.Context(), resolveInput)
@@ -564,6 +633,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 				item = &douyinStoredSub{SecUserID: sec}
 			}
 			item.SecUserID = sec
+			item.TargetIDs = body.TargetIDs
 			item.ProfileURL = profile
 			item.AtAll = body.AtAll
 			item.Auto = false
@@ -598,12 +668,15 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			oldSec = strings.TrimSpace(body.SecUserID)
 		}
 		groupIDs := normalizeDouyinGroupIDs(body.GroupIDs, body.GroupID)
+		if len(groupIDs) == 0 {
+			groupIDs = qqGroupIDsFromTargets(body.TargetIDs)
+		}
 		oldGroupIDs := normalizeDouyinGroupIDs(body.OldGroupIDs, body.OldGroupID)
 		if len(oldGroupIDs) == 0 {
 			oldGroupIDs = douyinGroupsForCreator(subs, oldSec)
 		}
 		if len(groupIDs) == 0 || oldSec == "" || len(oldGroupIDs) == 0 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 sec_user_id"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群）与 sec_user_id"})
 			return
 		}
 		if candidate := strings.TrimSpace(body.SecUserID); candidate != "" && candidate != oldSec {
@@ -636,6 +709,7 @@ func (s *Server) handleDouyinSubscriptions(w http.ResponseWriter, r *http.Reques
 			item := *preserved
 			item.SecUserID = oldSec
 			item.AtAll = body.AtAll
+			item.TargetIDs = body.TargetIDs
 			if body.Enabled != nil {
 				item.Disabled = !*body.Enabled
 			}
@@ -811,4 +885,87 @@ func douyinSubscriptionStatus(configPath string, item *douyinStoredSub) string {
 		return "主页已解析，等待直播间"
 	}
 	return "等待首次解析"
+}
+
+// mergeUniqueStrings appends b's items to a, skipping any that are already
+// present, and returns the combined list. Used to fan a creator's targets in
+// across multiple group subscriptions.
+func mergeUniqueStrings(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, s := range b {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// qqGroupIDsFromTargets extracts the numeric QQ group ids embedded in explicit
+// target ids ("qq:group:<id>"). It lets the douyin subscription handler derive
+// its legacy group-key map from the fan-out targets chosen in the UI.
+func qqGroupIDsFromTargets(targetIDs []string) []int64 {
+	var ids []int64
+	seen := make(map[int64]bool)
+	for _, targetID := range targetIDs {
+		targetID = strings.TrimSpace(targetID)
+		if !strings.HasPrefix(targetID, "qq:group:") {
+			continue
+		}
+		raw := strings.TrimPrefix(targetID, "qq:group:")
+		if id, err := strconv.ParseInt(raw, 10, 64); err == nil && id > 0 && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// pocketTargetIDs returns the target ids a room subscription should fan out to.
+// It prefers the explicit targetIds list and falls back to the legacy numeric
+// group id for backward compatibility.
+func pocketTargetIDs(targetIDs []string, groupID int64) []string {
+	clean := make([]string, 0, len(targetIDs)+1)
+	seen := make(map[string]bool)
+	for _, id := range targetIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 && groupID > 0 {
+		clean = append(clean, strconv.FormatInt(groupID, 10))
+	}
+	return clean
+}
+
+// qqGroupFromTargetID extracts the numeric QQ group id from a "qq:group:<id>"
+// target id, or returns 0 if it is not a QQ group target.
+func qqGroupFromTargetID(targetID string) int64 {
+	targetID = strings.TrimSpace(targetID)
+	if !strings.HasPrefix(targetID, "qq:group:") {
+		return 0
+	}
+	id, _ := strconv.ParseInt(strings.TrimPrefix(targetID, "qq:group:"), 10, 64)
+	return id
+}
+
+func stringInSlice(needle string, haystack []string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }

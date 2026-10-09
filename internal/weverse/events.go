@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"net/url"
 	"regexp"
 	"sort"
@@ -13,12 +14,13 @@ import (
 )
 
 type Event struct {
-	CommentsAt       int64    `json:"commentsAt,omitempty"`
-	LikesAt          int64    `json:"likesAt,omitempty"`
-	PostComments     *int64   `json:"postComments,omitempty"`
-	PostLikes        *int64   `json:"postLikes,omitempty"`
-	MetricsAt        int64    `json:"metricsAt,omitempty"`
-	LiveParticipants []string `json:"liveParticipants,omitempty"`
+	CommentsAt                int64    `json:"commentsAt,omitempty"`
+	LikesAt                   int64    `json:"likesAt,omitempty"`
+	PostComments              *int64   `json:"postComments,omitempty"`
+	PostLikes                 *int64   `json:"postLikes,omitempty"`
+	MetricsAt                 int64    `json:"metricsAt,omitempty"`
+	LiveParticipants          []string `json:"liveParticipants,omitempty"`
+	LiveParticipantsConfirmed bool     `json:"liveParticipantsConfirmed,omitempty"`
 
 	ID                       string            `json:"id"`
 	Kind                     string            `json:"kind"`
@@ -295,6 +297,10 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 					return nil, err
 				}
 			}
+			// Moment 走活动流：活动流自带 ARTIST_MOMENT 类型（实测覆盖），
+			// 不再遍历成员去取 artistLatestMoment —— 那要求每轮都拉一次完整成员
+			// 名单（响应体大、实测 3.8s），而名单本身几乎不变。
+			// 若活动流漏推，成员名单缓存 10 分钟 TTL 过期后的那次刷新会补上。
 			// The official artist directory exposes current Moments independently
 			// of the notification feed, which may omit an artist's notification.
 			for _, member := range members {
@@ -400,19 +406,42 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 		seenPosts, seenComments := map[string]bool{}, map[string]bool{}
 		parents := map[string]Object{}
 		commentParents := map[string]Object{}
+		// 回复主路径：按成员维度拉取（每成员 1 个请求）。这是月报回填已在用、
+		// 验证过的接口，能直接拿到全员回复，不必为每个帖子回帖拉详情。
+		// 月报与实时用同一口径，两边统计数字保持一致。
+		if wantComments {
+			memberCommentEvents(ctx, c, s, cid, members, artistNames, since, all)
+		}
 		addComments := func(items []any, postID, slug string, parent Object) error {
 			return c.addThreadComments(ctx, items, postID, slug, cid, parent, artistNames, commentParents, all)
 		}
+		// 通知流仍用于兜底：member 接口只覆盖「成员发过的评论」，
+		// 而 ARTIST_MOMENT_COMMENT / 成员在 moment 下的回复等类型可能不在其中。
+		// 这里只对尚未命中 member 结果的帖子回帖拉取，请求量比原来低一个数量级。
+		cutMS := int64(0)
+		if !since.IsZero() {
+			cutMS = since.UnixMilli()
+		}
 		for _, v := range notifications {
 			n := obj(v)
+			// pagesLimit 只用时间判断"是否继续翻页"，从不丢弃早于 since 的条目，
+			// 于是每轮都会收到整页历史活动（实测第一页可横跨数天）。这里按活动
+			// 自身的时间再过滤一次，否则会为早已处理过的活动反复回帖拉详情。
+			if cutMS > 0 {
+				if ts := num(n["time"]); ts > 0 && ts < cutMS {
+					continue
+				}
+			}
 			slug, postID, commentID := notificationTarget(n)
 			if postID == "" || slug != s.Slug {
 				continue
 			}
+			if wantComments && threadCoveredByMember(postID, all) {
+				continue
+			}
 			typ := strings.ToUpper(text(n, "activityType", "type"))
 			if wantPosts && strings.Contains(typ, "MOMENT") && !strings.Contains(typ, "COMMENT") {
-				var post Object
-				err := c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &post)
+				post, err := c.postDetail(ctx, postID)
 				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 					continue
 				}
@@ -432,7 +461,8 @@ func (c *Client) Events(ctx context.Context) ([]Event, error) {
 			}
 			parent, ok := parents[postID]
 			if !ok {
-				if err := c.call(ctx, "/post/v1.0/post-"+postID+"?fieldSet=postV1", true, &parent); err != nil {
+				var err error
+				if parent, err = c.postDetail(ctx, postID); err != nil {
 					if errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden) {
 						continue
 					}
@@ -605,6 +635,54 @@ func (c *Client) PostContext(ctx context.Context, postID, slug string, cid int64
 	return aiPostContext(p, postID, slug, names), nil
 }
 
+// threadCoveredByMember 判断该帖子的爱豆回复是否已经由 member 维度接口覆盖。
+// 注意 Event.ID 形如 "comment:<commentId>"，**不含 postId**，所以必须用 PostID
+// 字段判断；早先按 ID 前缀反查永远不成立，会让兜底逻辑照旧逐帖拉取。
+func threadCoveredByMember(postID string, all map[string]Event) bool {
+	for _, e := range all {
+		if e.PostID == postID {
+			return true
+		}
+	}
+	return false
+}
+
+// memberCommentEvents 用「按成员维度」的评论接口收集全员最新回复。
+//
+// 为什么不用回帖拉取：活动流里带着大量历史帖子上下文（实测一次 5 分钟窗口就有
+// 241 个唯一 postId），逐帖串行拉详情+评论约需 482 个请求，是单轮 19~29s 的主因。
+// 而 /comment/v1.0/member-<id>/comments 直接按评论作者返回该成员的评论，
+// 8 位成员只需 8 个请求，月报回填已在用并验证过这个口径。
+func memberCommentEvents(ctx context.Context, c *Client, sub Subscription, cid int64, members []Member, artistNames map[string]string, since time.Time, all map[string]Event) {
+	for _, member := range members {
+		comments, err := c.MemberComments(ctx, member.ID, since)
+		if err != nil {
+			// 单个成员失败（限流/网络）不应中断整轮，继续下一位。
+			log.Printf("[Weverse] 读取 %s 的回复失败: %v", member.Name, err)
+			continue
+		}
+		commentParents := map[string]Object{}
+		for _, comment := range comments {
+			createdAt := num(comment["createdAt"])
+			if since.IsZero() || (createdAt > 0 && createdAt < since.UnixMilli()) {
+				continue
+			}
+			root := obj(obj(comment["root"])["data"])
+			postID := text(root, "postId", "id")
+			if postID == "" {
+				postID = text(obj(obj(comment["parent"])["data"]), "postId")
+			}
+			if !idRE.MatchString(postID) {
+				continue
+			}
+			// addThreadComments 会自行按 artistNames 过滤作者并解析父评论上下文。
+			if err := c.addThreadComments(ctx, []any{comment}, postID, sub.Slug, cid, root, artistNames, commentParents, all); err != nil {
+				log.Printf("[Weverse] 解析 %s 的回复失败: %v", member.Name, err)
+			}
+		}
+	}
+}
+
 func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slug string, cid int64, parent Object, artistNames map[string]string, commentParents map[string]Object, all map[string]Event) error {
 	for _, x := range items {
 		item := obj(x)
@@ -625,11 +703,9 @@ func (c *Client) addThreadComments(ctx context.Context, items []any, postID, slu
 				if idRE.MatchString(id) {
 					cached, ok := commentParents[id]
 					if !ok {
-						if err := c.call(ctx, "/comment/v1.0/comment-"+id+"?fieldSet=commentV1", true, &cached); err != nil {
-							if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrForbidden) {
-								return err
-							}
-						}
+						// 父评论正文不可变，走缓存；失败（如已删除）保持零值，
+						// 与原有"忽略 NotFound/Forbidden"的行为一致。
+						cached, _ = c.commentDetail(ctx, id)
 						commentParents[id] = cached
 					}
 					target = cached

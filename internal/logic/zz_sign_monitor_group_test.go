@@ -22,8 +22,8 @@ func zzDelta(name string, delta int) signMonitorDelta {
 
 func zzGroups() []config.WeiboSignMonitorGroup {
 	return []config.WeiboSignMonitorGroup{
-		{"第一组", []string{"Ian", "Jiwoo", "Stella", "Yuha"}},
-		{"第二组", []string{"Ana", "JUUN", "补充"}},
+		{Name: "第一组", Members: []string{"Ian", "Jiwoo", "Stella", "Yuha"}},
+		{Name: "第二组", Members: []string{"Ana", "JUUN", "补充"}},
 	}
 }
 
@@ -70,7 +70,7 @@ func TestDetectGroupSpikesSkipsTinyGroups(t *testing.T) {
 	deltas := map[string]signMonitorDelta{
 		"Ana": zzDelta("Ana", 50), "JUUN": zzDelta("JUUN", 5000),
 	}
-	groups := []config.WeiboSignMonitorGroup{{"第二组", []string{"Ana", "JUUN"}}}
+	groups := []config.WeiboSignMonitorGroup{{Name: "第二组", Members: []string{"Ana", "JUUN"}}}
 	if got := detectGroupSpikes(deltas, groups, 2, 300); len(got) != 0 {
 		t.Errorf("2 人组不该做组内判据：%+v", got)
 	}

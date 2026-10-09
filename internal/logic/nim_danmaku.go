@@ -46,6 +46,7 @@ type NimDanmakuBridge struct {
 	onGift       func(roomID int64, g *GiftMessage)
 	onMember     func(roomID int64, m *MemberEvent)
 	onLiveUpdate func(roomID int64, update *LiveUpdate)
+	onLiveOnline func(roomID int64, online *LiveOnline)
 	onLiveEnded  func(roomID int64, ended *LiveEnded)
 	onRoom       func(pocketRoomID int64, m *RoomRealtimeMessage)
 	onConnected  func(roomID int64)
@@ -78,6 +79,11 @@ type LiveUpdate struct {
 	Time      int64 `json:"time"`
 }
 
+type LiveOnline struct {
+	OnlineMemberNum int64 `json:"onlineMemberNum"`
+	Time            int64 `json:"time"`
+}
+
 type LiveEnded struct {
 	OnlineNum int64  `json:"onlineNum"`
 	Time      int64  `json:"time"`
@@ -108,9 +114,10 @@ type RoomRealtimeMessage struct {
 }
 
 type RoomSubscription struct {
-	ServerID     int64 `json:"serverId"`
-	ChannelID    int64 `json:"channelId"`
-	PocketRoomID int64 `json:"pocketRoomId"`
+	ServerID     int64  `json:"serverId"`
+	ChannelID    int64  `json:"channelId"`
+	PocketRoomID int64  `json:"pocketRoomId"`
+	OwnerAccount string `json:"ownerAccount,omitempty"`
 }
 
 type sidecarEvent struct {
@@ -152,6 +159,7 @@ func (b *NimDanmakuBridge) SetCallbacks(
 	onGift func(roomID int64, g *GiftMessage),
 	onMember func(roomID int64, m *MemberEvent),
 	onLiveUpdate func(roomID int64, update *LiveUpdate),
+	onLiveOnline func(roomID int64, online *LiveOnline),
 	onLiveEnded func(roomID int64, ended *LiveEnded),
 	onRoom func(pocketRoomID int64, m *RoomRealtimeMessage),
 	onConnected func(roomID int64),
@@ -161,6 +169,7 @@ func (b *NimDanmakuBridge) SetCallbacks(
 	b.onGift = onGift
 	b.onMember = onMember
 	b.onLiveUpdate = onLiveUpdate
+	b.onLiveOnline = onLiveOnline
 	b.onLiveEnded = onLiveEnded
 	b.onRoom = onRoom
 	b.onConnected = onConnected
@@ -554,6 +563,11 @@ func (b *NimDanmakuBridge) readLoop() {
 			if json.Unmarshal(evt.Data, &update) == nil && b.onLiveUpdate != nil {
 				b.onLiveUpdate(roomID, &update)
 			}
+		case "live_online":
+			var online LiveOnline
+			if json.Unmarshal(evt.Data, &online) == nil && b.onLiveOnline != nil {
+				b.onLiveOnline(roomID, &online)
+			}
 		case "live_ended":
 			var ended LiveEnded
 			if json.Unmarshal(evt.Data, &ended) == nil && b.onLiveEnded != nil {
@@ -686,6 +700,7 @@ func (b *Bot) startNIMBridge() {
 		b.handleDanmakuGift,
 		b.handleMemberEvent,
 		b.handleLiveUpdate,
+		b.handleLiveOnline,
 		b.handleLiveEnded,
 		b.handleRoomRealtimeMessage,
 		b.handleDanmakuConnected,
@@ -772,9 +787,12 @@ func (b *Bot) refreshNIMRoomSubscriptions() {
 			continue
 		}
 		log.Printf("[NIM-room] resolved room %d: serverId=%d channelId=%d owner=%s", roomID, info.ServerID, info.ChannelID, info.OwnerName)
-		subscriptions = append(subscriptions, RoomSubscription{
-			ServerID: info.ServerID, ChannelID: info.ChannelID, PocketRoomID: roomID,
-		})
+		b.loadQChatOwnerIdentity(roomID)
+		b.mu.RLock()
+		identity := b.qchatOwnerIdentities[roomID]
+		b.mu.RUnlock()
+		subscription := RoomSubscription{ServerID: info.ServerID, ChannelID: info.ChannelID, PocketRoomID: roomID, OwnerAccount: identity.Account}
+		subscriptions = append(subscriptions, subscription)
 	}
 	if err := b.nimDanmaku.SyncRooms(subscriptions); err != nil {
 		log.Printf("[NIM-room] subscription sync failed: %v", err)
@@ -828,7 +846,35 @@ func (b *Bot) refreshNIMLiveRooms() {
 			break
 		}
 	}
+	// A tracked member can visit any currently active member live. Connect to
+	// those live chatrooms only when visit history/notifications are enabled;
+	// member events are filtered before they reach QQ or storage.
+	if b.pocketVisitTrackingEnabled() {
+		for _, live := range lives {
+			if live.LiveID == "" {
+				continue
+			}
+			liveOne, liveErr := b.pocket.GetLiveOne(live.LiveID)
+			if liveErr != nil || liveOne == nil || liveOne.User.RoomID == 0 {
+				continue
+			}
+			room, roomErr := b.getCachedRoomInfo(liveOne.User.RoomID)
+			if roomErr != nil || room == nil {
+				continue
+			}
+			b.connectDanmakuForLive(live.LiveID, liveOne.RoomID, room)
+		}
+	}
 	b.finishMissingLiveSessions(activeLiveIDs)
+}
+
+func (b *Bot) pocketVisitTrackingEnabled() bool {
+	for _, feature := range b.cfg.PocketMemberFeatures {
+		if feature != nil && (feature.VisitNotify || feature.KeepHistory) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveNIMLiveRoomID(liveID string, fallback int64, getLiveOne func(string) (*pocket48.LiveOne, error)) (int64, error) {
@@ -1031,8 +1077,8 @@ func (b *Bot) processRoomRealtimeMessage(msg *pocket48.Message) {
 	if msg.Room != nil {
 		roomID = msg.Room.ChannelID
 	}
-	targetGroups := b.getTargetGroupsForRoom(roomID)
-	if len(targetGroups) == 0 {
+	targets := b.getTargetsForRoom(roomID)
+	if len(targets) == 0 {
 		// Still advance cursor so a later REST poll / restart does not replay.
 		b.advanceRoomMessageCursor(roomID, msg)
 		return
@@ -1041,7 +1087,7 @@ func (b *Bot) processRoomRealtimeMessage(msg *pocket48.Message) {
 	b.enqueueRoomRealtimeTask(roomID, func() {
 		b.prefetchRoomRealtimeMedia(msg)
 	}, func() {
-		b.processSinglePocketMessage(msg, targetGroups)
+		b.processSinglePocketMessage(msg, targets)
 		// QChat success path must persist cursor. Previously only REST poll
 		// called SaveCursor; after bot restart REST re-fetched from a stale
 		// last_msg_time and re-forwarded the same idol messages.
@@ -1291,7 +1337,7 @@ func (b *Bot) handleDanmakuMessage(roomID int64, d *DanmakuMessage) {
 	}
 	text := fmt.Sprintf("【%s|%s】\n%s: %s\n%s", owner, channel, nick, d.Text, time.Now().Format("2006-01-02 15:04:05"))
 	for _, gid := range b.getTargetGroupsForRoom(roomID) {
-		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
+		b.sendGroup(gid, napcat.TextSegment(text))
 	}
 }
 
@@ -1340,7 +1386,7 @@ func (b *Bot) handleDanmakuGift(roomID int64, g *GiftMessage) {
 	log.Printf("[NIM-live] gift ignored (no active session) room=%d from=%s gift=%s x%d", roomID, g.From, g.GiftName, g.GiftNum)
 }
 
-func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID, initialOnline int64) bool {
+func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID, _ int64) bool {
 	if room == nil {
 		return false
 	}
@@ -1352,34 +1398,22 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 	if liveID != "" {
 		if fin, ok := b.finishedLives[liveID]; ok && fin.Ended {
 			b.liveSessionsMu.Unlock()
-			log.Printf("[NIM-live] skip re-open finished live room=%d liveId=%s score=%s peak=%d",
-				room.ChannelID, liveID, formatScoreValue(fin.AnnualScore), fin.PeakOnline)
+			log.Printf("[NIM-live] skip re-open finished live room=%d liveId=%s score=%s concurrentPeak=%d",
+				room.ChannelID, liveID, formatScoreValue(fin.AnnualScore), fin.PeakConcurrent)
 			return false
 		}
 	}
 	current := b.liveSessions[room.ChannelID]
 	if current != nil && current.LiveID == liveID {
-		// Already tracking this live — keep score/legs; only refresh peak.
+		// Already tracking this live; keep accumulated score, legs and concurrent peak.
 		if current.Ended {
 			// In-memory ended: do not resurrect empty.
 			b.liveSessionsMu.Unlock()
 			log.Printf("[NIM-live] skip re-open ended in-memory session room=%d liveId=%s", room.ChannelID, liveID)
 			return false
 		}
-		changed := false
-		if initialOnline > current.PeakOnline {
-			current.PeakOnline = initialOnline
-			changed = true
-		}
 		current.MissTicks = 0
-		var snap LiveGiftSession
-		if changed {
-			snap = *current
-		}
 		b.liveSessionsMu.Unlock()
-		if changed {
-			b.persistLiveSession(room.ChannelID, &snap)
-		}
 		return true
 	}
 	// Prefer disk restore if present for same liveId (restart recovery).
@@ -1395,15 +1429,12 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 						room.ChannelID, liveID, formatScoreValue(disk.AnnualScore))
 					return false
 				}
-				if initialOnline > disk.PeakOnline {
-					disk.PeakOnline = initialOnline
-				}
 				disk.MissTicks = 0
 				cp := disk
 				b.liveSessions[room.ChannelID] = &cp
 				b.liveSessionsMu.Unlock()
-				log.Printf("[NIM-live] resume session room=%d liveId=%s legs=%d score=%s peak=%d",
-					room.ChannelID, disk.LiveID, disk.ChickenLegs, formatScoreValue(disk.AnnualScore), disk.PeakOnline)
+				log.Printf("[NIM-live] resume session room=%d liveId=%s legs=%d score=%s concurrentPeak=%d",
+					room.ChannelID, disk.LiveID, disk.ChickenLegs, formatScoreValue(disk.AnnualScore), disk.PeakConcurrent)
 				b.persistLiveSession(room.ChannelID, &cp)
 				return true
 			}
@@ -1418,13 +1449,13 @@ func (b *Bot) beginLiveSession(room *pocket48.RoomInfo, liveID string, nimRoomID
 	}
 	session := &LiveGiftSession{
 		LiveID: liveID, LiveRoomID: nimRoomID, LiveOwnerID: room.OwnerID,
-		LiveOwnerName: room.OwnerName, StartedAt: time.Now().UnixMilli(), PeakOnline: initialOnline,
+		LiveOwnerName: room.OwnerName, StartedAt: time.Now().UnixMilli(),
 	}
 	b.liveSessions[room.ChannelID] = session
 	snap := *session
 	b.liveSessionsMu.Unlock()
 	b.persistLiveSession(room.ChannelID, &snap)
-	log.Printf("[NIM-live] begin session room=%d liveId=%s peak=%d", room.ChannelID, liveID, initialOnline)
+	log.Printf("[NIM-live] begin session room=%d liveId=%s", room.ChannelID, liveID)
 	return true
 }
 
@@ -1434,25 +1465,40 @@ func (b *Bot) handleLiveUpdate(roomID int64, update *LiveUpdate) {
 	}
 	b.liveSessionsMu.Lock()
 	session := b.liveSessions[roomID]
-	if session != nil && !session.Ended && update.OnlineNum > session.PeakOnline {
-		session.PeakOnline = update.OnlineNum
-		session.MissTicks = 0 // real live traffic proves still active
-		snap := *session
-		b.liveSessionsMu.Unlock()
-		b.persistLiveSession(roomID, &snap)
-		log.Printf("[NIM-live] peak popularity room=%d value=%d (liveUpdateInfo.online / onlineNum; not concurrent viewers)", roomID, update.OnlineNum)
-		return
-	}
 	if session != nil && !session.Ended {
+		// LIVEUPDATE traffic proves the session is active. Its online field is a
+		// cumulative popularity value, so deliberately do not store it.
 		session.MissTicks = 0
 	}
 	b.liveSessionsMu.Unlock()
 }
 
-func (b *Bot) handleLiveEnded(roomID int64, ended *LiveEnded) {
-	if ended != nil {
-		b.handleLiveUpdate(roomID, &LiveUpdate{OnlineNum: ended.OnlineNum, Time: ended.Time})
+func (b *Bot) handleLiveOnline(roomID int64, online *LiveOnline) {
+	if online == nil || online.OnlineMemberNum < 0 {
+		return
 	}
+	b.liveSessionsMu.Lock()
+	session := b.liveSessions[roomID]
+	if session == nil || session.Ended {
+		b.liveSessionsMu.Unlock()
+		return
+	}
+	session.CurrentOnline = online.OnlineMemberNum
+	peakChanged := false
+	if online.OnlineMemberNum > session.PeakConcurrent {
+		session.PeakConcurrent = online.OnlineMemberNum
+		peakChanged = true
+	}
+	session.MissTicks = 0
+	snap := *session
+	b.liveSessionsMu.Unlock()
+	if peakChanged {
+		b.persistLiveSession(roomID, &snap)
+	}
+	log.Printf("[NIM-live] concurrent online room=%d current=%d peak=%d", roomID, snap.CurrentOnline, snap.PeakConcurrent)
+}
+
+func (b *Bot) handleLiveEnded(roomID int64, ended *LiveEnded) {
 	b.finishLiveSession(roomID)
 }
 
@@ -1549,9 +1595,8 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	if snapshot.ChickenLegs > 0 {
 		body = append(body, fmt.Sprintf("鸡腿值：%d", snapshot.ChickenLegs))
 	}
-	if snapshot.PeakOnline > 0 {
-		// liveUpdateInfo.online / onlineNum: platform 人气/人次峰值（整场只升不降），不是实时并发在线。
-		body = append(body, fmt.Sprintf("最高人气：%d", snapshot.PeakOnline))
+	if snapshot.PeakConcurrent > 0 {
+		body = append(body, fmt.Sprintf("最高同时在线：%d", snapshot.PeakConcurrent))
 	}
 	// Duration last among stats, then timestamp (same as 上麦 / 开播 notices).
 	if snapshot.StartedAt > 0 {
@@ -1561,10 +1606,10 @@ func (b *Bot) finishLiveSession(roomID int64) {
 	body = append(body, time.Now().Format("2006-01-02 15:04:05"))
 
 	text := fmt.Sprintf("【%s|%s】\n%s", owner, channel, strings.Join(body, "\n"))
-	log.Printf("[NIM-live] finish session room=%d liveId=%s legs=%d score=%s peak=%d",
-		roomID, snapshot.LiveID, snapshot.ChickenLegs, formatScoreValue(snapshot.AnnualScore), snapshot.PeakOnline)
+	log.Printf("[NIM-live] finish session room=%d liveId=%s legs=%d score=%s concurrentPeak=%d",
+		roomID, snapshot.LiveID, snapshot.ChickenLegs, formatScoreValue(snapshot.AnnualScore), snapshot.PeakConcurrent)
 	for _, gid := range b.getTargetGroupsForRoom(roomID) {
-		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
+		b.sendGroup(gid, napcat.TextSegment(text))
 	}
 }
 
@@ -1581,19 +1626,20 @@ func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
 	if m == nil || !b.cfg.NIMViewerEventEnabled {
 		return
 	}
-	fromID, _ := strconv.ParseInt(m.UserID, 10, 64)
-	if fromID == 0 || !b.isKnownStar(fromID) || fromID == b.getRoomOwnerID(roomID) {
+	memberRoomID, memberUserID, memberName, feature, ok := b.trackedMemberForNIMAccount(m.UserID)
+	if !ok || feature == nil || (!feature.VisitNotify && !feature.KeepHistory) || memberUserID == b.getRoomOwnerID(roomID) {
 		return
 	}
 	now := time.Now()
-	key := fmt.Sprintf("%d:%s", roomID, m.UserID)
+	key := fmt.Sprintf("%d:%d", roomID, memberRoomID)
 	owner, channel := b.getRoomOwnerAndChannel(roomID)
-	nick := strings.TrimSpace(m.Nick)
+	nick := strings.TrimSpace(memberName)
 	if nick == "" {
-		nick = "未知用户"
+		nick = strings.TrimSpace(m.Nick)
 	}
 	// Same layout as room messages: 【Owner|Channel】 / body / timestamp
 	var body []string
+	duration := int64(0)
 	switch m.Event {
 	case "memberEnter":
 		b.memberEnterMu.Lock()
@@ -1604,9 +1650,9 @@ func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
 		body = append(body, nick+"离开了直播间")
 		b.memberEnterMu.Lock()
 		if entered, ok := b.memberEnterTimes[key]; ok {
-			sec := int64(now.Sub(entered).Round(time.Second).Seconds())
-			if sec >= 60 {
-				body = append(body, "观看时长"+formatWatchDuration(sec))
+			duration = int64(now.Sub(entered).Round(time.Second).Seconds())
+			if duration >= 60 {
+				body = append(body, "观看时长"+formatWatchDuration(duration))
 			}
 			delete(b.memberEnterTimes, key)
 		}
@@ -1614,11 +1660,53 @@ func (b *Bot) handleMemberEvent(roomID int64, m *MemberEvent) {
 	default:
 		return
 	}
+	if feature.KeepHistory && b.storage != nil {
+		activityType := "visit_enter"
+		if m.Event == "memberExit" {
+			activityType = "visit_exit"
+		}
+		if err := b.storage.AppendPocketActivity(storage.PocketActivity{Type: activityType, MemberRoomID: memberRoomID, MemberUserID: memberUserID, MemberName: nick, TargetRoomID: roomID, TargetName: owner + "|" + channel, At: now.UnixMilli(), Duration: duration}); err != nil {
+			log.Printf("[Pocket activity] save visit: %v", err)
+		}
+	}
 	body = append(body, now.Format("2006-01-02 15:04:05"))
 	text := fmt.Sprintf("【%s|%s】\n%s", owner, channel, strings.Join(body, "\n"))
-	for _, gid := range b.getTargetGroupsForRoom(roomID) {
-		b.napcat.SendGroupMessage(gid, napcat.TextSegment(text))
+	if feature.VisitNotify {
+		for _, gid := range b.getTargetGroupsForRoom(memberRoomID) {
+			b.sendGroup(gid, napcat.TextSegment(text))
+		}
 	}
+}
+
+func (b *Bot) trackedMemberForNIMAccount(account string) (int64, int64, string, *config.PocketMemberFeatureConfig, bool) {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return 0, 0, "", nil, false
+	}
+	for roomText, feature := range b.cfg.PocketMemberFeatures {
+		if feature == nil || (!feature.VisitNotify && !feature.KeepHistory) {
+			continue
+		}
+		roomID, err := strconv.ParseInt(roomText, 10, 64)
+		if err != nil || roomID == 0 {
+			continue
+		}
+		b.loadQChatOwnerIdentity(roomID)
+		b.mu.RLock()
+		identity, known := b.qchatOwnerIdentities[roomID]
+		b.mu.RUnlock()
+		if known && identity.Account == account {
+			name := identity.Nickname
+			if info, infoErr := b.getCachedRoomInfo(roomID); infoErr == nil && info != nil && info.OwnerName != "" {
+				name = info.OwnerName
+			}
+			return roomID, identity.UserID, name, feature, true
+		}
+		if info, infoErr := b.getCachedRoomInfo(roomID); infoErr == nil && info != nil && strconv.FormatInt(info.OwnerID, 10) == account {
+			return roomID, info.OwnerID, info.OwnerName, feature, true
+		}
+	}
+	return 0, 0, "", nil, false
 }
 
 func (b *Bot) getRoomOwnerID(roomID int64) int64 {

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Cursor struct {
@@ -14,8 +15,53 @@ type Cursor struct {
 	Seen        []string `json:"seen"`
 	Ready       bool     `json:"ready"`
 }
+
+// UserCacheEntry 是一次已验证的「用户名 -> 用户 ID」解析结果。
+// UserByScreenName 队列的调用量按账号计且容易被限流，而映射几乎不变，
+// 因此落盘后重启无需重新解析。
+type UserCacheEntry struct {
+	User      User      `json:"user"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
 type Runtime struct {
 	Subscriptions map[string]Cursor `json:"subscriptions"`
+	// 老版本 state.json 没有该键，读出来是 nil，属正常情况。
+	UserCache map[string]UserCacheEntry `json:"userCache,omitempty"`
+}
+
+// PruneUserCache 丢弃过期 / 无 ID 的条目，并按最近写入保留 limit 条，
+// 避免 state.json 无限增长，也顺带清掉已删除订阅的残留条目。
+func PruneUserCache(cache map[string]UserCacheEntry, limit int) map[string]UserCacheEntry {
+	now := time.Now()
+	out := make(map[string]UserCacheEntry, len(cache))
+	for k, v := range cache {
+		if v.User.ID == "" {
+			continue
+		}
+		if !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt) {
+			continue
+		}
+		out[k] = v
+	}
+	if limit > 0 && len(out) > limit {
+		keys := make([]string, 0, len(out))
+		for k := range out {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return out[keys[i]].ExpiresAt.After(out[keys[j]].ExpiresAt)
+		})
+		trimmed := make(map[string]UserCacheEntry, limit)
+		for _, k := range keys[:limit] {
+			trimmed[k] = out[k]
+		}
+		out = trimmed
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // A known pinned post alone cannot establish overlap with the previous scan.

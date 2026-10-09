@@ -77,6 +77,13 @@ func init() {
 			AdminOnly: true,
 			Usage:     "list [channels]",
 		},
+		"activity": {
+			Handler:   cmdPocketActivity,
+			Help:      "查询成员上线与串门记录",
+			Category:  "房间管理",
+			AdminOnly: true,
+			Usage:     "activity [房间号/名字] [条数]",
+		},
 		"remove": {
 			Handler:   cmdRemove,
 			Help:      "移除监控房间",
@@ -207,6 +214,59 @@ func cmdOn(b *Bot, event *napcat.Event, args []string) {
 func cmdOff(b *Bot, event *napcat.Event, args []string) {
 	b.isMonitoring = false
 	b.reply(event, "✅ 监控已关闭")
+}
+
+func cmdPocketActivity(b *Bot, event *napcat.Event, args []string) {
+	roomID := int64(0)
+	if len(args) > 1 {
+		var ok bool
+		roomID, ok = resolveRoomID(b, event, args[1])
+		if !ok {
+			return
+		}
+	} else if event.GroupID != 0 {
+		rooms := b.cfg.GroupSubscriptions[strconv.FormatInt(event.GroupID, 10)]
+		if len(rooms) == 1 {
+			roomID = rooms[0]
+		}
+	}
+	if roomID == 0 {
+		b.reply(event, "请指定成员房间：activity <房间号/名字> [条数]")
+		return
+	}
+	limit := 10
+	if len(args) > 2 {
+		if parsed, err := strconv.Atoi(args[2]); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+	items, err := b.storage.PocketActivities(roomID, limit)
+	if err != nil {
+		b.reply(event, "读取成员记录失败: "+err.Error())
+		return
+	}
+	if len(items) == 0 {
+		b.reply(event, "暂无上线或串门记录")
+		return
+	}
+	lines := []string{"最近成员动态"}
+	for _, item := range items {
+		at := time.UnixMilli(item.At).Format("01-02 15:04:05")
+		detail := "上线"
+		switch item.Type {
+		case "offline":
+			detail = "下线"
+		case "visit_enter":
+			detail = "进入 " + item.TargetName
+		case "visit_exit":
+			detail = "离开 " + item.TargetName
+			if item.Duration > 0 {
+				detail += "（停留" + formatWatchDuration(item.Duration) + "）"
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%s  %s %s", at, item.MemberName, detail))
+	}
+	b.reply(event, strings.Join(lines, "\n"))
 }
 
 func cmdLive(b *Bot, event *napcat.Event, args []string) {
@@ -825,7 +885,7 @@ func cmdWeibo(b *Bot, event *napcat.Event, args []string) {
 				b.cfg.Save()
 			}
 		}
-		if err := b.weiboMonitor.AddConfig(event.GroupID, uid, atAll, lastID, onNew); err != nil {
+		if err := b.weiboMonitor.AddConfig(event.GroupID, nil, uid, atAll, lastID, onNew); err != nil {
 			b.reply(event, fmt.Sprintf("[错误] 添加微博监控失败: %v", err))
 		} else {
 			b.reply(event, fmt.Sprintf("[OK] 添加微博监控: UID=%s, @全体=%v", uid, atAll))
@@ -1075,7 +1135,7 @@ func cmdTest(b *Bot, event *napcat.Event, args []string) {
 			Room: &roomInfo,
 			Body: `{"title":"测试直播标题（含封面）","cover":"https://picsum.photos/seed/bot48-live-cover/960/540","liveId":"123456789"}`,
 		}
-		b.sendLivePush([]int64{event.GroupID}, testMsg, time.Now().Format("2006-01-02 15:04"))
+		b.sendLivePush([]config.DeliveryTarget{{ID: config.TargetIDForQQGroup(strconv.FormatInt(event.GroupID, 10)), Platform: "qq", Kind: "group", Address: strconv.FormatInt(event.GroupID, 10)}}, testMsg, time.Now().Format("2006-01-02 15:04"))
 		b.reply(event, "[OK] 已发送测试直播通知")
 	case "weibo":
 		if b.weiboMonitor == nil {
@@ -1115,7 +1175,6 @@ func cmdTest(b *Bot, event *napcat.Event, args []string) {
 		b.reply(event, "用法: test <live/weibo>")
 	}
 }
-
 
 // countryNameMap maps Chinese names and common variants to ISO codes.
 var countryNameMap = map[string]string{

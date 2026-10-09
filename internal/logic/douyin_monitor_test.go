@@ -2,6 +2,9 @@ package logic
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +13,79 @@ import (
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/napcat"
 )
+
+func TestIsDouyinProxyNetworkError(t *testing.T) {
+	for _, message := range []string{
+		"抖音作品浏览器接口拉取失败：Failed to fetch",
+		"page.goto: net::ERR_CONNECTION_CLOSED",
+		"net/http: TLS handshake timeout",
+	} {
+		if !isDouyinProxyNetworkError(message) {
+			t.Fatalf("network error not recognized: %s", message)
+		}
+	}
+	if isDouyinProxyNetworkError("抖音作品浏览器接口拉取失败：Blocked by ArgusSecurityPlugin Sign Invalid") {
+		t.Fatal("sign/risk failure must not rotate proxy")
+	}
+}
+
+func TestRecoverDouyinProxySelectsHealthyAutoPool(t *testing.T) {
+	selected := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/XHS-Auto":
+			_ = json.NewEncoder(w).Encode(mihomoProxyStatus{Alive: true, Now: "healthy-node"})
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/XHS-Auto/delay":
+			_ = json.NewEncoder(w).Encode(map[string]int{"delay": 123})
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/GLOBAL":
+			_ = json.NewEncoder(w).Encode(mihomoProxyStatus{Alive: false, Now: "dead-node"})
+		case r.Method == http.MethodPut && r.URL.Path == "/proxies/GLOBAL":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			selected = body["name"]
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := &DouyinMonitor{proxyControllerURL: server.URL, proxyHTTPClient: server.Client()}
+	m.recoverDouyinProxy("Failed to fetch")
+	if selected != "XHS-Auto" {
+		t.Fatalf("selected proxy=%q", selected)
+	}
+}
+
+func TestRecoverDouyinProxyFallsBackToVerifiedDirect(t *testing.T) {
+	selected := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/XHS-Auto":
+			_ = json.NewEncoder(w).Encode(mihomoProxyStatus{Alive: true, Now: "douyin-blocked-node"})
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/XHS-Auto/delay":
+			http.Error(w, "Douyin unavailable", http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/DIRECT/delay":
+			_ = json.NewEncoder(w).Encode(map[string]int{"delay": 196})
+		case r.Method == http.MethodGet && r.URL.Path == "/proxies/GLOBAL":
+			_ = json.NewEncoder(w).Encode(mihomoProxyStatus{Alive: false, Now: "dead-node"})
+		case r.Method == http.MethodPut && r.URL.Path == "/proxies/GLOBAL":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			selected = body["name"]
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := &DouyinMonitor{proxyControllerURL: server.URL, proxyHTTPClient: server.Client()}
+	m.recoverDouyinProxy("net::ERR_CONNECTION_CLOSED")
+	if selected != "DIRECT" {
+		t.Fatalf("selected proxy=%q", selected)
+	}
+}
 
 func TestUnseenDouyinPosts(t *testing.T) {
 	now := time.Unix(1_000, 0)
@@ -57,6 +133,32 @@ func TestDouyinWorksAlertsWhenAllAccountsFailAndRecovers(t *testing.T) {
 	m.noteDouyinWorksSuccess("b")
 	if len(alerts) != 2 || !strings.Contains(alerts[1], "已恢复") {
 		t.Fatalf("recovery alert mismatch: %#v", alerts)
+	}
+}
+
+func TestDouyinWorksRiskControlDoesNotAlert(t *testing.T) {
+	var alerts []string
+	m := &DouyinMonitor{
+		cfg: &config.Config{DouyinSubscriptions: map[int64]map[string]*config.DouyinConfig{
+			100: {
+				"a": {SecUserID: "a"},
+				"b": {SecUserID: "b"},
+			},
+		}},
+		worksFailures: make(map[string]time.Time),
+		notifyAdmins:  func(message string) { alerts = append(alerts, message) },
+	}
+	m.noteDouyinWorksFailure("a", "抖音作品浏览器接口拉取失败：Blocked by ArgusSecurityPlugin Sign Invalid")
+	m.noteDouyinWorksFailure("b", "抖音作品浏览器接口拉取失败：Argus Sign Invalid，接口冷却中（245s）")
+	if len(alerts) != 0 || len(m.worksFailures) != 0 {
+		t.Fatalf("risk control affected alert state: alerts=%#v failures=%#v", alerts, m.worksFailures)
+	}
+
+	// Actionable failures must still alert normally after ignored risk control.
+	m.noteDouyinWorksFailure("a", "抖音作品浏览器接口拉取失败：Cookie 为空")
+	m.noteDouyinWorksFailure("b", "抖音作品浏览器接口拉取失败：Cookie 为空")
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "全链路异常") {
+		t.Fatalf("actionable outage did not alert: %#v", alerts)
 	}
 }
 
@@ -717,5 +819,26 @@ func TestAppendTextWithQQFacesDouyinEmoji(t *testing.T) {
 	segs = appendTextWithQQFaces(nil, "hello[未知表情]world")
 	if len(segs) != 1 {
 		t.Fatalf("unknown should stay single text, got %#v", segs)
+	}
+}
+
+func TestAppendDouyinIMCardTailPutsLinkBelowCover(t *testing.T) {
+	segs := appendDouyinIMCardTail(
+		[]interface{}{napcat.TextSegment("标题和作者")},
+		[]string{"https://example.com/cover.jpg"},
+		"https://www.douyin.com/video/123",
+		"2026-10-01 13:32:10",
+	)
+	if len(segs) != 4 {
+		t.Fatalf("segments=%#v", segs)
+	}
+	for i, want := range []string{"text", "image", "text", "text"} {
+		segment, ok := segs[i].(napcat.MessageSegment)
+		if !ok || segment.Type != want {
+			t.Fatalf("segment %d=%#v, want %s", i, segs[i], want)
+		}
+	}
+	if got := segs[2].(napcat.MessageSegment).Data["text"]; got != "\nhttps://www.douyin.com/video/123" {
+		t.Fatalf("link segment=%q", got)
 	}
 }

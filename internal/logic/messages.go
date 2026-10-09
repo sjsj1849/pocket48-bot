@@ -1,6 +1,8 @@
 package logic
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,9 +12,29 @@ import (
 	"sync"
 	"time"
 
+	"pocket48-bot/internal/config"
+	"pocket48-bot/internal/message"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/pocket48"
 )
+
+// pocket48SourceID builds a stable business id for a Pocket48 message from the
+// room plus the speaker and the text.
+//
+// Why content-addressed: a REPLY frame does not carry the id of the message it
+// answers, so the only way to thread the reply under the original on Feishu is to
+// derive the same key on both sides. Using room + nickname + body means the
+// original message and the reply that quotes it land on the same key, and
+// ReplyMap can then resolve it to the original's platform message id.
+func pocket48SourceID(room *pocket48.RoomInfo, speaker, text string) string {
+	roomKey := ""
+	if room != nil {
+		roomKey = fmt.Sprintf("%d|%d", room.ServerID, room.ChannelID)
+	}
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	sum := sha256.Sum256([]byte(roomKey + "\x00" + strings.TrimSpace(speaker) + "\x00" + normalized))
+	return "p48:" + hex.EncodeToString(sum[:8])
+}
 
 func (b *Bot) mediaDeliveryMode() string {
 	if b == nil || b.cfg == nil {
@@ -112,9 +134,9 @@ func (b *Bot) pollLoop() {
 		b.adjustPollInterval(anyNewMsgs)
 
 		// Log queue depth periodically for monitoring
-		if b.napcat != nil {
-			if qd := b.napcat.QueueDepth(); qd > 5 {
-				log.Printf("[QUEUE] napcat sendChan depth=%d", qd)
+		if b.outbound != nil {
+			if qd := b.outbound.QueueDepth(); qd > 5 {
+				log.Printf("[QUEUE] outbound depth=%d", qd)
 			}
 		}
 
@@ -275,18 +297,18 @@ func (b *Bot) processMessages(msgs []*pocket48.Message) {
 		return msgs[i].Time < msgs[j].Time
 	})
 
-	var targetGroups []int64
+	var targets []config.DeliveryTarget
 	sampleMsg := msgs[0]
 
-	targetGroups = b.getTargetGroupsForRoom(sampleMsg.Room.ChannelID)
+	targets = b.getTargetsForRoom(sampleMsg.Room.ChannelID)
 
-	if len(targetGroups) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
 	// Process each message immediately without batching
 	for _, msg := range msgs {
-		b.processSinglePocketMessage(msg, targetGroups)
+		b.processSinglePocketMessage(msg, targets)
 	}
 }
 
@@ -373,7 +395,7 @@ func (b *Bot) annualScoreSegments(room *pocket48.RoomInfo, sender string, gift *
 	return segments
 }
 
-func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []int64) {
+func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targets []config.DeliveryTarget) {
 	room := msg.Room
 	roomIDStr := strconv.FormatInt(room.ChannelID, 10)
 
@@ -399,6 +421,9 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 	// Build message content based on type
 	var segments []interface{}
 	segments = append(segments, napcat.TextSegment(header))
+	// A reply message may carry a structured Document (with Quote) so Feishu can
+	// render a native reply block; QQ falls back to ToSegments.
+	var doc *message.Document
 
 	// Name logic - determine sender by message userId, not room owner
 	realName := ""
@@ -462,8 +487,8 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 				return
 			}
 			segments = b.annualScoreSegments(room, nickName, scoreGift, msg.Time)
-			for _, gid := range targetGroups {
-				b.napcat.SendGroupMessage(gid, segments)
+			for _, target := range targets {
+				b.sendTarget(target, segments)
 			}
 			return
 		}
@@ -498,6 +523,21 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 				segments = appendTextWithQQFaces(segments, prefix+displayText+"\n")
 			}
 		} else {
+			// Give plain messages a content-addressed SourceID so a later REPLY
+			// that quotes this exact text can thread under it on Feishu. Without
+			// this the reply has nothing to attach to and degrades to a detached
+			// quote. The sender is taken from the nickname already resolved into
+			// prefix, so both sides derive the same key.
+			if sender := strings.TrimSuffix(prefix, ": "); sender != "" && displayText != "" {
+				doc = &message.Document{
+					Source:    room.ChannelName,
+					Title:     sender,
+					Author:    sender,
+					Body:      displayText,
+					CreatedAt: timeObj,
+					SourceID:  pocket48SourceID(room, sender, displayText),
+				}
+			}
 			segments = appendTextWithQQFaces(segments, prefix+displayText+"\n")
 		}
 
@@ -532,18 +572,64 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		}
 		textSegments = appendTextWithQQFaces(textSegments, fmt.Sprintf("%s[%s]\n", prefix, audioLabel))
 		textSegments = append(textSegments, napcat.TextSegment(timeStr))
-		for _, gid := range targetGroups {
-			b.napcat.SendGroupMessage(gid, textSegments)
-			time.Sleep(50 * time.Millisecond)
-			b.napcat.SendGroupMessage(gid, []interface{}{napcat.RecordSegment(voiceURL)})
-		}
+		// QQ keeps the legacy two-message form (text then record). Feishu gets
+		// one combined Document so the card and the voice bubble arrive
+		// together instead of a placeholder plus a separate attachment.
+		b.sendVoiceReply(targets, voiceURL, textSegments, strings.TrimSpace(giftText), audioLabel, msg)
 		return
 
 	case pocket48.MsgReply:
 		displayText := b.extractTextBody(msg.Body)
-		if quotedText, answerText, ok := parseEmbeddedReplyMessage(msg.Body); ok {
+		if quotedText, answerText, replyName, ok := parseEmbeddedReplyDetail(msg.Body); ok {
 			if quotedText != "" {
 				segments = appendTextWithQQFaces(segments, quotedText+"\n")
+			}
+			body := answerText
+			if body == "" {
+				body = displayText
+			}
+			// Carry reply-to context as a structured Document so Feishu renders
+			// a native quote block; QQ falls back to the flat segments above.
+			//
+			// Author 必须是**真实发送人**（prefix 里那个昵称），不能写死
+			// room.OwnerName：包间里成员互相回复时，写死会把别人的话标成房间
+			// 主人说的，QQ 与飞书表现还不一致。
+			if strings.TrimSpace(quotedText) != "" {
+				sender := strings.TrimSuffix(prefix, ": ")
+				if sender == "" {
+					sender = room.OwnerName
+				}
+				// 引用块署名用被回复者昵称，缺省才退回通用标签，这样卡片上
+				// 「哼唧小虎：…」与回复行「金兔牙子：…」能对齐成两个说话人。
+				quoteAuthor := replyName
+				if quoteAuthor == "" {
+					quoteAuthor = "被回复"
+				}
+				// ★ 口袋48 的被回复原文里**已经带了说话人前缀**（如
+				//   「convolk1:fixx好用」），渲染层还会再拼一次「昵称：」，
+				//   于是线上出现「convolk1：convolk1:fixx好用」—— 同一个昵称两遍。
+				// 这里在数据源处判定：原文自带就别再署名。
+				if speakerAlreadyInText(quoteAuthor, quotedText) {
+					quoteAuthor = ""
+				}
+				doc = &message.Document{
+					Source: room.ChannelName,
+					Title:  sender,
+					Author: sender,
+					Body:   body,
+					Quote:  &message.Quote{Author: quoteAuthor, Text: quotedText},
+					// ★ 补上回复者昵称：否则飞书侧回复行前面什么都没有，
+					//   引用块有名字、回复行没名字，两行不像对话。
+					//   只有存在引用块时渲染层才会用它（见 feishu.go deliver）。
+					//   此前只有 weverse 设了这一项，口袋48 一直漏着。
+					ReplyAuthorPrefix: sender,
+					CreatedAt:         timeObj,
+					// 挂到被回复的那条原始消息下面。口袋48 回复帧不带被回复
+					// 消息 id，因此用「被回复者昵称 + 被回复内容」作为 SourceID；
+					// 那条原始消息转发时也用同样的键记录，两边即可对齐。
+					SourceID:        pocket48SourceID(room, replyName, quotedText),
+					ReplyToSourceID: pocket48SourceID(room, replyName, quotedText),
+				}
 			}
 			if answerText != "" {
 				segments = appendTextWithQQFaces(segments, prefix+answerText+"\n")
@@ -576,6 +662,16 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		if ok && question != "" {
 			flipText := fmt.Sprintf("【公开翻牌】\n粉丝提问: %s\n%s: %s", question, idolName, answer)
 			segments = appendTextWithQQFaces(segments, flipText+"\n")
+			// Text flip card is a reply-to (fan question → idol answer); carry
+			// the question as Quote so Feishu renders a native reply block.
+			doc = &message.Document{
+				Source:    room.ChannelName,
+				Title:     idolName,
+				Author:    idolName,
+				Body:      answer,
+				Quote:     &message.Quote{Author: "粉丝提问", Text: question},
+				CreatedAt: timeObj,
+			}
 		}
 
 	case pocket48.MsgLivePush:
@@ -595,7 +691,7 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 			return
 		}
 		if title == "" {
-			title = "直播开始了"
+			title = "📺 直播开始了"
 		}
 		cover = b.mediaPathForMessage(msg, cover)
 		// Same layout as room message forward: @全体成员 / 【Owner|Channel】 / body / time
@@ -615,17 +711,27 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 			segments = append(segments, napcat.ImageSegment(cover))
 		}
 		segments = append(segments, napcat.TextSegment("\n"+timeStr))
-		b.napcat.SendGroupMessage(targetGroups[0], segments)
+		b.sendTarget(targets[0], segments)
 
 		return
 
 	case pocket48.MsgAudio:
 		audioURL := b.mediaPathForMessage(msg, b.extractAudioURL(msg.Body))
 		if audioURL != "" {
-			segments = []interface{}{
-				napcat.TextSegment("【语音消息】"),
-				napcat.RecordSegment(audioURL),
-			}
+			// ★★★ 纯语音，不建 Document（2026-10-08 用户第三次要求）：
+			//
+			// 用户看到的是：顶栏「胡晓慧」+ 中间「语音消息」+ 底栏「Pocket 48」和
+			// 时间，还得把语音挂在这条卡片下面。诉求原话：「为什么要先发一个文本
+			// 占位……直接把语音发出来不就行了！」
+			//
+			// 根因：走 Document 通道时，飞书侧 sendCard 先发卡片（把 Sender/Body/
+			// CreatedAt 渲染成顶栏+正文+底栏），再把媒体当**原生回复**挂上去 ——
+			// 于是必然是「一条文本占位 + 一条挂载语音」。
+			//
+			// 现在只给飞书一段裸语音（flattenFeishuSegments 会单独走
+			// sendMediaSegment → uploadVoice → msg_type=audio），
+			// 飞书原生语音气泡直接落地，没有占位卡片、没有挂载。
+			segments = []interface{}{napcat.RecordSegment(audioURL)}
 		}
 
 	case pocket48.MsgFlipCardAudio:
@@ -638,6 +744,17 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 		flipText := buildFlipCardAudioIntroText(idolName, question)
 		segments = appendTextWithQQFaces(segments, flipText+"\n")
 		segments = append(segments, napcat.RecordSegment(audioURL))
+		if question != "" {
+			doc = &message.Document{
+				Source:    room.ChannelName,
+				Title:     idolName,
+				Author:    idolName,
+				Body:      "语音翻牌",
+				Quote:     &message.Quote{Author: "粉丝提问", Text: question},
+				CreatedAt: timeObj,
+				Media:     []message.Media{{Kind: "audio", Source: audioURL}},
+			}
+		}
 
 	case pocket48.MsgFlipCardVideo:
 		question, _, _, ok := parseFlipCardBody(msg.Body)
@@ -657,16 +774,51 @@ func (b *Bot) processSinglePocketMessage(msg *pocket48.Message, targetGroups []i
 				napcat.TextSegment(flipText + "\n"),
 				napcat.VideoSegment(videoURL, ""),
 			}
+			if question != "" {
+				doc = &message.Document{
+					Source:    room.ChannelName,
+					Title:     idolName,
+					Author:    idolName,
+					Body:      "视频翻牌",
+					Quote:     &message.Quote{Author: "粉丝提问", Text: question},
+					CreatedAt: timeObj,
+					Media:     []message.Media{{Kind: "video", Source: videoURL}},
+				}
+			}
 		}
 
 	default:
 		return
 	}
 
+	// A structured reply carries a Document so Feishu renders a native quote
+	// block; otherwise send the flat segments (QQ + Feishu linear fallback).
+	//
+	// The Document is **Feishu-only**. Sending it to QQ as well made every plain
+	// Pocket48 message render in the card layout (【发送者】title, body,
+	// timestamp) instead of the long-standing QQ format, and the speaker prefix
+	// got duplicated because the Document carries its own Author. QQ must keep
+	// receiving the flat segments it has always received.
+	if doc != nil {
+		for _, target := range targets {
+			if target.Platform == "feishu" {
+				b.sendTarget(target, doc)
+			}
+		}
+		// Non-Feishu targets still get the original text, timestamp included.
+		segments = append(segments, napcat.TextSegment(timeStr))
+		for _, target := range targets {
+			if target.Platform != "feishu" {
+				b.sendTarget(target, segments)
+			}
+		}
+		return
+	}
+
 	// Send to QQ
 	segments = append(segments, napcat.TextSegment(timeStr))
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, segments)
+	for _, target := range targets {
+		b.sendTarget(target, segments)
 	}
 }
 
@@ -744,26 +896,48 @@ func formatGiftTextBody(body string) string {
 	return fmt.Sprintf("🎁 送了%d个%s", num, raw.GiftInfo.Name)
 }
 
-func (b *Bot) getTargetGroupsForRoom(roomID int64) []int64 {
-	var targetGroups []int64
-	for groupIDStr, roomIDs := range b.cfg.GroupSubscriptions {
+func (b *Bot) getTargetsForRoom(roomID int64) []config.DeliveryTarget {
+	var targets []config.DeliveryTarget
+	seen := make(map[string]bool)
+	for targetID, roomIDs := range b.cfg.GroupSubscriptions {
 		for _, id := range roomIDs {
-			if id == roomID {
-				groupID, _ := strconv.ParseInt(groupIDStr, 10, 64)
-				targetGroups = append(targetGroups, groupID)
+			if id != roomID {
+				continue
+			}
+			target := b.cfg.ResolveTarget(targetID)
+			if target.ID == "" || seen[target.ID] {
 				break
 			}
+			seen[target.ID] = true
+			targets = append(targets, target)
+			break
 		}
 	}
-	return targetGroups
+	return targets
 }
 
-func (b *Bot) getTargetGroupsForOwner(ownerUserID int64) []int64 {
+// getTargetGroupsForRoom keeps the legacy QQ-only view for the danmaku and
+// live-push paths, which still deliver to numeric QQ groups. The main room
+// message flow uses getTargetsForRoom to support Feishu.
+func (b *Bot) getTargetGroupsForRoom(roomID int64) []int64 {
+	var groupIDs []int64
+	for _, target := range b.getTargetsForRoom(roomID) {
+		if target.Platform != "qq" || target.Kind != "group" {
+			continue
+		}
+		if id, err := strconv.ParseInt(target.Address, 10, 64); err == nil {
+			groupIDs = append(groupIDs, id)
+		}
+	}
+	return groupIDs
+}
+
+func (b *Bot) getTargetsForOwner(ownerUserID int64) []config.DeliveryTarget {
 	if ownerUserID <= 0 {
 		return nil
 	}
 
-	groupSet := make(map[int64]struct{})
+	targetSet := make(map[string]config.DeliveryTarget)
 	checkedRoom := make(map[int64]struct{})
 
 	for _, roomIDs := range b.cfg.GroupSubscriptions {
@@ -778,27 +952,27 @@ func (b *Bot) getTargetGroupsForOwner(ownerUserID int64) []int64 {
 				continue
 			}
 
-			for _, gid := range b.getTargetGroupsForRoom(roomID) {
-				groupSet[gid] = struct{}{}
+			for _, target := range b.getTargetsForRoom(roomID) {
+				targetSet[target.ID] = target
 			}
 		}
 	}
 
-	groups := make([]int64, 0, len(groupSet))
-	for gid := range groupSet {
-		groups = append(groups, gid)
+	targets := make([]config.DeliveryTarget, 0, len(targetSet))
+	for _, target := range targetSet {
+		targets = append(targets, target)
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
-	return groups
+	sort.Slice(targets, func(i, j int) bool { return targets[i].ID < targets[j].ID })
+	return targets
 }
 
-func (b *Bot) getTargetGroupsByOwnerName(ownerName string) []int64 {
+func (b *Bot) getTargetsByOwnerName(ownerName string) []config.DeliveryTarget {
 	ownerName = strings.TrimSpace(ownerName)
 	if ownerName == "" {
 		return nil
 	}
 
-	groupSet := make(map[int64]struct{})
+	targetSet := make(map[string]config.DeliveryTarget)
 	checkedRoom := make(map[int64]struct{})
 
 	for _, roomIDs := range b.cfg.GroupSubscriptions {
@@ -816,18 +990,18 @@ func (b *Bot) getTargetGroupsByOwnerName(ownerName string) []int64 {
 				continue
 			}
 
-			for _, gid := range b.getTargetGroupsForRoom(roomID) {
-				groupSet[gid] = struct{}{}
+			for _, target := range b.getTargetsForRoom(roomID) {
+				targetSet[target.ID] = target
 			}
 		}
 	}
 
-	groups := make([]int64, 0, len(groupSet))
-	for gid := range groupSet {
-		groups = append(groups, gid)
+	targets := make([]config.DeliveryTarget, 0, len(targetSet))
+	for _, target := range targetSet {
+		targets = append(targets, target)
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
-	return groups
+	sort.Slice(targets, func(i, j int) bool { return targets[i].ID < targets[j].ID })
+	return targets
 }
 
 func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
@@ -879,16 +1053,16 @@ func (b *Bot) checkRoomOnMic(roomInfo *pocket48.RoomInfo) {
 		idolName = "成员"
 	}
 
-	targetGroups := b.getTargetGroupsForRoom(roomInfo.ChannelID)
-	if len(targetGroups) == 0 {
+	targets := b.getTargetsForRoom(roomInfo.ChannelID)
+	if len(targets) == 0 {
 		return
 	}
 
 	now := time.Now()
 	msg := fmt.Sprintf("【%s|%s】\n%s上麦了\n%s", idolName, roomInfo.ChannelName, idolName, now.Format("2006-01-02 15:04:05"))
-	log.Printf("[OnMic] room=%d owner=%s(%d) detected on-mic → notify groups=%v", roomInfo.ChannelID, idolName, roomInfo.OwnerID, targetGroups)
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, napcat.TextSegment(msg))
+	log.Printf("[OnMic] room=%d owner=%s(%d) detected on-mic → notify targets=%d", roomInfo.ChannelID, idolName, roomInfo.OwnerID, len(targets))
+	for _, target := range targets {
+		b.sendTarget(target, napcat.TextSegment(msg))
 	}
 }
 
@@ -939,7 +1113,7 @@ func (b *Bot) onMicLoop() {
 	}
 }
 
-func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr string) {
+func (b *Bot) sendLivePush(targets []config.DeliveryTarget, msg *pocket48.Message, timeStr string) {
 	title, cover, _, _ := parseLivePushBody(msg.Body)
 	if title == "" || cover == "" {
 		extTitle, extCover, _, _ := parseLivePushBody(msg.RawExt)
@@ -952,7 +1126,7 @@ func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr 
 	}
 	cover = b.mediaPathForMessage(msg, cover)
 	if title == "" {
-		title = "直播开始了"
+		title = "📺 直播开始了"
 	}
 
 	idolName := strings.TrimSpace(msg.Room.OwnerName)
@@ -976,8 +1150,8 @@ func (b *Bot) sendLivePush(targetGroups []int64, msg *pocket48.Message, timeStr 
 	}
 	segments = append(segments, napcat.TextSegment(textBottom))
 
-	for _, gid := range targetGroups {
-		b.napcat.SendGroupMessage(gid, segments)
+	for _, target := range targets {
+		b.sendTarget(target, segments)
 	}
 }
 
@@ -1035,4 +1209,49 @@ func (b *Bot) currentPollInterval() time.Duration {
 		base = 1 * time.Second
 	}
 	return base
+}
+
+// sendVoiceReply delivers a Pocket48 voice reply (语音回复).
+//
+// QQ keeps the historical two-message form: a text line carrying the duration,
+// then the record segment. Feishu instead gets one combined Document, because
+// sending them separately produced a placeholder card plus a detached audio
+// attachment — two messages reading as one reply. The Document's audio Media
+// renders as a native voice bubble threaded under its card, so the pair looks
+// like a single notification.
+func (b *Bot) sendVoiceReply(targets []config.DeliveryTarget, voiceURL string, qqSegments []interface{}, giftText, audioLabel string, msg *pocket48.Message) {
+	if msg == nil {
+		return
+	}
+	author := strings.TrimSpace(msg.StarName)
+	if author == "" {
+		author = strings.TrimSpace(msg.NickName)
+	}
+	body := giftText
+	if body == "" {
+		body = audioLabel
+	}
+	var createdAt time.Time
+	if msg.Time > 0 {
+		createdAt = time.UnixMilli(msg.Time)
+	}
+	for _, target := range targets {
+		if target.ID == "" {
+			continue
+		}
+		if target.Platform != "feishu" {
+			b.sendTarget(target, qqSegments)
+			time.Sleep(50 * time.Millisecond)
+			b.sendTarget(target, []interface{}{napcat.RecordSegment(voiceURL)})
+			continue
+		}
+		b.sendTarget(target, &message.Document{
+			Source:    "Pocket48",
+			Title:     author,
+			Author:    author,
+			Body:      body,
+			Media:     []message.Media{{Kind: "audio", Source: voiceURL}},
+			CreatedAt: createdAt,
+		})
+	}
 }

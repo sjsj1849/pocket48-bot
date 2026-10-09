@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"pocket48-bot/internal/config"
 	"strconv"
 	"strings"
 	"time"
@@ -17,9 +18,34 @@ import (
 
 const vncPort = 5901
 
+// weiboBrowserLoggedIn 依据已保存的微博 cookie 判断登录态。
+//
+// 微博与 X / B站 不同：sidecar 拿到可用 cookie 后就通过 gateway
+// 直接写回配置，不存在「浏览器已登录但还没同步进配置」的中间态，
+// 所以只要配置里有非空 cookie 就算已登录。
+//
+// 这里绝不返回 cookie 本身，只回布尔值。
+func weiboBrowserLoggedIn(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return strings.TrimSpace(cfg.WeiboCookie) != "" || strings.TrimSpace(cfg.WeiboMWeiboCookie) != ""
+}
+
 // Only fixed Weibo actions are exposed; the sidecar's other commands are not
 // reachable through this authenticated, CSRF-protected panel endpoint.
 func (s *Server) handleBrowserWeibo(w http.ResponseWriter, r *http.Request) {
+	// GET 只回登录态，供浏览器页面轮询。缺了这个分支，前端会拿到 405
+	// 并把异常当成「未登录」，让状态灯永远亮不起来。
+	if r.Method == http.MethodGet {
+		cfg, err := config.LoadConfig(s.opts.ConfigPath)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "读取微博配置失败"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sessionConfigured": weiboBrowserLoggedIn(cfg)})
+		return
+	}
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

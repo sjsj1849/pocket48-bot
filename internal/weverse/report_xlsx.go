@@ -16,12 +16,13 @@ type workbookSheet struct {
 
 func (r Report) XLSX() ([]byte, error) {
 	summary := [][]any{reportColumns()}
+	receivedReplies := receivedMemberReplyCounts(r.Members)
 	matrix := [][]any{{"       主帖作者\n回复者"}}
 	for _, m := range r.Members {
 		matrix[0] = append(matrix[0], m.Name)
 	}
 	for _, m := range r.Members {
-		summary = append(summary, reportMemberRow(m))
+		summary = append(summary, reportMemberRow(m, receivedReplies[m.ID], r.UnconfirmedLives > 0))
 		row := []any{m.Name}
 		for _, target := range r.Members {
 			row = append(row, interactionCell(m.ID, target.ID, m.Teammates[target.ID]))
@@ -37,8 +38,8 @@ func (r Report) XLSX() ([]byte, error) {
 		kind := map[string]string{"post": "发帖", "comment": "回复", "live": "开播", "live_chat": "直播弹幕", "moment": "Moment"}[e.Kind]
 		activity = append(activity, []any{e.Author, kind, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.PostID, e.CommentID, e.Body, e.Translation, e.ParentAuthor, e.ParentBody, len(e.Images), len(e.Videos), e.URL, e.ParentMemberID, e.ParentProfileType, e.LiveHostAuthor, e.LiveHostMemberID, e.LiveChatID, countValue(e.PostComments), countValue(e.PostLikes), metricTime(e.MetricsAt), e.LiveDuration, metricTime(e.CommentsAt), metricTime(e.LikesAt)})
 	}
-	liveMatrix := [][]any{{"       直播发起成员\n弹幕成员"}}
-	liveSessionMatrix := [][]any{{"       直播发起成员\n弹幕成员"}}
+	liveMatrix := [][]any{{"       直播成员\n弹幕成员"}}
+	liveSessionMatrix := [][]any{{"       直播成员\n弹幕成员"}}
 	for _, target := range r.LiveChatTargets {
 		liveMatrix[0] = append(liveMatrix[0], target.Name)
 		liveSessionMatrix[0] = append(liveSessionMatrix[0], target.Name)
@@ -53,7 +54,7 @@ func (r Report) XLSX() ([]byte, error) {
 		liveMatrix = append(liveMatrix, messageRow)
 		liveSessionMatrix = append(liveSessionMatrix, sessionRow)
 	}
-	liveDetails := [][]any{{"弹幕成员", "直播发起成员", "直播编号", "聊天室ID", "内容原文", "中文翻译", "北京时间", "直播链接"}}
+	liveDetails := [][]any{{"弹幕成员", "直播成员", "直播编号", "聊天室ID", "内容原文", "中文翻译", "北京时间", "直播链接"}}
 	for _, e := range r.Events {
 		if e.Kind == "live_chat" {
 			liveDetails = append(liveDetails, []any{e.Author, e.LiveHostAuthor, e.PostID, e.LiveChatID, e.Body, e.Translation, time.UnixMilli(e.Time).In(ReportLocation).Format("2006-01-02 15:04:05"), e.URL})
@@ -73,11 +74,12 @@ func (r Report) XLSX() ([]byte, error) {
 	}
 	monthly := [][]any{append([]any{"月份"}, reportColumns()...)}
 	for _, month := range r.Months {
+		monthReceivedReplies := receivedMemberReplyCounts(month.Members)
 		for _, m := range month.Members {
-			monthly = append(monthly, append([]any{month.Month}, reportMemberRow(m)...))
+			monthly = append(monthly, append([]any{month.Month}, reportMemberRow(m, monthReceivedReplies[m.ID], month.UnconfirmedLives > 0)...))
 		}
 	}
-	return writeWorkbook([]workbookSheet{{"成员汇总", summary}, {"队友帖回复矩阵", matrix}, {"队友帖回复明细", details}, {"直播弹幕矩阵", liveMatrix}, {"参与直播场次矩阵", liveSessionMatrix}, {"直播弹幕明细", liveDetails}, {"全部活动", activity}, {"统计说明", notes}, {"直接回复成员矩阵", direct}, {"逐月成员数据", monthly}})
+	return writeWorkbook([]workbookSheet{{"成员汇总", summary}, {"队友帖回复矩阵", matrix}, {"队友帖回复明细", details}, {"直播弹幕矩阵", liveMatrix}, {"发弹幕直播场次矩阵", liveSessionMatrix}, {"直播弹幕明细", liveDetails}, {"全部活动", activity}, {"统计说明", notes}, {"直接回复成员矩阵", direct}, {"逐月成员数据", monthly}})
 }
 func xmlText(s string) string {
 	s = strings.Map(func(r rune) rune {
@@ -122,7 +124,7 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 			for k, v := range row {
 				cell := fmt.Sprintf("%s%d", columnName(k), j+1)
 				style := ""
-				if s.name == "队友帖回复矩阵" || s.name == "直接回复成员矩阵" || s.name == "直播弹幕矩阵" || s.name == "参与直播场次矩阵" {
+				if s.name == "队友帖回复矩阵" || s.name == "直接回复成员矩阵" || s.name == "直播弹幕矩阵" || s.name == "发弹幕直播场次矩阵" {
 					if j == k && j > 0 {
 						style = ` s="1"`
 					}
@@ -175,10 +177,30 @@ func writeWorkbook(sheets []workbookSheet) ([]byte, error) {
 }
 
 func reportColumns() []any {
-	return []any{"成员", "帖子总数", "帖子照片张数", "帖子累计评论", "帖子累计点赞", "回复总数", "回复粉丝", "回复其他成员", "回复自己", "被回复者未知", "视频数", "Moment已采集数", "直播次数", "直播弹幕数", "参与他人直播场次", "队友帖下回复数", "已知直播时长秒", "有时长直播数", "确认单人直播时长秒", "确认单人直播数"}
+	return []any{"成员", "帖子总数", "帖子照片张数", "帖子累计评论", "帖子累计点赞", "回复总数", "被成员回复数", "回复粉丝", "回复其他成员", "回复自己", "视频数", "Moment已采集数", "直播次数", "直播弹幕数", "发弹幕直播场次", "队友帖下回复数", "已知直播时长秒", "有时长直播数", "确认单人直播时长秒", "确认单人直播数"}
 }
-func reportMemberRow(m MemberCount) []any {
-	return []any{m.Name, m.Posts, m.PostPhotos, engagementExcelValue(m.PostComments, m.CommentPosts, m.Posts), engagementExcelValue(m.PostLikes, m.LikePosts, m.Posts), m.Replies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.UnknownReplies, m.Videos, m.Moments, m.Lives, m.LiveChats, m.LiveChatLives, m.TeammateReplies, knownDuration(m.LiveSeconds, m.TimedLives, "未取得时长"), m.TimedLives, knownDuration(m.SoloLiveSeconds, m.SoloLives, "未确认单人"), m.SoloLives}
+func reportMemberRow(m MemberCount, receivedReplies int, pendingSolo bool) []any {
+	return []any{m.Name, m.Posts, m.PostPhotos, engagementExcelValue(m.PostComments, m.CommentPosts, m.Posts), engagementExcelValue(m.PostLikes, m.LikePosts, m.Posts), m.Replies, receivedReplies, m.FanReplies, m.MemberReplies, m.SelfReplies, m.Videos, m.Moments, m.Lives, m.LiveChats, m.LiveChatLives, m.TeammateReplies, knownDuration(m.LiveSeconds, m.TimedLives), m.TimedLives, soloDurationExcel(m.SoloLiveSeconds, m.SoloLives, pendingSolo), m.SoloLives}
+}
+
+func receivedMemberReplyCounts(members []MemberCount) map[string]int {
+	counts := map[string]int{}
+	for _, member := range members {
+		for targetID, count := range member.ReplyMembers {
+			counts[targetID] += count
+		}
+	}
+	return counts
+}
+
+func soloDurationExcel(seconds int64, count int, pending bool) any {
+	if count > 0 {
+		return seconds
+	}
+	if pending {
+		return "待确认"
+	}
+	return int64(0)
 }
 func countValue(v *int64) any {
 	if v == nil {
@@ -243,9 +265,11 @@ func reportExcelExtrema(rows [][]any, start, end, firstColumn int) string {
 
 const reportExcelStyles = `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="2"><border/><border diagonalDown="1"><diagonal style="thin"><color rgb="FF8994A5"/></diagonal></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FF1D4ED8"/></font></dxf><dxf><font><b/><color rgb="FFC2410C"/></font></dxf></dxfs></styleSheet>`
 
-func knownDuration(seconds int64, count int, missing string) any {
-	if count == 0 {
-		return missing
-	}
+// knownDuration 输出「已知直播时长」列。
+//
+// 与网页版同一口径：没有数据就落 0，而不是写状态文案。
+// 这里落 int64(0) 而不是字符串还有个额外好处 —— 条件格式
+// reportExcelExtrema 靠 ISNUMBER() 判断最高/最低，写文本会让整列高亮失效。
+func knownDuration(seconds int64, count int) any {
 	return seconds
 }

@@ -1,10 +1,13 @@
 package logic
 
 import (
+	"context"
+	"encoding/base64"
 	"fmt"
 	"html"
 	"log"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,8 +16,10 @@ import (
 	"time"
 
 	"pocket48-bot/internal/config"
+	"pocket48-bot/internal/message"
 	"pocket48-bot/internal/monitor"
 	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/outbound"
 )
 
 func (b *Bot) notifyWeiboCookieInvalid(uid string) {
@@ -38,7 +43,7 @@ func (b *Bot) notifyWeiboCookieInvalid(uid string) {
 		return
 	}
 
-	msg := fmt.Sprintf("⚠️ 微博 Cookie 恢复失败（UID=%s 连续失败后自动 refresh 仍不可用）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：已先尝试浏览器登录态恢复，两侧链路仍失败，需人工处理。\n建议：扫码登录 / bot weibo cookie set <Cookie> / bot weibo cookie check",
+	msg := fmt.Sprintf("🚨 微博 Cookie 恢复失败（UID=%s 连续失败后自动 refresh 仍不可用）\nwww.weibo.com: %s\nmweibo.com: %s\n说明：已先尝试浏览器登录态恢复，两侧链路仍失败，需人工处理。\n建议：扫码登录 / bot weibo cookie set <Cookie> / bot weibo cookie check",
 		uid, webDetail, mwebDetail)
 	// Alerts are email-only (no QQ private spam).
 	b.notifyAdmins(msg)
@@ -838,28 +843,32 @@ func (b *Bot) findWeiboSuperTopic(key string) (string, *config.WeiboSuperTopic) 
 	return "", nil
 }
 
+// shouldSignWeiboCountForExact 判断日报第二轮要不要为该超话补一次签到取精确值。
+//
+// ★ 2026-10-04 用户规则：
+//  1. 不在自动签到列表的超话 —— 不签到，日报原样显示模糊数字
+//  2. 在自动签到列表的超话   —— 才通过签到来拿详细数据
+//
+// 因此只有「含万（模糊）」且「在自动签到列表内」才签到。
+func shouldSignWeiboCountForExact(isRounded bool, oidNorm string, autoTopics map[string]*config.WeiboSuperTopic) bool {
+	if !isRounded {
+		return false
+	}
+	if _, inAuto := autoTopics[oidNorm]; !inAuto {
+		return false
+	}
+	return true
+}
+
 func (b *Bot) signAllWeiboSuperTopics() (string, bool, bool) {
 	topics := b.getGlobalWeiboSuperTopics()
 	if len(topics) == 0 {
 		return "", false, false
 	}
-	countTopics := b.getWeiboSuperCountTopics()
 	var lines []string
 	anySuccess := false
 	authExpired := false
 	for oid, topic := range topics {
-		// 如果该超话标注了随日报签到，自动签到跳过
-		normKey := strings.TrimPrefix(normalizeWeiboSuperOID(oid), "1022:")
-		ct, inCount := countTopics[normKey]
-		if inCount && ct.ReportSign > 0 {
-			log.Printf("[WeiboSuper] skip auto sign for report-sign topic oid=%s name=%s", oid, topic.Name)
-			name := strings.TrimSpace(topic.Name)
-			if name == "" {
-				name = oid
-			}
-			lines = append(lines, fmt.Sprintf("[%s] 跳过（走日报签到流）", name))
-			continue
-		}
 		res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
 		name := strings.TrimSpace(topic.Name)
 		if name == "" {
@@ -971,41 +980,30 @@ func (b *Bot) fetchWeiboSuperCountAllBefore(deadline time.Time) ([]monitor.Weibo
 		}
 		results = append(results, *res)
 	}
-	// 第二轮：含"万"的走签到回退，并自适应标记
-	countTopicsMod := b.getWeiboSuperCountTopics()
+	// 第二轮：破万的超话走签到回退换精确值。
+	//
+	// ★ 2026-10-04 逻辑调整（用户明确要求）：
+	//   1) 不在自动签到列表里的超话 —— 不签到，日报原样显示模糊数字。
+	//   2) 在自动签到列表里的超话   —— 才通过签到来拿详细数据。
+	//
+	// 原 ReportSign 标记机制（标记为 1 则自动签到跳过、专走日报签到流）
+	// 与此逻辑直接冲突：两者范围完全相同却互相排斥，
+	// 任何一次 ReportSign 被置 1 都会让该超话彻底停签，因此一并移除。
+	// report_sign 字段保留在 config 结构体里，仅为兼容旧配置文件。
 	autoTopics := b.getGlobalWeiboSuperTopics()
-	needSave := false
 	for i, r := range results {
 		isRounded := strings.Contains(r.SignText, "万")
-		oidNorm := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
-
-		// 如果在自动签到列表里
-		if _, inAuto := autoTopics[oidNorm]; inAuto {
-			ct, inCount := countTopicsMod[oidNorm]
-			if isRounded {
-				// 标记为日报签到，重置精确计数
-				if ct == nil {
-					ct = &config.WeiboSuperCountTopic{OID: oidNorm, Name: r.Name}
-				}
-				ct.ReportSign = 1
-				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
-				needSave = true
-			} else if inCount && ct != nil && ct.ReportSign > 0 {
-				// 连续拿到精确数据，计数递增；满5天恢复自动签到
-				ct.ReportSign++
-				if ct.ReportSign >= 6 { // 1(标记) + 5(连续精确) = 6
-					ct.ReportSign = 0
-					log.Printf("[Weibo][Count] auto-recover topic oid=%s name=%s back to normal sign", oidNorm, r.Name)
-				}
-				b.cfg.WeiboSuperCountTopics[oidNorm] = ct
-				needSave = true
-			}
-		}
-
-		// 签到回退：含"万"的拿精确排名
 		if !isRounded || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			continue
 		}
+
+		oidNorm := strings.TrimPrefix(normalizeWeiboSuperOID(r.OID), "1022:")
+		if !shouldSignWeiboCountForExact(isRounded, oidNorm, autoTopics) {
+			log.Printf("[Weibo][Count] skip sign (not in auto-sign list), keep rounded oid=%s name=%s sign=%s",
+				r.OID, r.Name, r.SignText)
+			continue
+		}
+
 		signRes, err := b.weiboMonitor.SignWeiboSuperTopic(r.OID)
 		if err != nil || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			continue
@@ -1015,9 +1013,6 @@ func (b *Bot) fetchWeiboSuperCountAllBefore(deadline time.Time) ([]monitor.Weibo
 			results[i].SignCount = signRes.Rank
 			results[i].SignText = fmt.Sprintf("签到%d人", signRes.Rank)
 		}
-	}
-	if needSave {
-		b.cfg.Save()
 	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].SignCount != results[j].SignCount {
@@ -1073,7 +1068,7 @@ func (b *Bot) maybeNotifyWeiboAppAuthInvalid(err error, oid, name string) {
 	if topicName == "" {
 		topicName = strings.TrimSpace(oid)
 	}
-	msg := fmt.Sprintf("⚠️ 微博超话 app 鉴权疑似失效，当前超话统计已回退到 web 端。\n对象: %s\nOID: %s\n原因: %v\n请尽快更新 WEIBO_APP 抓包参数（Authorization / gsid / aid / s 等）。", topicName, strings.TrimSpace(oid), err)
+	msg := fmt.Sprintf("🚨 微博超话 app 鉴权疑似失效，当前超话统计已回退到 web 端。\n对象: %s\nOID: %s\n原因: %v\n请尽快更新 WEIBO_APP 抓包参数（Authorization / gsid / aid / s 等）。", topicName, strings.TrimSpace(oid), err)
 	b.notifyAdmins(msg)
 	b.cfg.WeiboAppAuthInvalidLastNotifyDate = today
 	if saveErr := b.cfg.Save(); saveErr != nil {
@@ -1159,6 +1154,24 @@ func buildLikeBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCount
 }
 
 func buildPostBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCountSnapshotItem) map[string]int {
+	return buildTextMetricBaselineFromSnapshotV2(snapshot, func(item *config.WeiboSuperCountSnapshotItem) string {
+		return item.PostCount
+	})
+}
+
+func buildReadBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCountSnapshotItem) map[string]int {
+	return buildTextMetricBaselineFromSnapshotV2(snapshot, func(item *config.WeiboSuperCountSnapshotItem) string {
+		return item.ReadCount
+	})
+}
+
+func buildFansBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCountSnapshotItem) map[string]int {
+	return buildTextMetricBaselineFromSnapshotV2(snapshot, func(item *config.WeiboSuperCountSnapshotItem) string {
+		return item.FansCount
+	})
+}
+
+func buildTextMetricBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCountSnapshotItem, value func(*config.WeiboSuperCountSnapshotItem) string) map[string]int {
 	if len(snapshot) == 0 {
 		return nil
 	}
@@ -1171,7 +1184,7 @@ func buildPostBaselineFromSnapshotV2(snapshot map[string]*config.WeiboSuperCount
 		if oid == "" {
 			continue
 		}
-		n, ok := monitor.ParseChineseNumber(strings.TrimSpace(item.PostCount))
+		n, ok := monitor.ParseChineseNumber(strings.TrimSpace(value(item)))
 		if ok && n > 0 {
 			baseline[oid] = n
 		}
@@ -1280,10 +1293,34 @@ func blankFallback(v string, fallback string) string {
 }
 
 func formatSignedDelta(delta int) string {
-	if delta > 0 {
-		return fmt.Sprintf("+%d", delta)
+	if delta == 0 {
+		return ""
 	}
-	return fmt.Sprintf("%d", delta)
+	sign := "-"
+	if delta > 0 {
+		sign = "+"
+	} else {
+		delta = -delta
+	}
+	if delta >= 1_000_000 {
+		return sign + formatCompactDelta(float64(delta)/1_000_000) + "M"
+	}
+	if delta >= 1_000 {
+		return sign + formatCompactDelta(float64(delta)/1_000) + "K"
+	}
+	return fmt.Sprintf("%s%d", sign, delta)
+}
+
+func formatCompactDelta(value float64) string {
+	formatted := fmt.Sprintf("%.1f", value)
+	return strings.TrimSuffix(formatted, ".0")
+}
+
+func appendDelta(value string, delta int) string {
+	if text := formatSignedDelta(delta); text != "" {
+		return value + " (" + text + ")"
+	}
+	return value
 }
 
 func formatWeiboSuperCountRanking(results []monitor.WeiboSuperCountResult, failed []string, title string, now time.Time, baseline map[string]int) string {
@@ -1306,7 +1343,9 @@ func formatWeiboSuperCountRanking(results []monitor.WeiboSuperCountResult, faile
 			if baseline != nil {
 				oid := normalizeWeiboSuperOID(strings.TrimSpace(item.OID))
 				if prev, ok := baseline[oid]; ok {
-					line += fmt.Sprintf(" (%s)", formatSignedDelta(item.SignCount-prev))
+					if delta := formatSignedDelta(item.SignCount - prev); delta != "" {
+						line += fmt.Sprintf(" (%s)", delta)
+					}
 				} else {
 					line += " (new)"
 				}
@@ -1324,7 +1363,7 @@ func formatWeiboSuperCountRanking(results []monitor.WeiboSuperCountResult, faile
 	return strings.Join(lines, "\n")
 }
 
-func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, failed []string, title string, now time.Time, signBaseline map[string]int, likeBaseline map[string]int, postBaseline map[string]int) string {
+func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, failed []string, title string, now time.Time, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int) string {
 	lines := []string{title, now.Format("2006-01-02 15:04:05")}
 
 	if len(results) == 0 {
@@ -1345,24 +1384,44 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 			if name == "" {
 				name = item.OID
 			}
-			line := fmt.Sprintf("%d) %s - 签到%d人", i+1, name, item.SignCount)
 			oid := normalizeWeiboSuperOID(strings.TrimSpace(item.OID))
+			signText := fmt.Sprintf("%d人", item.SignCount)
+			if signBaseline != nil {
+				if prev, ok := signBaseline[oid]; ok {
+					signText = appendDelta(signText, item.SignCount-prev)
+				} else {
+					signText += " (new)"
+				}
+			}
+			line := fmt.Sprintf("%d) %s - 签到%s", i+1, name, signText)
 			if rc := strings.TrimSpace(item.ReadCount); rc != "" {
-				line += fmt.Sprintf(" | 阅读%s", rc)
+				readText := rc
+				if curr, ok := monitor.ParseChineseNumber(rc); ok {
+					if prev, exists := readBaseline[oid]; exists {
+						readText = appendDelta(readText, curr-prev)
+					}
+				}
+				line += fmt.Sprintf(" | 阅读%s", readText)
 			}
 			likePart := ""
 			if item.SuperLikeKnown || item.SuperLikeCount > 0 {
 				likePart = fmt.Sprintf("%d", item.SuperLikeCount)
 				if likeBaseline != nil {
 					if prev, ok := likeBaseline[oid]; ok {
-						likePart += fmt.Sprintf(" (%s)", formatSignedDelta(item.SuperLikeCount-prev))
+						likePart = appendDelta(likePart, item.SuperLikeCount-prev)
 					}
 				}
 				line += fmt.Sprintf(" | 超LIKE%s人", likePart)
 			}
 			fans := strings.TrimSpace(item.FansCount)
 			if fans != "" {
-				line += fmt.Sprintf(" | 粉丝%s", fans)
+				fansText := fans
+				if curr, ok := monitor.ParseChineseNumber(fans); ok {
+					if prev, exists := fansBaseline[oid]; exists {
+						fansText = appendDelta(fansText, curr-prev)
+					}
+				}
+				line += fmt.Sprintf(" | 粉丝%s", fansText)
 			}
 			posts := strings.TrimSpace(item.PostCount)
 			if posts != "" {
@@ -1370,9 +1429,7 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 				if postBaseline != nil {
 					if curr, ok := monitor.ParseChineseNumber(posts); ok && curr > 0 {
 						if prev, ok := postBaseline[oid]; ok && prev > 0 {
-							if delta := curr - prev; delta > 0 {
-								postPart = fmt.Sprintf(" | 帖子%s (+%d)", posts, delta)
-							}
+							postPart = fmt.Sprintf(" | 帖子%s", appendDelta(posts, curr-prev))
 						}
 					}
 				}
@@ -1383,13 +1440,6 @@ func formatWeiboSuperCountDualRanking(results []monitor.WeiboSuperCountResult, f
 			}
 			if strings.TrimSpace(item.Heat24h) != "" {
 				line += fmt.Sprintf(" | %s", strings.TrimSpace(item.Heat24h))
-			}
-			if signBaseline != nil {
-				if prev, ok := signBaseline[oid]; ok {
-					line += fmt.Sprintf(" (%s)", formatSignedDelta(item.SignCount-prev))
-				} else {
-					line += " (new)"
-				}
 			}
 			lines = append(lines, line)
 		}
@@ -1415,15 +1465,20 @@ type weiboSuperCountHTMLSection struct {
 type weiboSuperCountImage struct {
 	Title    string
 	Sections []weiboSuperCountHTMLSection
+	// Key is the plan key (e.g. "image-1") this PNG was rendered from.
+	Key string
+	// TargetIDs are this image's own delivery targets; empty falls back to the
+	// global WEIBO_SUPER_COUNT/REPORT_IMAGE_TARGETS list.
+	TargetIDs []string
 }
 
 // buildWeiboSuperCountHTMLTable renders a single ranking table (dynamic columns: only columns with data).
-func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, signBaseline, likeBaseline, postBaseline map[string]int) string {
+func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int) string {
 	esc := html.EscapeString
 	type row struct {
 		rank                                                   int
 		name, sign, like, read, fans, posts, level, heat       string
-		signDelta                                              string
+		signDelta, likeDelta, readDelta, fansDelta, postsDelta string
 		hasLike, hasRead, hasFans, hasPosts, hasLevel, hasHeat bool
 	}
 	rows := make([]row, 0, len(results))
@@ -1452,35 +1507,47 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 				}
 			}
 			likeText := "未获取"
+			likeDelta := ""
 			hasLike := item.SuperLikeKnown || item.SuperLikeCount > 0
 			if hasLike {
 				likeText = fmt.Sprintf("%d", item.SuperLikeCount)
 				if likeBaseline != nil {
 					if prev, ok := likeBaseline[oid]; ok {
-						likeText += " (" + formatSignedDelta(item.SuperLikeCount-prev) + ")"
+						likeDelta = formatSignedDelta(item.SuperLikeCount - prev)
 					}
 				}
 				showLike = true
 			}
 			read := strings.TrimSpace(item.ReadCount)
 			hasRead := read != "" && read != "-"
+			readDelta := ""
 			if hasRead {
+				if curr, ok := monitor.ParseChineseNumber(read); ok {
+					if prev, exists := readBaseline[oid]; exists {
+						readDelta = formatSignedDelta(curr - prev)
+					}
+				}
 				showRead = true
 			}
 			fans := strings.TrimSpace(item.FansCount)
 			hasFans := fans != "" && fans != "-"
+			fansDelta := ""
 			if hasFans {
+				if curr, ok := monitor.ParseChineseNumber(fans); ok {
+					if prev, exists := fansBaseline[oid]; exists {
+						fansDelta = formatSignedDelta(curr - prev)
+					}
+				}
 				showFans = true
 			}
 			posts := strings.TrimSpace(item.PostCount)
 			hasPosts := posts != "" && posts != "-"
+			postsDelta := ""
 			if hasPosts {
 				if postBaseline != nil {
 					if curr, ok := monitor.ParseChineseNumber(posts); ok && curr > 0 {
 						if prev, ok := postBaseline[oid]; ok && prev > 0 {
-							if delta := curr - prev; delta > 0 {
-								posts = fmt.Sprintf("%s (+%d)", posts, delta)
-							}
+							postsDelta = formatSignedDelta(curr - prev)
 						}
 					}
 				}
@@ -1498,7 +1565,8 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 			}
 			rows = append(rows, row{
 				rank: i + 1, name: name,
-				sign: fmt.Sprintf("%d", item.SignCount), signDelta: signDelta,
+				sign: fmt.Sprintf("%d", item.SignCount), signDelta: signDelta, likeDelta: likeDelta,
+				readDelta: readDelta, fansDelta: fansDelta, postsDelta: postsDelta,
 				like: likeText, read: read, fans: fans, posts: posts, level: level, heat: heat,
 				hasLike: hasLike, hasRead: hasRead, hasFans: hasFans, hasPosts: hasPosts, hasLevel: hasLevel, hasHeat: hasHeat,
 			})
@@ -1533,11 +1601,11 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 	}
 
 	thStyle := func(align string) string {
-		return fmt.Sprintf(`padding:11px 12px;border-bottom:1px solid #e7ebf1;color:#7a8495;font-size:12px;font-weight:650;text-align:%s;`, align)
+		return fmt.Sprintf(`padding:11px 12px;border-bottom:1px solid #cfd9d6;color:#7a8495;font-size:12px;font-weight:650;text-align:%s;`, align)
 	}
 	// extra is appended last so callers can override font-size/color cleanly.
 	tdStyle := func(align string, extra string) string {
-		base := fmt.Sprintf(`padding:10px 12px;border-bottom:1px solid #e7ebf1;font-size:13px;text-align:%s;`, align)
+		base := fmt.Sprintf(`padding:10px 12px;border-bottom:1px solid #cfd9d6;font-size:13px;text-align:%s;`, align)
 		extra = strings.TrimSpace(extra)
 		if extra == "" {
 			return base
@@ -1549,67 +1617,72 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 	}
 
 	var thead strings.Builder
-	thead.WriteString(`<tr style="background:#f0f4fa;">`)
+	thead.WriteString(`<tr style="background:#d9e7e2;">`)
 	for _, c := range cols {
 		fmt.Fprintf(&thead, `<th style="%s">%s</th>`, thStyle(c.align), esc(c.label))
 	}
 	thead.WriteString(`</tr>`)
 
 	var tableRows strings.Builder
+	metricHTML := func(value, delta string) string {
+		valueHTML := fmt.Sprintf(`<div style="white-space:nowrap;">%s</div>`, esc(value))
+		if delta == "" {
+			return valueHTML
+		}
+		color := "#667085"
+		if strings.HasPrefix(delta, "+") {
+			color = "#0f9d58"
+		} else if strings.HasPrefix(delta, "-") {
+			color = "#d93025"
+		} else if delta == "new" {
+			color = "#2466b3"
+		}
+		return valueHTML + fmt.Sprintf(`<div style="margin-top:2px;white-space:nowrap;color:%s;font-size:11px;font-weight:600;">(%s)</div>`, color, esc(delta))
+	}
 	if len(rows) == 0 {
 		fmt.Fprintf(&tableRows, `<tr><td colspan="%d" style="padding:18px;text-align:center;color:#7a8495;font-size:14px;">暂无可用签到数据</td></tr>`, len(cols))
 	} else {
 		for _, r := range rows {
-			deltaHTML := ""
-			if r.signDelta != "" {
-				color := "#667085"
-				if strings.HasPrefix(r.signDelta, "+") {
-					color = "#0f9d58"
-				} else if strings.HasPrefix(r.signDelta, "-") {
-					color = "#d93025"
-				} else if r.signDelta == "new" {
-					color = "#2466b3"
-				}
-				deltaHTML = fmt.Sprintf(`&nbsp;<span style="color:%s;font-size:12px;font-weight:600;">(%s)</span>`, color, esc(r.signDelta))
-			}
 			bg := "#ffffff"
 			if r.rank%2 == 0 {
-				bg = "#f8fafc"
+				bg = "#f2f7f5"
 			}
 			fmt.Fprintf(&tableRows, `<tr style="background:%s;">`, bg)
 			for _, c := range cols {
 				switch c.key {
 				case "rank":
 					// Keep rank cell minimal — mobile mail clients are picky about first-column styles.
-					fmt.Fprintf(&tableRows, `<td align="center" style="padding:10px 8px;border-bottom:1px solid #e7ebf1;color:#667085;font-size:13px;">%d</td>`, r.rank)
+					fmt.Fprintf(&tableRows, `<td align="center" style="padding:10px 8px;border-bottom:1px solid #cfd9d6;color:#667085;font-size:13px;">%d</td>`, r.rank)
 				case "name":
 					fmt.Fprintf(&tableRows, `<td align="left" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px;font-weight:600"), esc(r.name))
 				case "sign":
-					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px"), esc(r.sign), deltaHTML)
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;font-size:14px;vertical-align:top"), metricHTML(r.sign, r.signDelta))
 				case "like":
 					val := "未获取"
+					delta := ""
 					if r.hasLike {
 						val = r.like
+						delta = r.likeDelta
 					}
-					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;vertical-align:top"), metricHTML(val, delta))
 				case "read":
 					val := "-"
 					if r.hasRead {
 						val = r.read
 					}
-					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;vertical-align:top"), metricHTML(val, r.readDelta))
 				case "fans":
 					val := "-"
 					if r.hasFans {
 						val = r.fans
 					}
-					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;vertical-align:top"), metricHTML(val, r.fansDelta))
 				case "posts":
 					val := "-"
 					if r.hasPosts {
 						val = r.posts
 					}
-					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033"), esc(val))
+					fmt.Fprintf(&tableRows, `<td align="right" style="%s">%s</td>`, tdStyle(c.align, "color:#172033;vertical-align:top"), metricHTML(val, r.postsDelta))
 				case "level":
 					val := "-"
 					if r.hasLevel {
@@ -1630,20 +1703,35 @@ func buildWeiboSuperCountHTMLTable(results []monitor.WeiboSuperCountResult, sign
 
 	// Avoid overflow/border-radius on tables — many mobile mail clients mangle them and
 	// can surface raw <td> fragments as plain text (seen on 2026-07-19 rank #6).
-	return fmt.Sprintf(`<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid #e7ebf1;">
+	return fmt.Sprintf(`<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;border:1px solid %s;">
 <thead>
 %s
 </thead>
 <tbody>
 %s
 </tbody>
-</table>`, thead.String(), tableRows.String())
+</table>`, reportCardBorder, thead.String(), tableRows.String())
 }
 
 // formatWeiboSuperCountDualRankingHTML builds multi-section HTML (one table per group) for daily email.
 // Only columns that have real data within each section are rendered.
 // forScreenshot=true trims the email-only "download" footer so PNG looks clean.
-func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection, failed []string, title string, now time.Time, signBaseline map[string]int, likeBaseline map[string]int, postBaseline map[string]int, forScreenshot bool) string {
+// 微博超话日报的配色直接沿用 Weverse 周报/月报/年报的色板，让两类报表
+// 在群里看起来是同一套设计。墨绿主色 #2f6657，浅绿辅助 #d9e7e2 / #c8ddd5，
+// 页面底色 #edf1f2。此前分组徽章用蓝（#2466b3/#edf4ff）而顶条用绿，
+// 混在一起显得很杂乱。
+const (
+	reportInkGreen    = "#2f6657" // 主色：顶条、kicker、分组徽章文字
+	reportPaleGreen   = "#e6f2ee" // 浅绿底：kicker 徽章
+	reportHeaderGreen = "#d9e7e2" // 表头底
+	reportRowGreen    = "#c8ddd5" // 隔行/首列底
+	reportPageBg      = "#edf1f2" // 页面底色
+	reportCardBorder  = "#b8c4c1" // 卡片描边
+	reportTextDark    = "#20282d" // 正文
+	reportTextMuted   = "#5f6c72" // 次要文字
+)
+
+func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection, failed []string, title string, now time.Time, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int, forScreenshot bool) string {
 	esc := html.EscapeString
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -1670,12 +1758,12 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 			fmt.Fprintf(&sectionsHTML, `<div style="margin-top:%s;">
 <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 10px;border-collapse:collapse;">
 <tr>
-<td style="padding:4px 10px;border-radius:6px;background:#edf4ff;color:#2466b3;font-size:12px;font-weight:650;">%s</td>
+<td style="padding:4px 10px;border-radius:6px;background:%s;color:%s;font-size:12px;font-weight:650;">%s</td>
 <td style="padding-left:8px;color:#667085;font-size:12px;">%d 个超话</td>
 </tr>
 </table>
 %s
-</div>`, marginTop, esc(secTitle), len(sec.Results), buildWeiboSuperCountHTMLTable(sec.Results, signBaseline, likeBaseline, postBaseline))
+</div>`, marginTop, reportHeaderGreen, reportInkGreen, esc(secTitle), len(sec.Results), buildWeiboSuperCountHTMLTable(sec.Results, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline))
 		}
 	}
 
@@ -1695,14 +1783,12 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 	footer := ""
 	bodyPad := "28px 12px"
 	cardPadTop := "26px 22px 10px"
-	cardPadMid := "8px 22px 14px"
 	cardPadTables := "0 16px 16px"
 	cardMax := "720px"
 	if forScreenshot {
 		// tight card for mobile 3:4 export — less outer blank
 		bodyPad = "0"
 		cardPadTop = "18px 16px 8px"
-		cardPadMid = "4px 16px 10px"
 		cardPadTables = "0 12px 12px"
 		cardMax = "680px"
 		footer = ""
@@ -1717,24 +1803,29 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 	if !forScreenshot {
 		brandFooter = `<tr><td style="padding:16px 28px;border-top:1px solid #edf0f4;color:#98a1af;font-size:12px;line-height:1.6;">Pocket48 Console 自动发送 · 微博超话签到人数日报</td></tr>`
 	} else {
-		brandFooter = `<tr><td style="padding:10px 16px 14px;border-top:1px solid #edf0f4;color:#98a1af;font-size:11px;line-height:1.5;">Pocket48 · 微博超话签到人数日报</td></tr>`
+		brandFooter = ""
+	}
+
+	// Header title: for screenshots the plan name IS the report name (e.g.
+	// "heart to heart 的超话日报"), with no Pocket48 brand mark.
+	headerTitle := displayTitle
+	headerKicker := "微博超话日报"
+	if forScreenshot {
+		if !strings.Contains(displayTitle, "日报") {
+			headerTitle = displayTitle + " 的超话日报"
+		}
+		headerKicker = "每日报告"
 	}
 
 	return fmt.Sprintf(`<!doctype html>
-<html><body style="margin:0;padding:0;background:#f5f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
-<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="background:#f5f7fb;padding:%s;"><tr><td align="center">
-<table id="report-card" role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="max-width:%s;background:#ffffff;border:1px solid #e5eaf2;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(31,52,89,.06);">
-<tr><td style="height:4px;background:linear-gradient(90deg,#3478d4,#5b9cf0);font-size:0;line-height:0;">&nbsp;</td></tr>
+<html><body style="margin:0;padding:0;background:#edf1f2;color:#20282d;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',Arial,sans-serif;">
+<table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="background:#edf1f2;padding:%s;"><tr><td align="center">
+<table id="report-card" role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="max-width:%s;background:#ffffff;border:1px solid #b8c4c1;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(31,52,89,.06);">
+<tr><td style="height:4px;background:linear-gradient(90deg,#2f6657,#3d7a69);font-size:0;line-height:0;">&nbsp;</td></tr>
 <tr><td style="padding:%s;">
-<table role="presentation" cellspacing="0" cellpadding="0"><tr>
-<td style="width:36px;height:36px;border-radius:8px;background:#3478d4;color:#fff;font-size:13px;font-weight:700;text-align:center;vertical-align:middle;">P48</td>
-<td style="padding-left:12px;font-size:16px;font-weight:650;color:#172033;">Pocket48 · 微博超话日报</td>
-</tr></table>
-</td></tr>
-<tr><td style="padding:%s;">
-<span style="display:inline-block;padding:5px 9px;border-radius:6px;background:#edf4ff;color:#2466b3;font-size:12px;font-weight:650;">每日报告</span>
+<span style="display:inline-block;padding:5px 9px;border-radius:6px;background:#e6f2ee;color:#2f6657;font-size:11px;font-weight:800;letter-spacing:1px;">%s</span>
 <h1 style="margin:10px 0 4px;font-size:20px;line-height:1.3;color:#172033;">%s</h1>
-<p style="margin:0;color:#667085;font-size:12px;line-height:1.5;">统计时间：%s · 共 %d 个超话 · %d 个分组</p>
+<p style="margin:0;color:#5f6c72;font-size:12px;line-height:1.5;">统计时间：%s · 共 %d 个超话 · %d 个分组</p>
 </td></tr>
 <tr><td style="padding:%s;">
 %s
@@ -1744,7 +1835,7 @@ func formatWeiboSuperCountDualRankingHTML(sections []weiboSuperCountHTMLSection,
 %s
 </table>
 </td></tr></table>
-</body></html>`, bodyPad, cardMax, cardPadTop, cardPadMid, esc(displayTitle), esc(timeText), totalTopics, len(sections), cardPadTables, sectionsHTML.String(), failedHTML, footer, brandFooter)
+</body></html>`, bodyPad, cardMax, cardPadTop, esc(headerKicker), esc(headerTitle), esc(timeText), totalTopics, len(sections), cardPadTables, sectionsHTML.String(), failedHTML, footer, brandFooter)
 }
 
 // buildWeiboSuperCountEmailSections groups results into email sections (one table per group).
@@ -1813,10 +1904,9 @@ func buildWeiboSuperCountSections(groups map[string]*config.WeiboSuperCountGroup
 	return sections
 }
 
-// buildWeiboSuperCountImages applies the optional attachment layout. Configured
-// plans may intentionally reuse a report group. Any section not referenced by
-// a plan is appended to an automatic fallback image so a configuration mistake
-// can never silently omit data from the attachments.
+// buildWeiboSuperCountImages applies the configured attachment layout. Only
+// groups referenced by a plan produce an image; unreferenced groups are omitted
+// entirely (the operator chooses exactly which groups become daily images).
 func buildWeiboSuperCountImages(plans map[string]*config.WeiboSuperCountImageGroupInfo, sections []weiboSuperCountHTMLSection) []weiboSuperCountImage {
 	if len(plans) == 0 {
 		return []weiboSuperCountImage{{Sections: sections}}
@@ -1830,8 +1920,7 @@ func buildWeiboSuperCountImages(plans map[string]*config.WeiboSuperCountImageGro
 	for _, section := range sections {
 		byGroup[section.GroupKey] = section
 	}
-	used := make(map[string]struct{}, len(sections))
-	images := make([]weiboSuperCountImage, 0, len(plans)+1)
+	images := make([]weiboSuperCountImage, 0, len(plans))
 	for _, key := range planKeys {
 		plan := plans[key]
 		if plan == nil {
@@ -1841,21 +1930,16 @@ func buildWeiboSuperCountImages(plans map[string]*config.WeiboSuperCountImageGro
 		for _, groupKey := range plan.GroupKeys {
 			if section, ok := byGroup[strings.TrimSpace(groupKey)]; ok {
 				selected = append(selected, section)
-				used[section.GroupKey] = struct{}{}
 			}
 		}
 		if len(selected) > 0 {
-			images = append(images, weiboSuperCountImage{Title: strings.TrimSpace(plan.Name), Sections: selected})
+			images = append(images, weiboSuperCountImage{
+				Title:     strings.TrimSpace(plan.Name),
+				Sections:  selected,
+				Key:       key,
+				TargetIDs: append([]string{}, plan.TargetIDs...),
+			})
 		}
-	}
-	remaining := make([]weiboSuperCountHTMLSection, 0, len(sections))
-	for _, section := range sections {
-		if _, ok := used[section.GroupKey]; !ok {
-			remaining = append(remaining, section)
-		}
-	}
-	if len(remaining) > 0 {
-		images = append(images, weiboSuperCountImage{Title: "其他分组", Sections: remaining})
 	}
 	if len(images) == 0 {
 		return []weiboSuperCountImage{{Sections: sections}}
@@ -1863,22 +1947,27 @@ func buildWeiboSuperCountImages(plans map[string]*config.WeiboSuperCountImageGro
 	return images
 }
 
-func buildWeiboSuperCountImageAttachments(cfg *config.Config, sections []weiboSuperCountHTMLSection, failed []string, title string, now time.Time, signBaseline, likeBaseline, postBaseline map[string]int) []emailAttachment {
+func buildWeiboSuperCountImageAttachments(cfg *config.Config, sections []weiboSuperCountHTMLSection, failed []string, title string, now time.Time, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int) []emailAttachment {
 	images := buildWeiboSuperCountImages(cfg.WeiboSuperCountImageGroups, sections)
 	attachments := make([]emailAttachment, 0, len(images))
 	for index, image := range images {
 		imageTitle := title
 		if image.Title != "" {
-			imageTitle = fmt.Sprintf("[%s - %s]", strings.Trim(strings.TrimSpace(title), "[]"), image.Title)
+			imageTitle = image.Title
 		}
-		shotHTML := formatWeiboSuperCountDualRankingHTML(image.Sections, failed, imageTitle, now, signBaseline, likeBaseline, postBaseline, true)
+		shotHTML := formatWeiboSuperCountDualRankingHTML(image.Sections, failed, imageTitle, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline, true)
 		png, err := renderHTMLToPNG(shotHTML)
 		if err != nil {
 			log.Printf("[WeiboSuperCount] html→png failed image=%d name=%q: %v", index+1, image.Title, err)
 			continue
 		}
 		filename := fmt.Sprintf("weibo-super-count-%s-%02d.png", now.Format("2006-01-02"), index+1)
-		attachments = append(attachments, emailAttachment{Name: filename, ContentType: "image/png", Data: png})
+		attachments = append(attachments, emailAttachment{
+			Name:        filename,
+			ContentType: "image/png",
+			Data:        png,
+			TargetIDs:   append([]string{}, image.TargetIDs...),
+		})
 	}
 	return attachments
 }
@@ -1895,28 +1984,126 @@ func ResendWeiboSuperCountDailyEmail(
 	failed []string,
 	title string,
 	now time.Time,
-	signBaseline, likeBaseline, postBaseline map[string]int,
+	signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int,
 ) error {
 	if cfg == nil {
 		return fmt.Errorf("nil config")
 	}
 	// Build grouped sections from config.
 	sections := buildWeiboSuperCountSections(cfg.WeiboSuperCountGroups, cfg.WeiboSuperCountTopics, results)
-	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
+	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline, false)
 	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
-	atts := buildWeiboSuperCountImageAttachments(cfg, sections, failed, title, now, signBaseline, likeBaseline, postBaseline)
-	plain := formatWeiboSuperCountDualRanking(results, failed, title, now, signBaseline, likeBaseline, postBaseline)
+	atts := buildWeiboSuperCountImageAttachments(cfg, sections, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
+	plain := formatWeiboSuperCountDualRanking(results, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	return sendAdminHTMLEmail(cfg, subject, htmlBody, plain, atts...)
 }
 
 // sendWeiboSuperCountDailyEmail sends one email with multi-group tables and one
 // or more PNG attachments according to the configured image layout.
-func (b *Bot) sendWeiboSuperCountDailyEmail(reportText, title string, results []monitor.WeiboSuperCountResult, failed []string, now time.Time, signBaseline, likeBaseline, postBaseline map[string]int) {
+func (b *Bot) sendWeiboSuperCountDailyEmail(reportText, title string, results []monitor.WeiboSuperCountResult, failed []string, now time.Time, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int) {
 	sections := b.buildWeiboSuperCountEmailSections(results)
-	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, postBaseline, false)
+	htmlBody := formatWeiboSuperCountDualRankingHTML(sections, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline, false)
 	subject := "微博超话日报｜" + strings.Trim(strings.TrimSpace(title), "[]")
-	atts := buildWeiboSuperCountImageAttachments(b.cfg, sections, failed, title, now, signBaseline, likeBaseline, postBaseline)
+	atts := buildWeiboSuperCountImageAttachments(b.cfg, sections, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	b.notifyAdminsEmailReport(subject, htmlBody, reportText, atts...)
+	// Fan each PNG out to ITS OWN targets, so image 1 can go to群A while image 2
+	// goes to群B. An image without its own list falls back to the global
+	// WEIBO_REPORT_IMAGE_TARGETS (backward compatible with older setups).
+	for _, att := range atts {
+		targetIDs := att.TargetIDs
+		if len(targetIDs) == 0 {
+			targetIDs = b.cfg.WeiboReportImageTargets
+		}
+		if len(targetIDs) == 0 {
+			continue
+		}
+		for _, targetID := range targetIDs {
+			target := b.cfg.ResolveTarget(targetID)
+			if target.ID == "" {
+				continue
+			}
+			b.sendReportImage(target, att.Data, reportCardTitle(title), now)
+		}
+	}
+}
+
+// reportCardTitle 把配置里的标题转成飞书卡片顶栏文案：去掉邮件专用的方括号
+// 包裹，并保证有一个可读的名字。
+func reportCardTitle(title string) string {
+	trimmed := strings.Trim(strings.TrimSpace(title), "[]")
+	if trimmed == "" {
+		return "微博超话日报"
+	}
+	if !strings.Contains(trimmed, "日报") {
+		return trimmed + " 的超话日报"
+	}
+	return trimmed
+}
+
+// reportImageFileTTL 是日报临时图片的存活时间。投递是异步的，必须等适配器
+// 真正读完文件（QQ 上传、飞书 upload + 发消息）才能删。60 秒足够覆盖
+// 三个目标顺序发送与偶发的网络重试。
+const reportImageFileTTL = 60 * time.Second
+
+// sendReportImage delivers report PNG bytes.
+//
+// Feishu receives a structured Document so the card carries the usual chrome —
+// title on top, source on the bottom-left, timestamp bottom-right — with the
+// report image inside. QQ keeps the plain image segment so its rendering stays
+// exactly as before.
+func (b *Bot) sendReportImage(target config.DeliveryTarget, png []byte, title string, createdAt time.Time) {
+	if b == nil || len(png) == 0 {
+		return
+	}
+	if strings.EqualFold(target.Platform, "feishu") {
+		cardTitle := strings.TrimSpace(title)
+		if cardTitle == "" {
+			cardTitle = "微博超话日报"
+		}
+		when := createdAt
+		if when.IsZero() {
+			when = time.Now()
+		}
+		doc := &message.Document{
+			Source:    "微博",
+			Title:     cardTitle,
+			Author:    "微博",
+			CreatedAt: when,
+			// readMedia 支持 base64:// 前缀的内联字节，日报图片无需落盘。
+			Media: []message.Media{{
+				Kind:   "image",
+				Source: "base64://" + base64.StdEncoding.EncodeToString(png),
+			}},
+		}
+		if b.feishu != nil {
+			b.feishu.SendNow(context.Background(), outbound.Target{
+				Platform: "feishu",
+				Kind:     outbound.GroupChat,
+				Address:  target.Address,
+			}, doc)
+			return
+		}
+	}
+	f, err := os.CreateTemp("", "p48-report-*.png")
+	if err != nil {
+		log.Printf("[Report] temp png create failed: %v", err)
+		return
+	}
+	path := f.Name()
+	// 不能在这里 defer os.Remove：投递是**异步**的（Feishu.Send 只入队就返回，
+	// worker 稍后才读文件），文件在适配器真正读取前就被删掉，结果是
+	// "open /tmp/p48-report-*.png: no such file or directory"，
+	// 群里只剩一个空占位。改为延迟删除，并留出足够的上传窗口。
+	defer func() {
+		time.AfterFunc(reportImageFileTTL, func() { _ = os.Remove(path) })
+	}()
+	if _, err := f.Write(png); err != nil {
+		f.Close()
+		log.Printf("[Report] temp png write failed: %v", err)
+		return
+	}
+	f.Close()
+	b.sendTarget(target, []interface{}{napcat.ImageSegment(path)})
 }
 
 func (b *Bot) runWeiboSuperCountDailyPushLoop() {
@@ -1961,6 +2148,8 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		if signBaseline == nil && b.cfg.WeiboSuperCountDailySnapshots != nil {
 			signBaseline = b.cfg.WeiboSuperCountDailySnapshots[yesterday]
 		}
+		readBaseline := buildReadBaselineFromSnapshotV2(yesterdayV2)
+		fansBaseline := buildFansBaselineFromSnapshotV2(yesterdayV2)
 		postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
 
 		// Email: ONE combined daily report with PNG attachment.
@@ -1974,9 +2163,9 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 		wantQQ := delivery == "qq" || delivery == "both"
 
 		titleEmail := "[超话签到人数日报]"
-		reportEmail := formatWeiboSuperCountDualRanking(results, failed, titleEmail, now, signBaseline, likeBaseline, postBaseline)
+		reportEmail := formatWeiboSuperCountDualRanking(results, failed, titleEmail, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 		if wantEmail {
-			b.sendWeiboSuperCountDailyEmail(reportEmail, titleEmail, results, failed, now, signBaseline, likeBaseline, postBaseline)
+			b.sendWeiboSuperCountDailyEmail(reportEmail, titleEmail, results, failed, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 		}
 		if wantQQ {
 			qqRecipients := b.collectWeiboSuperCountQQRecipients()
@@ -1997,7 +2186,7 @@ func (b *Bot) runWeiboSuperCountDailyPushLoop() {
 					}
 					title := fmt.Sprintf("[超话签到人数日报 - %s]", ginfo.Name)
 					groupFailed := failed // show failures once per group text (cheap)
-					report := formatWeiboSuperCountDualRanking(groupResults, groupFailed, title, now, signBaseline, likeBaseline, postBaseline)
+					report := formatWeiboSuperCountDualRanking(groupResults, groupFailed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 					b.notifyQQUsers(report, qqRecipients...)
 				}
 			}
@@ -2085,7 +2274,7 @@ func (b *Bot) weiboAppAuthHealthCheckTick() {
 	if err != nil {
 		reason = fmt.Sprintf("%v", err)
 	}
-	msg := fmt.Sprintf("⚠️ 微博 App 认证失效（主动健康检查发现）\n详情: %s\n请尽快更新 WEIBO_APP 抓包参数（Authorization / gsid / aid / s 等）。", reason)
+	msg := fmt.Sprintf("🚨 微博 App 认证失效（主动健康检查发现）\n详情: %s\n请尽快更新 WEIBO_APP 抓包参数（Authorization / gsid / aid / s 等）。", reason)
 	b.notifyAdmins(msg)
 
 	b.cfg.WeiboAppAuthHealthCheckNotifyAt = fmt.Sprintf("%d", now)
@@ -2249,6 +2438,8 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 	if signBaseline == nil && b.cfg.WeiboSuperCountDailySnapshots != nil {
 		signBaseline = b.cfg.WeiboSuperCountDailySnapshots[yesterday]
 	}
+	readBaseline := buildReadBaselineFromSnapshotV2(yesterdayV2)
+	fansBaseline := buildFansBaselineFromSnapshotV2(yesterdayV2)
 	postBaseline := buildPostBaselineFromSnapshotV2(yesterdayV2)
 
 	// Check if a group name was provided as argument
@@ -2276,14 +2467,14 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 		if ginfo != nil {
 			title = fmt.Sprintf("[超话签到人数查询 - %s]", ginfo.Name)
 		}
-		return formatWeiboSuperCountDualRanking(filtered, failed, title, now, signBaseline, likeBaseline, postBaseline)
+		return formatWeiboSuperCountDualRanking(filtered, failed, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	}
 
 	// No group specified → show all groups in one message
 	groups := b.getWeiboSuperCountGroups()
 	if len(groups) == 0 {
 		// No groups → flat output (backward compat)
-		return formatWeiboSuperCountDualRanking(results, failed, "[超话签到人数查询]", now, signBaseline, likeBaseline, postBaseline)
+		return formatWeiboSuperCountDualRanking(results, failed, "[超话签到人数查询]", now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	}
 
 	// Build per-group sections
@@ -2300,7 +2491,7 @@ func (b *Bot) handleWeiboSuperCountCommand(args []string) string {
 			continue
 		}
 		title := fmt.Sprintf("[超话签到人数查询 - %s]", ginfo.Name)
-		section := formatWeiboSuperCountDualRanking(groupResults, nil, title, now, signBaseline, likeBaseline, postBaseline)
+		section := formatWeiboSuperCountDualRanking(groupResults, nil, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 		parts = append(parts, section)
 	}
 	if len(parts) == 0 {
@@ -2433,6 +2624,9 @@ func (b *Bot) handleWeiboSuperCountSubcommand(args []string, topics map[string]*
 		var results []monitor.WeiboSuperCountResult
 		var signBaseline map[string]int
 		var likeBaseline map[string]int
+		var readBaseline map[string]int
+		var fansBaseline map[string]int
+		var postBaseline map[string]int
 
 		if b.cfg.WeiboSuperCountDailySnapshotsV2 != nil {
 			yesterdayV2 := b.cfg.WeiboSuperCountDailySnapshotsV2[yesterday]
@@ -2442,6 +2636,9 @@ func (b *Bot) handleWeiboSuperCountSubcommand(args []string, topics map[string]*
 			beforeV2 := b.cfg.WeiboSuperCountDailySnapshotsV2[beforeYesterday]
 			signBaseline = buildSignBaselineFromSnapshotV2(beforeV2)
 			likeBaseline = buildLikeBaselineFromSnapshotV2(beforeV2)
+			readBaseline = buildReadBaselineFromSnapshotV2(beforeV2)
+			fansBaseline = buildFansBaselineFromSnapshotV2(beforeV2)
+			postBaseline = buildPostBaselineFromSnapshotV2(beforeV2)
 		}
 
 		if len(results) == 0 {
@@ -2461,7 +2658,7 @@ func (b *Bot) handleWeiboSuperCountSubcommand(args []string, topics map[string]*
 		if len(results) == 0 {
 			return fmt.Sprintf("昨日（%s）快照为空", yesterday)
 		}
-		return formatWeiboSuperCountDualRanking(results, nil, "[超话签到人数昨日补查]", now, signBaseline, likeBaseline, nil)
+		return formatWeiboSuperCountDualRanking(results, nil, "[超话签到人数昨日补查]", now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	case "bind":
 		if len(args) < 5 {
 			return "格式错误: weibo super count bind <oid> [名称] [-g 分组名]"
@@ -2816,20 +3013,8 @@ func (b *Bot) handleWeiboSuperCommand(event *napcat.Event, args []string) string
 			if len(topics) == 0 {
 				return "暂无超话配置"
 			}
-			countTopics := b.getWeiboSuperCountTopics()
 			lines := make([]string, 0, len(topics))
 			for oid, topic := range topics {
-				// 如果该超话标注了随日报签到，手动签到也跳过
-				normKey := strings.TrimPrefix(normalizeWeiboSuperOID(oid), "1022:")
-				ct, inCount := countTopics[normKey]
-				if inCount && ct.ReportSign > 0 {
-					name := strings.TrimSpace(topic.Name)
-					if name == "" {
-						name = oid
-					}
-					lines = append(lines, fmt.Sprintf("[%s] 跳过（走日报签到流）", name))
-					continue
-				}
 				res, err := b.weiboMonitor.SignWeiboSuperTopic(oid)
 				name := strings.TrimSpace(topic.Name)
 				if name == "" {

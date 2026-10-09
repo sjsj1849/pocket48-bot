@@ -38,11 +38,14 @@ type weiboSuperCountImageGroupPanel struct {
 	Key       string   `json:"key,omitempty"`
 	Name      string   `json:"name"`
 	GroupKeys []string `json:"groupKeys"`
+	// TargetIDs: this image only goes to these delivery targets (6 选 N，可全不选)。
+	TargetIDs []string `json:"targetIds,omitempty"`
 }
 
 type weiboSuperCountImageGroupStored struct {
 	Name      string   `json:"name"`
 	GroupKeys []string `json:"group_keys"`
+	TargetIDs []string `json:"target_ids,omitempty"`
 }
 
 type weiboSuperCountGroupPanel struct {
@@ -105,7 +108,7 @@ func countImageGroupList(plans map[string]*weiboSuperCountImageGroupStored) []we
 		if plan == nil {
 			continue
 		}
-		result = append(result, weiboSuperCountImageGroupPanel{Key: key, Name: plan.Name, GroupKeys: plan.GroupKeys})
+		result = append(result, weiboSuperCountImageGroupPanel{Key: key, Name: plan.Name, GroupKeys: plan.GroupKeys, TargetIDs: plan.TargetIDs})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Name == result[j].Name {
@@ -291,6 +294,20 @@ func (s *Server) handleWeiboSuperCountImageGroups(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "每张图片至少选择一个日报分组"})
 		return
 	}
+	// 每张图可独立选择发送去向（0 或多个）。空表示不单独发送、沿用全局列表。
+	seenTargets := make(map[string]struct{}, len(body.TargetIDs))
+	cleanTargets := make([]string, 0, len(body.TargetIDs))
+	for _, rawTarget := range body.TargetIDs {
+		targetID := strings.TrimSpace(rawTarget)
+		if targetID == "" {
+			continue
+		}
+		if _, duplicate := seenTargets[targetID]; duplicate {
+			continue
+		}
+		seenTargets[targetID] = struct{}{}
+		cleanTargets = append(cleanTargets, targetID)
+	}
 	key := strings.TrimSpace(body.Key)
 	if r.Method == http.MethodPost {
 		key = nextCountImageGroupKey(plans)
@@ -298,7 +315,7 @@ func (s *Server) handleWeiboSuperCountImageGroups(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "要编辑的出图方案不存在"})
 		return
 	}
-	plans[key] = &weiboSuperCountImageGroupStored{Name: body.Name, GroupKeys: cleanKeys}
+	plans[key] = &weiboSuperCountImageGroupStored{Name: body.Name, GroupKeys: cleanKeys, TargetIDs: cleanTargets}
 	if err := s.writeConfigAndReloadBot(map[string]any{"WEIBO_SUPER_COUNT_IMAGE_GROUPS": plans}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
 		return

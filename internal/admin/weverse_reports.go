@@ -9,6 +9,7 @@ import (
 	"pocket48-bot/internal/logic"
 	"pocket48-bot/internal/weverse"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +22,78 @@ func (s *Server) handleWeverseReports(w http.ResponseWriter, r *http.Request) {
 	settings, e := weverse.LoadReportSettings(dir)
 	if e != nil {
 		fail(e)
+		return
+	}
+	if r.URL.Path == "/api/weverse/reports/lives" {
+		h, err := weverse.OpenHistory(dir)
+		if err != nil {
+			fail(err)
+			return
+		}
+		defer h.Close()
+		members, err := h.Members(settings.CommunityID)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if r.Method == http.MethodPut {
+			var body struct {
+				PostID       string   `json:"postId"`
+				Participants []string `json:"participants"`
+			}
+			if err = decodeJSON(r, &body); err != nil {
+				fail(fmt.Errorf("请求格式无效"))
+				return
+			}
+			known := map[string]bool{}
+			for _, member := range members {
+				known[member.ID] = true
+			}
+			unique := make([]string, 0, len(body.Participants))
+			seen := map[string]bool{}
+			for _, id := range body.Participants {
+				if !known[id] {
+					fail(fmt.Errorf("直播人员不在成员名单中"))
+					return
+				}
+				if !seen[id] {
+					seen[id] = true
+					unique = append(unique, id)
+				}
+			}
+			if body.PostID == "" || len(unique) == 0 {
+				fail(fmt.Errorf("请至少选择一位直播人员"))
+				return
+			}
+			if !h.HasLive(settings.CommunityID, body.PostID) {
+				fail(fmt.Errorf("没有找到这场直播"))
+				return
+			}
+			if err = h.SaveLiveAssignment(settings.CommunityID, body.PostID, unique); err != nil {
+				fail(err)
+				return
+			}
+		} else if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		var lives []weverse.LiveAssignment
+		date := r.URL.Query().Get("date")
+		if date == "" {
+			lives, err = h.PendingLiveAssignments(settings.CommunityID, 200)
+		} else {
+			day, parseErr := time.ParseInLocation("2006-01-02", date, weverse.ReportLocation)
+			if parseErr != nil {
+				fail(fmt.Errorf("直播日期无效"))
+				return
+			}
+			lives, err = h.LiveAssignmentsBetween(settings.CommunityID, day.UnixMilli(), day.AddDate(0, 0, 1).UnixMilli(), 200)
+		}
+		if err != nil {
+			fail(err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"members": members, "lives": lives})
 		return
 	}
 	if r.URL.Path == "/api/weverse/reports" {
@@ -63,7 +136,13 @@ func (s *Server) handleWeverseReports(w http.ResponseWriter, r *http.Request) {
 		started, _ := h.RecordingStarted()
 		members, _ := h.Members(settings.CommunityID)
 		h.Close()
-		writeJSON(w, 200, map[string]any{"settings": settings, "emailTo": cfg.AlertEmailTo, "emailEnabled": cfg.AlertEmailEnabled, "state": state, "backfill": progress, "recordingStarted": started, "memberCount": len(members)})
+		memberCount := 0
+		for _, member := range members {
+			if !strings.EqualFold(strings.TrimSpace(member.Name), strings.TrimSpace(settings.CommunityName)) {
+				memberCount++
+			}
+		}
+		writeJSON(w, 200, map[string]any{"settings": settings, "emailTo": cfg.AlertEmailTo, "emailEnabled": cfg.AlertEmailEnabled, "state": state, "backfill": progress, "recordingStarted": started, "memberCount": memberCount})
 		return
 	}
 	year, _ := strconv.Atoi(r.URL.Query().Get("year"))
@@ -145,6 +224,32 @@ func (s *Server) handleWeverseReports(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		fail(e)
 		return
+	}
+	if r.URL.Path == "/api/weverse/reports/send" {
+		monitor, refreshErr := weverse.LoadSettings(dir)
+		if refreshErr == nil {
+			slug := ""
+			for _, subscription := range monitor.Subscriptions {
+				if subscription.CommunityID == settings.CommunityID {
+					slug = subscription.Slug
+					break
+				}
+			}
+			if slug == "" {
+				refreshErr = fmt.Errorf("未找到报表社区订阅")
+			} else {
+				client := weverse.NewClient(dir, monitor.ProxyURL)
+				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+				refreshErr = client.RefreshReportPosts(ctx, h, settings, period, slug)
+				cancel()
+				client.HTTP.CloseIdleConnections()
+			}
+		}
+		if refreshErr != nil {
+			h.Close()
+			fail(fmt.Errorf("刷新帖子互动数据失败：%w", refreshErr))
+			return
+		}
 	}
 	report, e := h.BuildReport(settings, period)
 	h.Close()

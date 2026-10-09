@@ -58,6 +58,22 @@ func refererFor(rawURL string) string {
 	if matchesAny(host, "bilivideo.com", "bilibili.com", "biliapi.net") {
 		return "https://www.bilibili.com/"
 	}
+	// ★ 2026-10-09 实测补：B站 CDN 会返回 akam 镜像域名，
+	// 不在上面的表里 ⇒ 没设 Referer ⇒ 直接 403。
+	//
+	//	症状：飞书收到卡片但没有视频，日志只有一行
+	//	      [Outbound:feishu] status=media_failed type=video error=media download HTTP 403
+	//	      QQ 侧同时 Delivery failed。封面图正常（i1.hdslb.com 走的是另一条路）。
+	//	实测样本 bvid=BV1Uypx6mEqN：
+	//	    无 Referer                → HTTP 403 Forbidden
+	//	    Referer=www.bilibili.com → HTTP 200, 2464372 字节
+	//	    Referer=视频页           → HTTP 200, 2464372 字节
+	//
+	// akamaized.net 是 Akamai 的通用 CDN 域名，别的平台也可能用它，
+	// 所以这里必须与 B站域名表合并判断，不能单独放行。
+	if matchesAny(host, "akamaized.net", "akamaized.net.edgesuite.net", "akamaized.net.akadns.net") {
+		return "https://www.bilibili.com/"
+	}
 	return ""
 }
 

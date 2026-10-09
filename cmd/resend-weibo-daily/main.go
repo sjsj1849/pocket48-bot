@@ -59,6 +59,7 @@ func main() {
 			Name:               item.Name,
 			SignCount:          item.SignCount,
 			SuperLikeCount:     item.SuperLikeCount,
+			SuperLikeKnown:     item.SuperLikeKnown || item.SuperLikeCount > 0,
 			Heat24h:            item.Heat24h,
 			ReadCount:          item.ReadCount,
 			PostCount:          item.PostCount,
@@ -81,6 +82,8 @@ func main() {
 
 	signBase := map[string]int{}
 	likeBase := map[string]int{}
+	readBase := map[string]int{}
+	fansBase := map[string]int{}
 	postBase := map[string]int{}
 	for oid, item := range prev {
 		if item == nil {
@@ -88,6 +91,12 @@ func main() {
 		}
 		signBase[oid] = item.SignCount
 		likeBase[oid] = item.SuperLikeCount
+		if n, ok := monitor.ParseChineseNumber(item.ReadCount); ok {
+			readBase[oid] = n
+		}
+		if n, ok := monitor.ParseChineseNumber(item.FansCount); ok {
+			fansBase[oid] = n
+		}
 		if n, ok := monitor.ParseChineseNumber(item.PostCount); ok {
 			postBase[oid] = n
 		}
@@ -96,7 +105,7 @@ func main() {
 	// Stamp as end-of-day for that report date.
 	now := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 0, 0, t.Location())
 	title := "[超话签到人数日报]"
-	if err := logic.ResendWeiboSuperCountDailyEmail(cfg, results, nil, title, now, signBase, likeBase, postBase); err != nil {
+	if err := logic.ResendWeiboSuperCountDailyEmail(cfg, results, nil, title, now, signBase, likeBase, readBase, fansBase, postBase); err != nil {
 		log.Fatalf("send: %v", err)
 	}
 	fmt.Printf("ok: resent %s daily report (%d topics) to %s via %s:%d\n",

@@ -4,6 +4,8 @@
 package weverse
 
 import (
+	"sync/atomic"
+
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -28,6 +30,38 @@ var ErrLogin = errors.New("请先在面板浏览器登录 Weverse、加入目标
 var slugRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
 var idRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
 
+// 单轮拉取的耗时埋点。用原子计数而非字段，避免给 Client 加锁；Events 目前是
+// 单 goroutine 串行调用 call，所以这些计数只会被一个客户端累加。
+var (
+	weverseCallCount    int64
+	weverseCallNanos    int64
+	weverseLockWaitNano int64
+)
+
+// CallStats 描述一轮拉取的耗时构成：Total 是所有 call 累计（含等锁），
+// LockWait 是其中卡在 c.mu 上的时间，两者相减近似为真实网络耗时。
+type CallStats struct {
+	Calls    int
+	Total    time.Duration
+	LockWait time.Duration
+}
+
+// GetCallStats 读取当前累计的调用统计。
+func GetCallStats() CallStats {
+	return CallStats{
+		Calls:    int(atomic.LoadInt64(&weverseCallCount)),
+		Total:    time.Duration(atomic.LoadInt64(&weverseCallNanos)),
+		LockWait: time.Duration(atomic.LoadInt64(&weverseLockWaitNano)),
+	}
+}
+
+// ResetCallStats 清零统计，用于在两次拉取之间取差值。
+func ResetCallStats() {
+	atomic.StoreInt64(&weverseCallCount, 0)
+	atomic.StoreInt64(&weverseCallNanos, 0)
+	atomic.StoreInt64(&weverseLockWaitNano, 0)
+}
+
 type Client struct {
 	Dir         string
 	HTTP        *http.Client
@@ -35,6 +69,16 @@ type Client struct {
 	AccountBase string
 	Artists     map[int64][]Member
 	mu          sync.Mutex
+
+	// members 缓存社区成员名单（TTL 见 membersCacheTTL）。名单几乎不变，
+	// 但响应体带每位成员的 artistLatestMoment，实测单次 3.8s，是单轮最大开销。
+	// 挂在实例上而非包级，避免多个 Client（多社区 / 多个测试桩）互相串味。
+	membersMu sync.Mutex
+	members   map[int64]*membersCacheEntry
+
+	// details 缓存帖子/父评论详情（正文不可变，只有评论会新增）。挂在实例上，
+	// 生命周期与 Client 一致；Client 复用才能命中，见 logic 层的复用逻辑。
+	details *detailCache
 }
 
 func validateProxy(raw string) error {
@@ -54,7 +98,7 @@ func NewClient(dir, proxy string) *Client {
 			tr.Proxy = http.ProxyURL(u)
 		}
 	}
-	return &Client{Dir: dir, HTTP: &http.Client{Timeout: 20 * time.Second, Transport: tr}, APIBase: "https://global.apis.naver.com/weverse/wevweb", AccountBase: "https://accountapi.weverse.io"}
+	return &Client{Dir: dir, HTTP: &http.Client{Timeout: 20 * time.Second, Transport: tr}, APIBase: "https://global.apis.naver.com/weverse/wevweb", AccountBase: "https://accountapi.weverse.io", details: newDetailCache()}
 }
 func signedPath(ep string, now time.Time) string {
 	u, _ := url.Parse(ep)
@@ -143,8 +187,15 @@ func (c *Client) refresh(ctx context.Context, s *Session) error {
 	return Write(c.Dir, "session.json", *s)
 }
 func (c *Client) call(ctx context.Context, ep string, auth bool, out any) error {
+	callStart := time.Now()
+	waitStart := time.Now()
 	c.mu.Lock()
+	atomic.AddInt64(&weverseLockWaitNano, int64(time.Since(waitStart)))
 	defer c.mu.Unlock()
+	defer func() {
+		atomic.AddInt64(&weverseCallCount, 1)
+		atomic.AddInt64(&weverseCallNanos, int64(time.Since(callStart)))
+	}()
 	ep, passwordErr := c.withPostPassword(ep)
 	if passwordErr != nil {
 		return passwordErr

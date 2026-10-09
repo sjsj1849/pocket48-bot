@@ -23,7 +23,10 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"pocket48-bot/internal/config"
+	"pocket48-bot/internal/dedupe"
+	"pocket48-bot/internal/message"
 	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/outbound"
 )
 
 type douyinAccountCommand struct {
@@ -46,6 +49,15 @@ type douyinPost struct {
 	URL        string   `json:"url"`
 	Cover      string   `json:"cover"`
 	Images     []string `json:"images"`
+	VideoURL   string   `json:"videoUrl"`
+	// Duration 是视频时长（秒），2026-10-05 新增。
+	//
+	// ★ 用途：跨平台去重必须能在**下载前**判定 ——
+	//   抖音接口的 video.duration 本来就在（毫秒），之前没往外传，
+	//   于是只能下载后 ffprobe，那时要等几十秒到两分钟，判定早就来不及。
+	//   有它才能做到：先比对，命中就跳过下载与视频发送，但文字封面照发。
+	Duration        int      `json:"duration"`
+	LivePhotoVideos []string `json:"livePhotoVideos,omitempty"`
 }
 
 type douyinBrowserEvent struct {
@@ -80,6 +92,8 @@ type douyinBrowserEvent struct {
 	Text             string       `json:"text"`
 	Link             string       `json:"link"`
 	Images           []string     `json:"images,omitempty"`
+	VideoURL         string       `json:"videoUrl,omitempty"`
+	LivePhotoVideos  []string     `json:"livePhotoVideos,omitempty"`
 	Index            string       `json:"index"`
 	IsSelfChat       bool         `json:"isSelfChat,omitempty"`
 }
@@ -121,7 +135,7 @@ type douyinLiveState struct {
 
 type DouyinMonitor struct {
 	cfg          *config.Config
-	napcat       *napcat.Client
+	outbound     outbound.Sender
 	notifyAdmins func(string)
 
 	mu              sync.Mutex
@@ -152,6 +166,12 @@ type DouyinMonitor struct {
 	// polling window, then notify again only after every creator recovers.
 	worksFailures   map[string]time.Time
 	worksAlertSince time.Time
+	// worksProxyRecoverAt rate-limits mihomo failover when every creator fails
+	// with a browser-network error. Routes must pass a Douyin-specific probe;
+	// XHS-Auto is preferred and DIRECT is the fallback.
+	worksProxyRecoverAt time.Time
+	proxyControllerURL  string
+	proxyHTTPClient     *http.Client
 
 	// IM disconnect watchdog: silent sidecar/bot restart → email only if still down after auto-heal.
 	imDisconnectedAt      time.Time
@@ -183,10 +203,10 @@ func (m *DouyinMonitor) SetRequestBotRestart(fn func(reason string)) {
 	m.mu.Unlock()
 }
 
-func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins func(string)) *DouyinMonitor {
+func NewDouyinMonitor(cfg *config.Config, sender outbound.Sender, notifyAdmins func(string)) *DouyinMonitor {
 	m := &DouyinMonitor{
 		cfg:             cfg,
-		napcat:          client,
+		outbound:        sender,
 		notifyAdmins:    notifyAdmins,
 		liveCancels:     make(map[string]context.CancelFunc),
 		liveConnected:   make(map[string]bool),
@@ -197,9 +217,11 @@ func NewDouyinMonitor(cfg *config.Config, client *napcat.Client, notifyAdmins fu
 		liveCookie: func(account string) (string, error) {
 			return keyring.Get(douyinLiveCookieService, account)
 		},
-		imConversations: make(map[string]douyinIMTarget),
-		worksFailures:   make(map[string]time.Time),
-		imWatchdogStop:  make(chan struct{}),
+		imConversations:    make(map[string]douyinIMTarget),
+		worksFailures:      make(map[string]time.Time),
+		proxyControllerURL: "http://127.0.0.1:19090",
+		proxyHTTPClient:    &http.Client{Timeout: 8 * time.Second},
+		imWatchdogStop:     make(chan struct{}),
 	}
 	m.loadLiveStatesFromDisk()
 	return m
@@ -498,6 +520,10 @@ func (m *DouyinMonitor) noteDouyinWorksFailure(secUserID, message string) {
 	if !strings.Contains(message, "抖音作品") {
 		return
 	}
+	if isDouyinRiskControlError(message) {
+		log.Printf("[Douyin] works risk-control ignored for alerting account=%s error=%s", secUserID, truncateDouyinLogText(message, 140))
+		return
+	}
 	secUserID = strings.TrimSpace(secUserID)
 	if secUserID == "" {
 		return
@@ -517,14 +543,154 @@ func (m *DouyinMonitor) noteDouyinWorksFailure(secUserID, message string) {
 	}
 	m.worksFailures[secUserID] = now
 	failed, total := len(m.worksFailures), len(enabled)
-	shouldAlert := total > 0 && failed == total && m.worksAlertSince.IsZero()
+	allFailed := total > 0 && failed == total
+	shouldAlert := allFailed && m.worksAlertSince.IsZero()
 	if shouldAlert {
 		m.worksAlertSince = now
 	}
+	const proxyRecoverCooldown = 10 * time.Minute
+	shouldRecoverProxy := allFailed && isDouyinProxyNetworkError(message) &&
+		(m.worksProxyRecoverAt.IsZero() || now.Sub(m.worksProxyRecoverAt) >= proxyRecoverCooldown)
+	if shouldRecoverProxy {
+		m.worksProxyRecoverAt = now
+	}
 	m.mu.Unlock()
 	log.Printf("[Douyin] works health failures=%d/%d window=%s", failed, total, window)
+	if shouldRecoverProxy {
+		go m.recoverDouyinProxy(message)
+	}
 	if shouldAlert && m.notifyAdmins != nil {
 		m.notifyAdmins(fmt.Sprintf("⚠️ 抖音作品监控全链路异常\n%d/%d 个启用账号在最近 %s 内均拉取失败，新作品将无法通知。\n最近错误：%s", failed, total, window, truncateDouyinLogText(message, 180)))
+	}
+}
+
+func isDouyinRiskControlError(message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(msg, "argussecurityplugin sign invalid") ||
+		strings.Contains(msg, "argus sign invalid")
+}
+
+func isDouyinProxyNetworkError(message string) bool {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	if msg == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"failed to fetch",
+		"err_connection_",
+		"tls handshake",
+		"ssl_error_",
+		"connection closed",
+		"connection reset",
+		"connection refused",
+		"proxy connection",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+type mihomoProxyStatus struct {
+	Alive bool   `json:"alive"`
+	Now   string `json:"now"`
+}
+
+func (m *DouyinMonitor) recoverDouyinProxy(reason string) {
+	controller := strings.TrimRight(strings.TrimSpace(m.proxyControllerURL), "/")
+	if controller == "" {
+		controller = "http://127.0.0.1:19090"
+	}
+	client := m.proxyHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 8 * time.Second}
+	}
+
+	readStatus := func(group string) (mihomoProxyStatus, error) {
+		var status mihomoProxyStatus
+		req, err := http.NewRequest(http.MethodGet, controller+"/proxies/"+url.PathEscape(group), nil)
+		if err != nil {
+			return status, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return status, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return status, fmt.Errorf("mihomo GET %s: status=%d", group, resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return status, err
+		}
+		return status, nil
+	}
+
+	probeDouyin := func(proxy string) error {
+		probeURL := controller + "/proxies/" + url.PathEscape(proxy) + "/delay?timeout=6000&url=" + url.QueryEscape("https://www.douyin.com/")
+		req, err := http.NewRequest(http.MethodGet, probeURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("status=%d", resp.StatusCode)
+		}
+		var result struct {
+			Delay int `json:"delay"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return err
+		}
+		if result.Delay <= 0 {
+			return fmt.Errorf("invalid delay=%d", result.Delay)
+		}
+		return nil
+	}
+
+	pool, poolErr := readStatus("XHS-Auto")
+	target, targetNode := "", ""
+	if poolErr == nil && pool.Alive && strings.TrimSpace(pool.Now) != "" && probeDouyin("XHS-Auto") == nil {
+		target, targetNode = "XHS-Auto", pool.Now
+	} else if err := probeDouyin("DIRECT"); err == nil {
+		// A live proxy process with a dead outbound is common. DIRECT remains a
+		// valid mihomo selector and is safer than repeatedly choosing unverified
+		// exits; the browser keeps the same local proxy endpoint and cookies.
+		target, targetNode = "DIRECT", "host route"
+	} else {
+		log.Printf("[Douyin] proxy auto-recovery skipped: no Douyin-capable route pool_alive=%v pool_node=%s pool_err=%v", pool.Alive, pool.Now, poolErr)
+		return
+	}
+	current, currentErr := readStatus("GLOBAL")
+	body, _ := json.Marshal(map[string]string{"name": target})
+	req, err := http.NewRequest(http.MethodPut, controller+"/proxies/GLOBAL", strings.NewReader(string(body)))
+	if err != nil {
+		log.Printf("[Douyin] proxy auto-recovery request failed: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[Douyin] proxy auto-recovery switch failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[Douyin] proxy auto-recovery switch failed: status=%d", resp.StatusCode)
+		return
+	}
+	from := current.Now
+	if currentErr != nil || strings.TrimSpace(from) == "" {
+		from = "unknown"
+	}
+	log.Printf("[Douyin] proxy auto-recovery switched GLOBAL from=%s to=%s node=%s reason=%s", from, target, targetNode, truncateDouyinLogText(reason, 120))
+	if m.notifyAdmins != nil {
+		m.notifyAdmins(fmt.Sprintf("🔄 抖音作品监控已自动切换网络路径\nGLOBAL：%s → %s（抖音探测：%s）\n程序将继续轮询并在作品列表恢复后发送恢复通知。", from, target, targetNode))
 	}
 }
 
@@ -839,7 +1005,9 @@ func (m *DouyinMonitor) handleIMGroup(event douyinBrowserEvent) {
 func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	text := strings.TrimSpace(event.Text)
 	images := uniqueHTTPURLs(event.Images)
-	if text == "" && len(images) == 0 {
+	videoURL := strings.TrimSpace(event.VideoURL)
+	livePhotoVideos := uniqueHTTPURLs(event.LivePhotoVideos)
+	if text == "" && len(images) == 0 && videoURL == "" && len(livePhotoVideos) == 0 {
 		return
 	}
 	// With real image URLs, drop redundant sticker captions like [表情]/[早点睡].
@@ -849,13 +1017,6 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 	if text == "" && len(images) > 0 {
 		// Keep body empty so QQ shows "名：" + image only (no placeholder).
 		text = ""
-	}
-	if event.Link != "" {
-		if text != "" {
-			text += "\n" + event.Link
-		} else {
-			text = event.Link
-		}
 	}
 	timeText := formatDouyinIMTime(event.CreateTime, event.ReceivedAt)
 	m.mu.Lock()
@@ -918,16 +1079,18 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 		log.Printf("[Douyin-IM] forward group_owner box=%s line=%s type=%d text=%q images=%d", boxName, lineName, event.MessageType, truncateDouyinLogText(text, 80), len(images))
 		// Header + body first; images above timestamp when present (sticker/表情图 etc).
 		segments := appendTextWithQQFaces(nil, title+"\n"+body)
-		for _, image := range images {
-			if len(segments) >= 9 { // leave room for trailing time text
-				break
+		segments = appendDouyinIMCardTail(segments, images, event.Link, timeText)
+		outbound.SendGroup(m.outbound, m.cfg.BoundGroupID, segments)
+		if videoURL != "" {
+			if localVideo := localizeDouyinVideo(videoURL); localVideo != "" {
+				outbound.SendGroup(m.outbound, m.cfg.BoundGroupID, []napcat.MessageSegment{napcat.VideoSegment(localVideo, "")})
 			}
-			segments = append(segments, napcat.ImageSegment(image))
 		}
-		if timeText != "" {
-			segments = appendTextWithQQFaces(segments, "\n"+timeText)
+		for _, liveURL := range livePhotoVideos {
+			if localVideo := localizeDouyinVideo(liveURL); localVideo != "" {
+				outbound.SendGroup(m.outbound, m.cfg.BoundGroupID, []napcat.MessageSegment{napcat.VideoSegment(localVideo, "")})
+			}
 		}
-		m.napcat.SendGroupMessage(m.cfg.BoundGroupID, segments)
 	case "private_incoming", "private_self":
 		if !m.cfg.DouyinIMEnabled || !m.cfg.DouyinIMPrivateEnabled {
 			return
@@ -946,25 +1109,235 @@ func (m *DouyinMonitor) handleIMMessage(event douyinBrowserEvent) {
 				images = images[:1]
 			}
 		}
+		// QQ keeps the two-line quoted layout ("我：[图片]\n葡萄吞十七：我的妈呀").
+		// Feishu must NOT receive that text: its extractSender blindly treats the
+		// first line's colon prefix as the card header, so the card showed the
+		// *quoted* speaker (我 / our own nickname) instead of the real sender.
+		// Feishu gets replyBody + a structured Quote instead.
+		replyBody := text
 		text = formatDouyinReplyText(lineName, text, quotedName, event.QuotedText)
 		// Business forward (not an ops alert) — still QQ private to admins.
 		// Same layout: title+body → images → timestamp.
 		header := formatDouyinPrivateNotificationHeader(boxName, lineName, text)
 		segments := appendTextWithQQFaces(nil, header)
-		for _, image := range images {
-			if len(segments) >= 9 {
-				break
-			}
-			segments = append(segments, napcat.ImageSegment(image))
-		}
-		if timeText != "" {
-			segments = appendTextWithQQFaces(segments, "\n"+timeText)
-		}
+		segments = appendDouyinIMCardTail(segments, images, event.Link, timeText)
 		log.Printf("[Douyin-IM] forward %s type=%d text=%q images=%d link=%q", kind, event.MessageType, truncateDouyinLogText(text, 80), len(images), event.Link)
+		// Download media once, then fan it out to every destination.
+		// localVideos is kept alongside the QQ segments so the Feishu Document
+		// reuses the same downloaded file instead of fetching the CDN again.
+		var mediaSegments []napcat.MessageSegment
+		var localVideos []string
+		if videoURL != "" {
+			if localVideo := localizeDouyinVideo(videoURL); localVideo != "" {
+				mediaSegments = append(mediaSegments, napcat.VideoSegment(localVideo, ""))
+				localVideos = append(localVideos, localVideo)
+			}
+		}
+		for _, liveURL := range livePhotoVideos {
+			if localVideo := localizeDouyinVideo(liveURL); localVideo != "" {
+				mediaSegments = append(mediaSegments, napcat.VideoSegment(localVideo, ""))
+				localVideos = append(localVideos, localVideo)
+			}
+		}
+		// QQ private to admins.
 		for _, uid := range uniqueAdminIDs(m.cfg) {
-			m.napcat.SendPrivateMessage(uid, segments)
+			outbound.SendPrivate(m.outbound, uid, segments)
+			if len(mediaSegments) > 0 {
+				outbound.SendPrivate(m.outbound, uid, mediaSegments)
+			}
+		}
+		// Mirror to configured Feishu private targets so Douyin DMs stay visible
+		// cross-platform too, not QQ-only. Structured Document: the sender comes
+		// from Author and the replied-to message from Quote, so the card header can
+		// never be hijacked by the quoted line.
+		m.sendDouyinPrivateDocumentToFeishu(buildDouyinPrivateDocument(douyinPrivateDocInput{
+			kind:       kind,
+			boxName:    boxName,
+			lineName:   lineName,
+			body:       replyBody,
+			quotedName: quotedName,
+			quotedText: event.QuotedText,
+			images:     images,
+			videos:     localVideos,
+			link:       event.Link,
+			createTime: event.CreateTime,
+			receivedAt: event.ReceivedAt,
+		}))
+	}
+}
+
+// douyinPrivateDocInput is the raw material for a Douyin DM Feishu card.
+type douyinPrivateDocInput struct {
+	kind       string
+	boxName    string
+	lineName   string
+	body       string
+	quotedName string
+	quotedText string
+	images     []string
+	videos     []string
+	link       string
+	createTime int64
+	receivedAt int64
+}
+
+// douyinPrivateDocument renders a Douyin DM as a structured Feishu Document.
+//
+// Body carries only the reply text; the quoted message goes into Quote so the
+// card shows it as a grey block above the reply. Author is set explicitly, so
+// Feishu never has to re-derive the sender from punctuation.
+func buildDouyinPrivateDocument(in douyinPrivateDocInput) message.Document {
+	sender := strings.TrimSpace(in.lineName)
+	if in.kind == "private_self" {
+		// Notes-to-self really is us, so「我」is the right label.
+		// ★ Only this branch may claim the message is ours. Every other
+		// incoming DM must keep the real sender — this used to fall through
+		// with our own cached nickname and the Feishu header then showed
+		// 鸠风 instead of 葡萄吞十七.
+		sender = "我"
+	}
+	if sender == "" {
+		sender = strings.TrimSpace(in.boxName)
+	}
+	if sender == "" {
+		// Last resort: a visible placeholder beats an empty header that Feishu
+		// would fill from the body (guessing「我」from the quoted line).
+		sender = "抖音用户"
+	}
+	// ★ 正文必须自带「昵称：」前缀（2026-10-05 修）。
+	//
+	// 飞书卡片的引用块与正文是**两条独立渲染路径**：
+	//   引用块 -> turnParts(quote.Author, ...)  -> 自动加「作者：」
+	//   正文   -> content.text（就是 doc.Body） -> 裸文本，不加前缀
+	// 而这里传的是未格式化的 replyBody，于是下面那条回复没有昵称前缀。
+	// 现象就是「上面有『我：xxx』，下面只有裸文本」——
+	// 用户原话：「两个都必须带冒号」。
+	//
+	//★ 只在**有引用**时才加：没有引用时正文就是消息全文，
+	//   加了前缀会变成「葡萄吞十七：今天的照片」这种冗余形态
+	//   （顶栏已经写了发送者）。QQ 侧 formatDouyinReplyText 也是这个规则。
+	body := strings.TrimSpace(in.body)
+	hasQuote := false
+	if q := in.quotedText; q != "" && q != "[回复]" && !isDouyinGarbageQuoteText(q) {
+		hasQuote = true
+	}
+	if hasQuote && body != "" && sender != "" {
+		body = ensureDouyinSenderPrefix(body, sender)
+	}
+
+	doc := message.Document{
+		Source:    "抖音",
+		Kind:      "im_private",
+		Author:    sender,
+		Title:     sender,
+		Body:      body,
+		Link:      strings.TrimSpace(in.link),
+		CreatedAt: parseDouyinIMTime(in.createTime, in.receivedAt),
+	}
+	// A placeholder quote ("[回复]") or a garbage token (sec_uid) carries no
+	// information and would only add an empty grey block to the card.
+	quotedText := strings.TrimSpace(in.quotedText)
+	if quotedText != "" && quotedText != "[回复]" && !isDouyinGarbageQuoteText(quotedText) {
+		doc.Quote = &message.Quote{Author: strings.TrimSpace(in.quotedName), Text: quotedText}
+	}
+	for _, image := range in.images {
+		if image = strings.TrimSpace(image); image != "" {
+			doc.Media = append(doc.Media, message.Media{Kind: "image", Source: image})
 		}
 	}
+	for _, video := range in.videos {
+		if video = strings.TrimSpace(video); video != "" {
+			doc.Media = append(doc.Media, message.Media{Kind: "video", Source: video})
+		}
+	}
+	return doc
+}
+
+// parseDouyinIMTime converts the sidecar timestamp to time.Time. Zero means
+// "unknown", which makes Feishu omit the footer stamp rather than print ours.
+func parseDouyinIMTime(createTime, receivedAt int64) time.Time {
+	value := createTime
+	if value <= 0 {
+		value = receivedAt
+	}
+	if value <= 0 {
+		return time.Time{}
+	}
+	if value < 1_000_000_000_000 {
+		return time.Unix(value, 0)
+	}
+	return time.UnixMilli(value)
+}
+
+// sendDouyinPrivateDocumentToFeishu mirrors a Douyin DM to every configured
+// Feishu private target through the structured Document path.
+func (m *DouyinMonitor) sendDouyinPrivateDocumentToFeishu(doc message.Document) {
+	if m == nil || m.outbound == nil || m.cfg == nil {
+		return
+	}
+	var targets []string
+	for _, t := range m.cfg.DeliveryTargets {
+		if t.Platform == "feishu" && t.Kind == "private" {
+			targets = append(targets, t.ID)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	m.sendToTargets(targets, doc)
+}
+
+// sendToFeishuPrivate mirrors a Douyin private message to every configured
+// Feishu private target, so Douyin DMs are visible on Feishu as well as QQ.
+func (m *DouyinMonitor) sendToFeishuPrivate(segments []interface{}, mediaSegments []napcat.MessageSegment) {
+	if m == nil || m.outbound == nil || m.cfg == nil {
+		return
+	}
+	var targets []string
+	for _, t := range m.cfg.DeliveryTargets {
+		if t.Platform == "feishu" && t.Kind == "private" {
+			targets = append(targets, t.ID)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	m.sendToTargets(targets, segments)
+	if len(mediaSegments) > 0 {
+		m.sendToTargets(targets, mediaSegments)
+	}
+}
+
+func appendDouyinIMCardTail(segments []interface{}, images []string, link, timeText string) []interface{} {
+	for _, image := range images {
+		if len(segments) >= 9 { // leave room for the link and timestamp
+			break
+		}
+		segments = append(segments, napcat.ImageSegment(image))
+	}
+	if link = strings.TrimSpace(link); link != "" {
+		segments = appendTextWithQQFaces(segments, "\n"+link)
+	}
+	if timeText = strings.TrimSpace(timeText); timeText != "" {
+		segments = appendTextWithQQFaces(segments, "\n"+timeText)
+	}
+	return segments
+}
+
+func localizeDouyinVideo(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ""
+	}
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		return rawURL
+	}
+	local, err := downloadMediaFile(rawURL)
+	if err != nil {
+		log.Printf("[Douyin] video download failed url=%s: %v", truncateDouyinLogText(rawURL, 120), err)
+		return ""
+	}
+	return local
 }
 
 func uniqueHTTPURLs(urls []string) []string {
@@ -1064,7 +1437,18 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 		if senderName == "" {
 			return quotedLine
 		}
-		return quotedLine + "\n" + senderName + "：（回复）"
+		// B 站式无正文回复（对端点了「回复」但正文为空，正文真的没被推送）：
+		// 把占位的「（回复）」换成能看懂的对象提示，否则整条消息毫无信息量。
+		hint := "（回复）"
+		switch quotedText {
+		case "[图片]":
+			hint = "（回复了你的图片）"
+		case "[视频]":
+			hint = "（回复了你的视频）"
+		case "[语音]":
+			hint = "（回复了你的语音）"
+		}
+		return quotedLine + "\n" + senderName + "：" + hint
 	}
 	senderName = strings.TrimSpace(senderName)
 	if senderName == "" {
@@ -1076,6 +1460,32 @@ func formatDouyinReplyText(senderName, text, quotedName, quotedText string) stri
 		return quotedLine + "\n" + body
 	}
 	return quotedLine + "\n" + senderName + "：" + body
+}
+
+// ensureDouyinSenderPrefix 给正文补上「昵称：」前缀，已有则不重复加。
+//
+// 判定「是否已有」比 HasPrefix(sender+"：") 更宽松一些：用户昵称
+// 可能是「葡萄吞十七(唐欣怡)」，而正文里可能已经带了「葡萄吞十七：」
+// （昵称与备注不一致，见 formatDouyinNamePair）。
+// 因此只要正文开头出现「发送者名字 + 冒号」就算已有。
+func ensureDouyinSenderPrefix(body, sender string) string {
+	body = strings.TrimSpace(body)
+	sender = strings.TrimSpace(sender)
+	if body == "" || sender == "" {
+		return body
+	}
+	if strings.HasPrefix(body, sender+"：") || strings.HasPrefix(body, sender+":") {
+		return body
+	}
+	// 昵称与备注不一致的情况：正文已带「备注名：」则不重复加。
+	if idx := strings.IndexAny(body, "：:"); idx > 0 {
+		head := body[:idx]
+		// 头部像昵称（长度合理、不含换行）就认为已带前缀。
+		if len([]rune(head)) <= 20 && !strings.ContainsAny(head, "\n") {
+			return body
+		}
+	}
+	return sender + "：" + body
 }
 
 // isDouyinGarbageQuoteText rejects sec_uid / long opaque tokens / bare short
@@ -1181,8 +1591,12 @@ func resolveDouyinSenderLabels(event douyinBrowserEvent) (boxName, lineName stri
 		return "抖音用户", "抖音用户"
 	}
 	// Title box: nickname first (user wants 【葡萄吞十七|抖音】 not remark-only).
+	//
+	// ★ 2026-10-05：团名走 CanonicalGroupName 统一显示形态。
+	//   抖音昵称本身已是 Hearts2Hearts，但换成别的组合（大小写混写）时
+	//   就能与其它平台对齐。去重侧 ToLower 过，比对不受影响。
 	if nick != "" {
-		boxName = nick
+		boxName = dedupe.CanonicalGroupName(nick)
 	} else {
 		boxName = remark
 	}
@@ -1568,6 +1982,31 @@ func canonicalDouyinPostURL(post douyinPost) string {
 	return fmt.Sprintf("https://www.douyin.com/%s/%s", kind, post.ID)
 }
 
+// sendToTargets delivers content to an explicit target id list. An empty list
+// means the subscription has no destination configured, so nothing is sent.
+func (m *DouyinMonitor) sendToTargets(targetIDs []string, content interface{}) {
+	if m == nil || m.outbound == nil || m.cfg == nil {
+		return
+	}
+	resolve := func(id string) outbound.Target {
+		t := m.cfg.ResolveTarget(id)
+		if t.Address == "" {
+			return outbound.Target{}
+		}
+		kind := outbound.GroupChat
+		if t.Kind == "private" {
+			kind = outbound.PrivateChat
+		}
+		if t.Platform == "qq" {
+			if nid, err := strconv.ParseInt(t.Address, 10, 64); err == nil {
+				return outbound.Target{Platform: "qq", Kind: kind, ID: nid, Address: t.Address}
+			}
+		}
+		return outbound.Target{Platform: t.Platform, Kind: kind, Address: t.Address}
+	}
+	outbound.SendToTargetIDs(m.outbound, resolve, targetIDs, content)
+}
+
 func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, post douyinPost) {
 	// Weibo-aligned: title box = raw nick only; body = 小包(胡晓慧) / 一盆蘸酱菜(卢天惠).
 	titleNick := resolveDouyinWorksTitleNick(post.Nickname, item.Name)
@@ -1581,20 +2020,32 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 	}
 	// 【昵称|抖音】 + 正文区「配对名发布了新视频」+ desc（对齐微博：标题只昵称，内容区再写名字）
 	lines := []string{fmt.Sprintf("【%s|抖音】", titleNick)}
-	if bodyLabel != "" && bodyLabel != titleNick {
-		lines = append(lines, fmt.Sprintf("%s发布了新%s", bodyLabel, typeName))
-	} else {
-		lines = append(lines, fmt.Sprintf("发布了新%s", typeName))
-	}
+	// ★ 2026-10-04 去掉「XXX 发布了新视频」那一行（用户明确要求）：
+	// 顶栏已经写了昵称，正文第一行再重复一次是纯冗余；而且顶栏一改
+	// 这一行就会对不上（此前就有过「顶栏显示我、正文显示昵称」的问题）。
+	// 改为直接用 desc 当正文首行。
+	_ = typeName
+	_ = bodyLabel
 	if post.Desc != "" {
 		lines = append(lines, truncateRunes(post.Desc, 600))
 	}
 	lines = append(lines, "", "抖音链接："+canonicalDouyinPostURL(post))
 	segments := make([]interface{}, 0, 12)
 	if item.AtAll {
-		segments = append(segments, napcat.AtSegment("all"))
+		// @全体成员 独立成行，避免与正文首行粘连
+		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
 	segments = append(segments, napcat.TextSegment(strings.Join(lines, "\n")+"\n"))
+	// ★ 必须打这一行（2026-10-05 补）。
+	//
+	// sendToTargets 内部**一条日志都没有**，抖音作品推送在 bot.log 里
+	// 完全不留痕迹 —— 结果排查「17:05 抖音那条延迟两分钟」时，
+	// grep 不到任何记录，被误判成「抖音没发」。
+	// 同一个症状（B站/ X / Melon 都有日志）下，唯独抖音没有，
+	// 这个不对称本身就是 bug。延迟排查只能靠作品发布时间反推。
+	log.Printf("[Douyin] 作品已入推送队列: %s type=%s createTime=%s duration=%d desc=%.40s",
+		titleNick, post.Type,
+		time.Unix(post.CreateTime, 0).Format("15:04:05"), post.Duration, post.Desc)
 	images := post.Images
 	if len(images) == 0 && post.Cover != "" {
 		images = []string{post.Cover}
@@ -1608,7 +2059,46 @@ func (m *DouyinMonitor) dispatchPost(groupID int64, item config.DouyinConfig, po
 	if post.CreateTime > 0 {
 		segments = append(segments, napcat.TextSegment("\n"+time.Unix(post.CreateTime, 0).Format("2006-01-02 15:04:05")))
 	}
-	m.napcat.SendGroupMessage(groupID, segments)
+	m.sendToTargets(item.TargetIDs, segments)
+	// ★ 视频本体：跨平台去重**只在这里**生效（2026-10-05）。
+	//
+	// 用户口径：「视频本体只发第一次；20 分钟内这个时长的视频不下载、不发送；
+	//          文字、封面这些都是会发的。」
+	//
+	// 上面的文字+封面已经发完，所以命中去重时只跳视频，不影响其它部分。
+	// 判定必须在**下载前** —— 这正是需要 douyinPost.Duration 的原因。
+	localVideo := ""
+	configPath := m.cfg.ConfigPath()
+	if douyinVideoAlreadySent(configPath, post) {
+		log.Printf("[Douyin] 跳过视频（%d 秒内有平台已发过同一条）: id=%s %d秒 desc=%.40s",
+			dedupe.MatchWindowMillis/60000, post.ID, post.Duration, post.Desc)
+	} else if strings.HasPrefix(post.VideoURL, "http") {
+		localVideo = localizeDouyinVideo(post.VideoURL)
+		if localVideo != "" {
+			m.sendToTargets(item.TargetIDs, []napcat.MessageSegment{napcat.VideoSegment(localVideo, "")})
+		}
+	}
+	// 登记标题指纹 + 时长：既供 B站 / TikTok 侧比对，
+	// 也让后来的平台能反过来拦下**本平台重复的视频本体**。
+	//
+	// ★ 时长是关键：仅靠标题指纹匹配不上「B 站多一段【Hearts2Hearts】前缀」
+	// 这种情况（2026-10-04 线上重复推送的根因），必须叠加时长才判得准。
+	if configPath != "" {
+		// ★ 必须传**昵称/团名**，不能传 sec_uid（2026-10-04 修正）：
+		// sec_uid 是抖音内部 ID，与 TikTok 的 username、B 站的作者名
+		// 跨平台永不相等，「同作者」这一条永远不成立 ——
+		// 于是整个跨语言兜底判定成了死代码（已上线三天才被发现）。
+		// 实测三者归一化后是同一个值：抖音订阅名与 B 站作者都叫
+		// Hearts2Hearts，TikTok username 叫 hearts2hearts。
+		// titleNick 优先取 API 昵称、回落订阅配置名，正是这个值。
+		douyinRecordTitle(configPath, post.Desc, post.CreateTime, post.Type,
+			probeLocalVideoSeconds(localVideo), titleNick)
+	}
+	for _, videoURL := range uniqueHTTPURLs(post.LivePhotoVideos) {
+		if localVideo := localizeDouyinVideo(videoURL); localVideo != "" {
+			m.sendToTargets(item.TargetIDs, []napcat.MessageSegment{napcat.VideoSegment(localVideo, "")})
+		}
+	}
 }
 
 func (m *DouyinMonitor) handleQRCode(event douyinBrowserEvent) {
@@ -1620,7 +2110,7 @@ func (m *DouyinMonitor) handleQRCode(event douyinBrowserEvent) {
 		expires = 300
 	}
 	for _, uid := range uniqueAdminIDs(m.cfg) {
-		m.napcat.SendPrivateMessage(uid, []napcat.MessageSegment{
+		outbound.SendPrivate(m.outbound, uid, []napcat.MessageSegment{
 			napcat.TextSegment(fmt.Sprintf("抖音浏览器登录二维码，请在约 %d 分钟内使用抖音 App 扫码。", expires/60)),
 			napcat.ImageSegment("base64://" + event.ImageBase64),
 		})
@@ -2025,19 +2515,19 @@ func allDouyinTargetsQueued(state *douyinLiveState, online bool, targets []douyi
 	return true
 }
 
-func (m *DouyinMonitor) tryEnqueueGroupMessage(groupID int64, message interface{}) (queued bool) {
+func (m *DouyinMonitor) tryEnqueueGroupMessage(targetIDs []string, groupID int64, message interface{}) (queued bool) {
 	defer func() {
 		if recover() != nil {
 			queued = false
 		}
 	}()
-	if m.enqueueGroup != nil {
+	if m.enqueueGroup != nil && len(targetIDs) == 0 {
 		return m.enqueueGroup(groupID, message)
 	}
-	if m.napcat == nil {
+	if m.outbound == nil {
 		return false
 	}
-	m.napcat.SendGroupMessage(groupID, message)
+	m.sendToTargets(targetIDs, message)
 	return true
 }
 
@@ -2102,7 +2592,7 @@ func (m *DouyinMonitor) queueLiveNotification(liveID string, online bool) {
 		m.mu.Unlock()
 
 		segments := m.formatLiveNotification(target, snapshot, online)
-		if !m.tryEnqueueGroupMessage(target.groupID, segments) {
+		if !m.tryEnqueueGroupMessage(target.cfg.TargetIDs, target.groupID, segments) {
 			continue
 		}
 

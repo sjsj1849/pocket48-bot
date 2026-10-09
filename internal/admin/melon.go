@@ -16,6 +16,11 @@ func (s *Server) handleMelon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := melon.Client{ProxyURL: settings.ProxyURL}
+	publicSettings := func(value melon.Settings) (melon.Settings, bool) {
+		configured := value.MusicWaveTranslationAPIKey != ""
+		value.MusicWaveTranslationAPIKey = ""
+		return value, configured
+	}
 	switch r.URL.Path {
 	case "/api/melon/settings":
 		if r.Method == http.MethodGet {
@@ -23,7 +28,8 @@ func (s *Server) handleMelon(w http.ResponseWriter, r *http.Request) {
 			var musicWaveStatus melon.Status
 			_ = melon.Read(dir, "status.json", &status)
 			_ = melon.Read(dir, "music-wave-status.json", &musicWaveStatus)
-			writeJSON(w, 200, map[string]any{"settings": settings, "status": status, "musicWaveStatus": musicWaveStatus})
+			visible, configured := publicSettings(settings)
+			writeJSON(w, 200, map[string]any{"settings": visible, "translationKeyConfigured": configured, "status": status, "musicWaveStatus": musicWaveStatus})
 			return
 		}
 		if r.Method != http.MethodPut {
@@ -34,6 +40,9 @@ func (s *Server) handleMelon(w http.ResponseWriter, r *http.Request) {
 		if err := decodeJSON(r, &next); err != nil {
 			fail(err)
 			return
+		}
+		if next.MusicWaveTranslationAPIKey == "" {
+			next.MusicWaveTranslationAPIKey = settings.MusicWaveTranslationAPIKey
 		}
 		if err := melon.ValidateSettings(next); err != nil {
 			fail(err)
@@ -66,7 +75,8 @@ func (s *Server) handleMelon(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"settings": next})
+		visible, configured := publicSettings(next)
+		writeJSON(w, 200, map[string]any{"settings": visible, "translationKeyConfigured": configured})
 	case "/api/melon/search":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)

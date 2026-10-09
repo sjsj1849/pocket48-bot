@@ -53,10 +53,12 @@ func TestSendYesterdaySuperCountEmailPreview(t *testing.T) {
 		}
 		return results[i].Name < results[j].Name
 	})
-	var signBaseline, likeBaseline, postBaseline map[string]int
+	var signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline map[string]int
 	if v2[prevDay] != nil {
 		signBaseline = buildSignBaselineFromSnapshotV2(v2[prevDay])
 		likeBaseline = buildLikeBaselineFromSnapshotV2(v2[prevDay])
+		readBaseline = buildReadBaselineFromSnapshotV2(v2[prevDay])
+		fansBaseline = buildFansBaselineFromSnapshotV2(v2[prevDay])
 		postBaseline = buildPostBaselineFromSnapshotV2(v2[prevDay])
 	}
 	loc := time.FixedZone("CST", 8*3600)
@@ -64,12 +66,12 @@ func TestSendYesterdaySuperCountEmailPreview(t *testing.T) {
 
 	bot := &Bot{cfg: cfg}
 	title := "[超话签到人数日报 · 样式预览]"
-	report := formatWeiboSuperCountDualRanking(results, nil, title, now, signBaseline, likeBaseline, postBaseline)
+	report := formatWeiboSuperCountDualRanking(results, nil, title, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	sections := bot.buildWeiboSuperCountEmailSections(results)
 	t.Logf("sections=%d", len(sections))
 	for _, s := range sections {
 		t.Logf("  section=%s topics=%d", s.Title, len(s.Results))
 	}
-	bot.sendWeiboSuperCountDailyEmail(report, title, results, nil, now, signBaseline, likeBaseline, postBaseline)
+	bot.sendWeiboSuperCountDailyEmail(report, title, results, nil, now, signBaseline, likeBaseline, readBaseline, fansBaseline, postBaseline)
 	t.Logf("sent multi-table preview topics=%d to=%s", len(results), cfg.AlertEmailTo)
 }

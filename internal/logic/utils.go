@@ -919,13 +919,98 @@ func parseEmbeddedReplyMessage(body string) (string, string, bool) {
 
 	quotedText := ""
 	replyName := strings.TrimSpace(wrapper.ReplyInfo.ReplyName)
-	replyText := strings.TrimSpace(wrapper.ReplyInfo.ReplyText)
+	// replyText 本身常已带「昵称:」前缀，不剥掉会与下面拼的 replyName 重复。
+	replyText := stripRepeatedReplyName(strings.TrimSpace(wrapper.ReplyInfo.ReplyText), replyName)
 	answerText := normalizePocketText(wrapper.ReplyInfo.Text)
 	if replyName != "" && replyText != "" {
 		quotedText = normalizePocketText(fmt.Sprintf("%s:%s", replyName, replyText))
 	}
 
 	return quotedText, answerText, true
+}
+
+// parseEmbeddedReplyDetail 在 parseEmbeddedReplyMessage 的基础上多返回
+// replyInfo.replyName（被回复者昵称）。
+//
+// 为什么需要它：MsgReply 的 Document 之前把 Author/Title 硬编码成房间主人
+// （room.OwnerName），于是「金兔牙子」回复「哼唧小虎」的消息在飞书上被标成
+// 房间主人发的，而 QQ 侧靠 prefix 显示真实昵称 —— 两边不一致。被回复者昵称只
+// 存在于 replyName 里，必须单独取出来才能正确署名与对齐引用块。
+// speakerAlreadyInText 判断 text 是否已经以「说话人 + 分隔符」开头。
+//
+// 口袋48 的被回复原文自带「昵称:内容」这种前缀，而引用块渲染
+// （outbound 的 turnParts）还会再拼一次「昵称：」，重复之后卡片上会出现
+// 「convolk1：convolk1:fixx好用」。QQ 侧用的是原文本身，所以只有飞书错位。
+//
+// 全角「：」与半角「:」都要认：口袋48 原文用半角，渲染层用全角。
+func speakerAlreadyInText(author, text string) bool {
+	author = strings.TrimSpace(author)
+	if author == "" {
+		return false
+	}
+	trimmed := strings.TrimSpace(text)
+	for _, sep := range []string{"：", ":"} {
+		if strings.HasPrefix(trimmed, author+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseEmbeddedReplyDetail(body string) (quoted, answer, replyName string, ok bool) {
+	var wrapper struct {
+		MessageType string `json:"messageType"`
+		ReplyInfo   struct {
+			ReplyName string `json:"replyName"`
+			ReplyText string `json:"replyText"`
+			Text      string `json:"text"`
+		} `json:"replyInfo"`
+	}
+
+	bodyText := strings.TrimSpace(body)
+	if !strings.HasPrefix(bodyText, "{") {
+		return "", "", "", false
+	}
+	if err := json.Unmarshal([]byte(bodyText), &wrapper); err != nil {
+		return "", "", "", false
+	}
+	if strings.TrimSpace(wrapper.MessageType) != string(pocket48.MsgReply) {
+		return "", "", "", false
+	}
+
+	replyName = strings.TrimSpace(wrapper.ReplyInfo.ReplyName)
+	replyText := stripRepeatedReplyName(strings.TrimSpace(wrapper.ReplyInfo.ReplyText), replyName)
+	answer = normalizePocketText(wrapper.ReplyInfo.Text)
+	if replyName != "" && replyText != "" {
+		quoted = normalizePocketText(fmt.Sprintf("%s:%s", replyName, replyText))
+	}
+	return quoted, answer, replyName, true
+}
+
+// stripRepeatedReplyName 去掉 replyText 里重复的「昵称:」前缀。
+//
+// Pocket48 的 replyInfo.replyText 本身已经是「昵称:内容」的形态，而我们渲染
+// 引用块时还会再拼一次 replyName，结果同一个昵称连着出现两遍：
+//
+//	【哼唧小虎(胡晓慧)】
+//	小朱同学🍋：
+//	小朱同学🍋:天呐 你会查阅每一条抖音分享吗      ← 昵称重复
+//
+// 真实的两种样本都带这个前缀（2026-10-03 00:21 小朱同学🍋 / 00:37 面包兔），
+// 所以是稳定行为而非偶发。这里只剥掉紧贴开头、完全等于 replyName 的那一段，
+// 昵称出现在正文中间（粉丝在内容里@ 自己）时不受影响。
+func stripRepeatedReplyName(replyText, replyName string) string {
+	if replyText == "" || replyName == "" {
+		return replyText
+	}
+	// 允许 "昵称:内容" 与 "昵称：内容" 两种分隔符，以及昵称后可选的空格。
+	for _, sep := range []string{":", "："} {
+		prefix := replyName + sep
+		if strings.HasPrefix(replyText, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(replyText, prefix))
+		}
+	}
+	return replyText
 }
 
 func parseGiftReplyMessage(body string) (giftText string, replyText string, ok bool) {
@@ -1152,8 +1237,6 @@ func extractNumber(s string) (int64, error) {
 	}
 	return strconv.ParseInt(nums, 10, 64)
 }
-
-
 
 // normalizeGiftNum ensures gift number is at least 1
 func normalizeGiftNum(num int64) int64 {

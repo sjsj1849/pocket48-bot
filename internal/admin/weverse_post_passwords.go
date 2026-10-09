@@ -42,8 +42,21 @@ func (s *Server) handleWeversePostPasswords(w http.ResponseWriter, r *http.Reque
 		fail(e)
 		return
 	}
-	for i := range rows {
-		rows[i].Password = ""
+	settings, e := weverse.LoadReportSettings(dir)
+	if e != nil {
+		fail(e)
+		return
 	}
-	writeJSON(w, 200, map[string]any{"posts": rows})
+	history, e := weverse.OpenHistory(dir)
+	if e != nil {
+		fail(e)
+		return
+	}
+	defer history.Close()
+	pending, e := history.PendingLockedPosts(settings.CommunityID, rows)
+	if e != nil {
+		fail(e)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"posts": pending})
 }

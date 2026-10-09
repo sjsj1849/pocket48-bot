@@ -29,7 +29,9 @@ func (s *Server) handleWeverseAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	configured := cfg.APIKey != ""
+	siliconFlowConfigured := cfg.SiliconFlowAPIKey != ""
 	cfg.APIKey = ""
+	cfg.SiliconFlowAPIKey = ""
 	active, pending, last, problem := weverse.AIStatus(dir)
-	writeJSON(w, 200, map[string]any{"settings": cfg, "keyConfigured": configured, "active": active, "pending": pending, "lastSuccess": last, "error": problem})
+	writeJSON(w, 200, map[string]any{"settings": cfg, "keyConfigured": configured, "siliconFlowKeyConfigured": siliconFlowConfigured, "active": active, "pending": pending, "lastSuccess": last, "error": problem})
 }

@@ -30,6 +30,7 @@ var (
 	artistImageRE = regexp.MustCompile(`(?s)<span[^>]+id="artistImgArea"[^>]*>.*?<img[^>]+src="([^"]+)"`)
 	boxRE         = regexp.MustCompile(`(?s)<div class="box_act ([^"]+)".*?</div>\s*<!-- ▲▲▲`)
 	descRE        = regexp.MustCompile(`(?s)<p class="box_desc"[^>]*>(.*?)</p>`)
+	mstoryTitleRE = regexp.MustCompile(`(?s)<div class="musicstory_info"[^>]*>\s*<a[^>]*>(.*?)</a>`)
 	dateRE        = regexp.MustCompile(`(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일`)
 	imageRE       = regexp.MustCompile(`<img[^>]+src="(https://cdnimg\.melon\.co\.kr/[^"]+)"`)
 	mstoryRE      = regexp.MustCompile(`goMstoryDetail\(['"]?(\d+)`)
@@ -152,8 +153,14 @@ func parseTimeline(artistID string, data []byte) []Event {
 			if len(id) < 2 {
 				continue
 			}
-			event.ID, event.Kind, event.Title = "magazine:"+id[1], "magazine", "Melon 杂志"
+			event.ID, event.Kind, event.Title = "magazine:"+id[1], "magazine", "Melon 官方文章"
 			event.URL = baseURL + "/musicstory/detail.htm?mstorySeq=" + id[1]
+			// The generic description only says that a magazine was registered. The
+			// linked headline explains why a multi-artist story appears on this
+			// artist's timeline and prevents its cover from looking misattributed.
+			if title := mstoryTitleRE.FindStringSubmatch(block); len(title) > 1 {
+				event.Body = cleanText(title[1])
+			}
 		case strings.Contains(className, "album"):
 			id := albumRE.FindStringSubmatch(block)
 			if len(id) < 2 {

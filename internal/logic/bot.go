@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"mime"
+	"net/http"
 	"net/mail"
 	"os"
 	"os/exec"
@@ -22,10 +24,13 @@ import (
 
 	"pocket48-bot/internal/config"
 	"pocket48-bot/internal/mailsend"
+	"pocket48-bot/internal/message"
 	"pocket48-bot/internal/monitor"
 	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/outbound"
 	"pocket48-bot/internal/pocket48"
 	"pocket48-bot/internal/storage"
+	"pocket48-bot/internal/tiktokmonitor"
 )
 
 var qqFaceNameToID = map[string]string{
@@ -134,11 +139,39 @@ var qqFaceNameToID = map[string]string{
 var pocketMobilePattern = regexp.MustCompile(`^1\d{10}$`)
 
 func (b *Bot) reply(event *napcat.Event, msg string) {
-	if event.MessageType == "group" {
-		b.napcat.SendGroupMessage(event.GroupID, napcat.TextSegment(msg))
-	} else if event.MessageType == "private" {
-		b.napcat.SendPrivateMessage(event.UserID, napcat.TextSegment(msg))
+	// ★ 飞书指令桥：命令在飞书触发时，回复改道回飞书，不回 QQ。
+	// 见 Bot.feishuReply 注释。
+	if ctx := b.currentFeishuReply(); ctx != nil && b.outbound != nil {
+		b.sendFeishuReply(*ctx, msg)
+		return
 	}
+	if event.MessageType == "group" {
+		b.sendGroup(event.GroupID, napcat.TextSegment(msg))
+	} else if event.MessageType == "private" {
+		b.sendPrivate(event.UserID, napcat.TextSegment(msg))
+	}
+}
+
+// sendFeishuReply 把一次命令回复发到飞书。
+//
+// markdown=true 时渲染成卡片（彩色 header + lark_md 正文），
+// 否则回纯文本。分界看的是「这是不是一段需要排版的结构化长文本」，
+// 不是消息长度 —— 验证码回执再短也不该开卡片。
+func (b *Bot) sendFeishuReply(ctx feishuReplyCtx, msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	if !ctx.markdown {
+		b.outbound.Send(ctx.target, message.Text(msg))
+		return
+	}
+	b.outbound.Send(ctx.target, message.Document{
+		Source: "Pocket48",
+		Kind:   "command_help",
+		Title:  feishuCardTitle(msg),
+		Body:   toFeishuMarkdown(msg),
+	})
 }
 
 func (b *Bot) notifyAdmins(msg string) {
@@ -157,6 +190,22 @@ func (b *Bot) notifyAdminsQQ(msg string) {
 	b.notifyQQUsers(msg, b.collectAdminRecipients()...)
 }
 
+// notifyAdminsAll sends startup/shutdown notices to both admin QQ private chats
+// and every configured Feishu private target, so the bot's own liveness is
+// visible on both platforms.
+func (b *Bot) notifyAdminsAll(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	b.notifyAdminsQQ(msg)
+	for _, target := range b.cfg.DeliveryTargets {
+		if target.Platform == "feishu" && target.Kind == "private" {
+			b.sendTarget(target, napcat.TextSegment(msg))
+		}
+	}
+}
+
 // notifyQQUsers sends a private QQ message to the given user IDs (deduped, skips 0).
 func (b *Bot) notifyQQUsers(msg string, uids ...int64) {
 	msg = strings.TrimSpace(msg)
@@ -172,7 +221,7 @@ func (b *Bot) notifyQQUsers(msg string, uids ...int64) {
 			continue
 		}
 		seen[uid] = struct{}{}
-		b.napcat.SendPrivateMessage(uid, napcat.TextSegment(msg))
+		b.sendPrivate(uid, napcat.TextSegment(msg))
 	}
 }
 
@@ -353,6 +402,9 @@ func sendAdminAlertEmail(cfg *config.Config, body string) error {
 type emailAttachment struct {
 	Name        string
 	ContentType string
+	// TargetIDs is chat fan-out metadata for daily-report PNGs: which delivery
+	// targets this single image should be sent to. Never used for the email body.
+	TargetIDs []string
 	// Text body (used when Data is empty). For binary attachments use Data.
 	Text string
 	// Binary body (PNG etc.). Preferred over Text when non-empty.
@@ -530,6 +582,86 @@ func renderHTMLToPNG(htmlBody string) ([]byte, error) {
 	return data, nil
 }
 
+// adminPanelAddr 是管理面板的本地监听地址（与 cmd/admin 一致）。
+const adminPanelAddr = "http://127.0.0.1:8787"
+
+// renderPanelShot 登录管理面板并截取指定元素 → PNG。
+//
+// ★ 为什么截图而不是自己画（2026-10-08 用户明确要求）：
+//
+//	报表侧手绘 SVG 与面板上排好的组件质量差距很大，用户直接说
+//	「你实在画不了就直接截图」。截图 = 面板所见即所得；以后改面板
+//	样式，报表图自动跟着变，不会再出现「面板好看、报表难看」的两套。
+//
+// hashPath 形如 "#/signSnapshot?hours=24&date=2026-10-07"
+// selector 形如 "#dev-chart-0" / "#hourly-table"
+func renderPanelShot(hashPath, selector string) ([]byte, error) {
+	cookie, err := adminPanelSession()
+	if err != nil {
+		return nil, err
+	}
+	tmpDir, err := os.MkdirTemp("", "pocket48-shot-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	pngPath := filepath.Join(tmpDir, "shot.png")
+	script := "scripts/panel_shot.mjs"
+	if _, err := os.Stat(script); err != nil {
+		script = "/root/pocket48-bot/scripts/panel_shot.mjs"
+	}
+	cmd := exec.Command("node", script, adminPanelAddr+"/"+hashPath, cookie, selector, pngPath, "1000")
+	cmd.Env = append(os.Environ(),
+		"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/root/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("panel_shot: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	data, err := os.ReadFile(pngPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < 100 {
+		return nil, fmt.Errorf("shot too small (%d bytes): %s", len(data), strings.TrimSpace(string(out)))
+	}
+	return data, nil
+}
+
+// adminPanelSession 用面板密码换一个会话 cookie。
+//
+// 面板是 HttpOnly + SameSite=Strict，Playwright 没法自己造，
+// 必须先走一次真实登录把 cookie 拿出来。
+func adminPanelSession() (string, error) {
+	pwPath := "storage/admin-password"
+	if _, err := os.Stat(pwPath); err != nil {
+		pwPath = "/root/pocket48-bot/storage/admin-password"
+	}
+	raw, err := os.ReadFile(pwPath)
+	if err != nil {
+		return "", fmt.Errorf("read admin password: %w", err)
+	}
+	body := strings.TrimSpace(string(raw))
+	resp, err := http.Post(adminPanelAddr+"/api/auth/login", "application/json",
+		strings.NewReader(fmt.Sprintf(`{"password":%q}`, body)))
+	if err != nil {
+		return "", fmt.Errorf("panel login: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("panel login status=%d", resp.StatusCode)
+	}
+	sc := resp.Header.Get("Set-Cookie")
+	for _, part := range strings.Split(sc, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "p48_admin=") {
+			return strings.TrimPrefix(part, "p48_admin="), nil
+		}
+	}
+	return "", fmt.Errorf("no session cookie in login response")
+}
+
 func (b *Bot) collectAdminRecipients() []int64 {
 	seen := make(map[int64]struct{})
 	out := make([]int64, 0, 1+len(b.cfg.AdminQQ))
@@ -583,16 +715,18 @@ type AnnualScoreGift struct {
 }
 
 type LiveGiftSession struct {
-	LiveID        string
-	LiveRoomID    int64
-	LiveOwnerID   int64
-	LiveOwnerName string
-	StartedAt     int64
-	Events        []GiftEventRecord
-	ChickenLegs   int64
-	AnnualScore   float64
-	PeakOnline    int64
-	Ended         bool
+	PeakOnline           int64            `json:"peak_online,omitempty"`
+	LiveID         string
+	LiveRoomID     int64
+	LiveOwnerID    int64
+	LiveOwnerName  string
+	StartedAt      int64
+	Events         []GiftEventRecord
+	ChickenLegs    int64
+	AnnualScore    float64
+	CurrentOnline  int64
+	PeakConcurrent int64
+	Ended          bool
 	// MissTicks: consecutive discovery polls where this liveId was absent from getLiveList.
 	// finishMissing only ends after several misses to tolerate list flaps.
 	MissTicks int `json:"MissTicks,omitempty"`
@@ -610,14 +744,22 @@ type qchatRESTIdentity struct {
 }
 
 type Bot struct {
-	cfg                *config.Config
-	pocket             *pocket48.Client
-	napcat             *napcat.Client
-	weiboMonitor       *monitor.WeiboMonitor
+	cfg      *config.Config
+	pocket   *pocket48.Client
+	napcat   *napcat.Client
+	outbound outbound.Sender
+	feishu   *outbound.Feishu
+	// feishuWS 是飞书**入站**长连接客户端（出站是上面的 feishu）。
+	// 两者必须分开：一个是发消息的，一个是收事件的，生命周期也不同。
+	feishuWS     *outbound.FeishuWSClient
+	weiboMonitor *monitor.WeiboMonitor
+	// signMonitor 是超话签到监测的采样存储（runWeiboSignMonitorLoop 启动后赋值）。
+	signMonitor        *signMonitorStore
 	storage            *storage.Storage
 	nimDanmaku         *NimDanmakuBridge
 	weiboAuth          *WeiboAuthBridge
 	douyinMonitor      *DouyinMonitor
+	tiktokMonitor      *TiktokMonitor
 	xiaohongshuMonitor *XiaohongshuMonitor
 
 	lastMsgTime                      map[int64]int64
@@ -656,6 +798,53 @@ type Bot struct {
 	// finishedLives: recently ended sessions by liveId so a list flap / bot restart
 	// cannot open a fresh zero-score session for the same live and re-announce.
 	finishedLives map[string]LiveGiftSession
+
+	// ★★ 飞书指令桥（2026-10-08 新增）。
+	//
+	// 背景：整个命令体系（CmdRegistry）是围绕 napcat.Event 写的，
+	// b.reply(event, msg) 只能回 QQ。要让「bot login sms」在飞书可用，
+	// 最省事且不漂移的做法不是把几十个命令抄一份飞书版，而是
+	// **在执行命令的那一小段时间里把 reply 改道到飞书**。
+	//
+	// 为什么不改所有 Handler 的签名：那要动 1200 行、几十个命令，
+	// 而且每漏一处就是一条静默失效的分支（复制第二份实现必然随时间漂移）。
+	//
+	// 生命周期：只在 handleFeishuCommand 的同步栈里设置，defer 清除。
+	// 命令若把回复丢进 goroutine 异步发，会落回 QQ —— 这是可接受的降级，
+	// 且不会串到别的会话（每个飞书消息各自一个字段值，不共享全局态）。
+	feishuReplyMu sync.Mutex
+	feishuReply   *feishuReplyCtx
+}
+
+// feishuReplyCtx 是一次飞书命令执行的回复改道上下文。
+type feishuReplyCtx struct {
+	target outbound.Target
+	// eventID 是触发这条命令的飞书消息 id，仅用于日志排查。
+	eventID string
+	// markdown 让长文本（帮助、用法、分类列表）走飞书富文本卡片，
+	// 而不是一大坨纯文本。短文本（验证码回执、状态）仍走纯文本，
+	// 免得为一句话开一张卡。
+	markdown bool
+}
+
+// pushFeishuReply 设置本次命令执行的 reply 改道。
+func (b *Bot) pushFeishuReply(ctx *feishuReplyCtx) {
+	b.feishuReplyMu.Lock()
+	b.feishuReply = ctx
+	b.feishuReplyMu.Unlock()
+}
+
+func (b *Bot) popFeishuReply() {
+	b.feishuReplyMu.Lock()
+	b.feishuReply = nil
+	b.feishuReplyMu.Unlock()
+}
+
+// currentFeishuReply 返回当前 reply 改道上下文（nil = 走 QQ）。
+func (b *Bot) currentFeishuReply() *feishuReplyCtx {
+	b.feishuReplyMu.Lock()
+	defer b.feishuReplyMu.Unlock()
+	return b.feishuReply
 }
 
 func NewBot(cfg *config.Config) *Bot {
@@ -664,8 +853,45 @@ func NewBot(cfg *config.Config) *Bot {
 		interval = 3 * time.Second
 	}
 
+	// QQ and Feishu are independent, individually switchable outlets. The hub's
+	// default platform follows whichever one is actually enabled.
 	napcatClient := napcat.NewClient(cfg)
-	weiboMon := monitor.NewWeiboMonitor(napcatClient)
+	outboundHub := outbound.NewHub("")
+	var feishuAdapter *outbound.Feishu
+	if cfg.QQEnabled {
+		outboundHub.Register("qq", outbound.NewOneBot(napcatClient))
+		outboundHub.SetDefaultPlatform("qq")
+	}
+	if cfg.FeishuEnabled && strings.TrimSpace(cfg.FeishuAppID) != "" && strings.TrimSpace(cfg.FeishuAppSecret) != "" {
+		feishuSender := outbound.NewFeishu(outbound.FeishuOptions{
+			AppID: cfg.FeishuAppID, AppSecret: cfg.FeishuAppSecret,
+			UploadConcurrency: cfg.FeishuUploadConcurrency,
+		})
+		// Source message id -> Feishu message id, so replies can be threaded
+		// under their parent message across separate deliveries.
+		// Persisted on disk on purpose: a member posts, then replies under that
+		// post minutes later. With an in-memory-only map every restart broke
+		// threading for all threads spanning it, and the reply silently lost both
+		// its thread and its quoted parent.
+		replyMap := outbound.NewPersistentReplyMap(2000, filepath.Join("storage", "feishu-replymap.jsonl"), cfg.FeishuAppID)
+		feishuSender.SetReplyMap(replyMap)
+		log.Printf("[Outbound:feishu] status=configured replymap_entries=%d persisted=true", replyMap.Len())
+		outboundHub.Register("feishu", feishuSender)
+		feishuAdapter = feishuSender
+		log.Printf("[Outbound:feishu] status=configured")
+		if !cfg.QQEnabled {
+			outboundHub.SetDefaultPlatform("feishu")
+		}
+	}
+	if !cfg.QQEnabled {
+		log.Printf("[Outbound:qq] status=disabled")
+	}
+	// The hub runs inside this process. OneBot reuses the existing NapCat
+	// connection, and Feishu talks to the open API directly, so no standalone
+	// gateway service is needed.
+	var outboundSender outbound.Sender = outboundHub
+	log.Printf("[Outbound] default_platform=qq feishu_enabled=%v", cfg.FeishuEnabled)
+	weiboMon := monitor.NewWeiboMonitor(outboundSender)
 	if cfg.WeiboCookie != "" {
 		weiboMon.SetCookie(cfg.WeiboCookie)
 	}
@@ -710,6 +936,8 @@ func NewBot(cfg *config.Config) *Bot {
 		cfg:                    cfg,
 		pocket:                 pocket48.NewClient(cfg),
 		napcat:                 napcatClient,
+		outbound:               outboundSender,
+		feishu:                 feishuAdapter,
 		weiboMonitor:           weiboMon,
 		storage:                botStorage,
 		nimDanmaku:             NewNimDanmakuBridge(cfg),
@@ -734,7 +962,24 @@ func NewBot(cfg *config.Config) *Bot {
 		pollingInterval:        interval,
 		fastInterval:           300 * time.Millisecond,
 	}
-	bot.douyinMonitor = NewDouyinMonitor(cfg, napcatClient, bot.notifyAdmins)
+
+	// ★ 微博接入跨平台去重（2026-10-04）。
+	//
+	// 放在 NewBot 里而不是 Start()：微博订阅可以在运行期通过命令热增删
+	// （cmd_handlers.go 里 AddConfig 之后直接 Start()），若等到 Start()
+	// 才接线，那些热增的订阅会绕过判定。用闭包持有 *Bot，
+	// 无论订阅何时加入，判定用的都是同一个索引。
+	bot.wireWeiboCrossDedupe()
+	// TikTok（洋抖）监控：只做动态，不做 IM。
+	// 与抖音/B站共用同一个跨平台去重索引，三方比谁最早发布。
+	tiktokMonitor := NewTiktokMonitor(cfg, &tiktokSender{
+		cfg:      cfg,
+		outbound: outboundSender,
+	}, storageRootOf(cfg.ConfigPath()))
+	tiktokMonitor.onAlert = bot.notifyAdmins
+	bot.tiktokMonitor = tiktokMonitor
+
+	bot.douyinMonitor = NewDouyinMonitor(cfg, outboundSender, bot.notifyAdmins)
 	bot.douyinMonitor.SetBrowserBridge(bot.weiboAuth)
 	bot.douyinMonitor.SetRequestBotRestart(func(reason string) {
 		log.Printf("[Bot] restart requested: %s", reason)
@@ -745,7 +990,7 @@ func NewBot(cfg *config.Config) *Bot {
 		}()
 	})
 	bot.weiboAuth.SetDouyinCallback(bot.douyinMonitor.HandleBrowserEvent)
-	bot.xiaohongshuMonitor = NewXiaohongshuMonitor(cfg, napcatClient, bot.notifyAdmins)
+	bot.xiaohongshuMonitor = NewXiaohongshuMonitor(cfg, outboundSender, bot.notifyAdmins)
 	bot.xiaohongshuMonitor.SetBrowserBridge(bot.weiboAuth)
 	bot.weiboAuth.SetXiaohongshuCallback(bot.xiaohongshuMonitor.HandleBrowserEvent)
 	weiboMon.OnCookieInvalid = bot.notifyWeiboCookieInvalid
@@ -771,6 +1016,81 @@ func NewBot(cfg *config.Config) *Bot {
 	napcatClient.OnMemberJoin = bot.handleMemberJoin
 
 	return bot
+}
+
+func (b *Bot) sendGroup(groupID int64, content interface{}) {
+	if b != nil {
+		outbound.SendGroup(b.outbound, groupID, content)
+	}
+}
+
+// sendTarget delivers to an explicit platform/kind/address target resolved from
+// the address book. This is the path that lets a subscription choose Feishu
+// instead of (or in addition to) QQ.
+func (b *Bot) sendTarget(target config.DeliveryTarget, content interface{}) {
+	if b == nil || target.Address == "" {
+		return
+	}
+	kind := outbound.GroupChat
+	if target.Kind == "private" {
+		kind = outbound.PrivateChat
+	}
+	// QQ group ids are numeric; the hub routes by ID for QQ and Address otherwise.
+	if target.Platform == "qq" {
+		if id, err := strconv.ParseInt(target.Address, 10, 64); err == nil {
+			b.outbound.Send(outbound.Target{Platform: "qq", Kind: kind, ID: id, Address: target.Address}, content)
+			return
+		}
+	}
+	b.outbound.Send(outbound.Target{Platform: target.Platform, Kind: kind, Address: target.Address}, content)
+}
+
+// resolveTargets converts target ids to outbound targets using the address book.
+func (b *Bot) resolveTargets(targetIDs []string) []outbound.Target {
+	if b == nil || b.cfg == nil || len(targetIDs) == 0 {
+		return nil
+	}
+	targets := make([]outbound.Target, 0, len(targetIDs))
+	for _, targetID := range targetIDs {
+		t := b.cfg.ResolveTarget(targetID)
+		if t.Address == "" {
+			continue
+		}
+		kind := outbound.GroupChat
+		if t.Kind == "private" {
+			kind = outbound.PrivateChat
+		}
+		if t.Platform == "qq" {
+			if id, err := strconv.ParseInt(t.Address, 10, 64); err == nil {
+				targets = append(targets, outbound.Target{Platform: "qq", Kind: kind, ID: id, Address: t.Address})
+				continue
+			}
+		}
+		targets = append(targets, outbound.Target{Platform: t.Platform, Kind: kind, Address: t.Address})
+	}
+	return targets
+}
+
+// sendToTargetIDs fans content out to explicit target ids. An empty target id
+// list means the subscription has no destination configured, so nothing is
+// delivered.
+func (b *Bot) sendToTargetIDs(targetIDs []string, content interface{}) {
+	if b == nil || b.outbound == nil {
+		return
+	}
+	for _, targetID := range targetIDs {
+		target := b.cfg.ResolveTarget(targetID)
+		if target.ID == "" {
+			continue
+		}
+		b.sendTarget(target, content)
+	}
+}
+
+func (b *Bot) sendPrivate(userID int64, content interface{}) {
+	if b != nil {
+		outbound.SendPrivate(b.outbound, userID, content)
+	}
 }
 
 func (b *Bot) LogInfo(format string, v ...interface{}) {
@@ -930,6 +1250,7 @@ func (b *Bot) reloadSubscriptions() {
 	b.cfg.WeiboSuperCountEnabled = cfg.WeiboSuperCountEnabled
 	b.cfg.WeiboSuperCountDelivery = cfg.WeiboSuperCountDelivery
 	b.cfg.WeiboSuperCountQQ = cfg.WeiboSuperCountQQ
+	b.cfg.WeiboReportImageTargets = cfg.WeiboReportImageTargets
 
 	// Douyin / 小红书 poll + IM routing (not master enable)
 	b.cfg.DouyinPollSeconds = cfg.DouyinPollSeconds
@@ -952,6 +1273,7 @@ func (b *Bot) reloadSubscriptions() {
 	b.cfg.NIMRoomMessagePollFallback = cfg.NIMRoomMessagePollFallback
 	b.cfg.NIMLiveDanmakuEnabled = cfg.NIMLiveDanmakuEnabled
 	b.cfg.NIMViewerEventEnabled = cfg.NIMViewerEventEnabled
+	b.cfg.PocketMemberFeatures = cfg.PocketMemberFeatures
 
 	// Push cookies into weibo monitor if present
 	if b.weiboMonitor != nil {
@@ -968,6 +1290,13 @@ func (b *Bot) reloadSubscriptions() {
 		}
 	}
 
+	// Feishu media-upload concurrency is a live cap on the adapter, not process
+	// wiring, so it hot-reloads.
+	b.cfg.FeishuUploadConcurrency = cfg.FeishuUploadConcurrency
+	if b.feishu != nil {
+		b.feishu.SetUploadConcurrency(cfg.FeishuUploadConcurrency)
+	}
+
 	b.LogInfo("热重载完成：订阅与可热更新配置已同步")
 }
 
@@ -975,14 +1304,31 @@ func (b *Bot) Start() error {
 	// Recover in-progress live gift/score sessions before NIM live discovery.
 	b.loadLiveSessionsFromDisk()
 
-	// Connect to NapCat
-	if err := b.napcat.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to NapCat: %v", err)
+	// Connect to NapCat only when the QQ outlet is on; a disabled outlet must
+	// not keep a QQ session alive.
+	if b.cfg.QQEnabled {
+		if err := b.napcat.Connect(); err != nil {
+			return fmt.Errorf("failed to connect to NapCat: %v", err)
+		}
 	}
 
 	// Register Event Handlers
 	b.napcat.OnGroupMessage = b.handleGroupMessage
 	b.napcat.OnPrivateMessage = b.handlePrivateMessage
+
+	// ★ 飞书入站长连接（2026-10-04 新增）。
+	//
+	// 此前飞书**只有出站没有入站** —— internal/outbound/feishu.go 全是发送，
+	// 事件订阅从来没接过。于是「在飞书私聊里发个链接，机器人毫无反应」：
+	// 既不是权限没开，也不是解析器不支持，而是机器人压根收不到消息。
+	//
+	// 为什么用长连接而不是 webhook：webhook 要公网回调地址，
+	// 这台机器走 NAT 出口，没有可注册的 HTTPS 域名。
+	// 长连接是出方向的长连 WebSocket，改完立刻能在飞书里测。
+	//
+	// 放在Start 里而不是 NewBot：连接失败不该让整个 Bot 起不来，
+	// 这里只记日志，Start 继续往下走。
+	b.startFeishuLongConn()
 	// NapCat 断线/重连：后台静默自动重连，不在 QQ 私聊刷状态。
 	// 面板看 bot.log 的 [NapCat] status=...；持续异常由 admin 邮件告警负责。
 
@@ -1032,7 +1378,7 @@ func (b *Bot) Start() error {
 					}
 				}
 
-				if err := b.weiboMonitor.AddConfig(gid, uid, weiboConfig.AtAll, weiboConfig.LastID, onNew); err != nil {
+				if err := b.weiboMonitor.AddConfig(gid, b.resolveTargets(weiboConfig.TargetIDs), uid, weiboConfig.AtAll, weiboConfig.LastID, onNew); err != nil {
 					log.Printf("Failed to add weibo config for group %d, uid %s: %v", gid, uid, err)
 				} else {
 					b.LogInfo("Added weibo monitor for group %d, uid: %s", gid, uid)
@@ -1062,10 +1408,16 @@ func (b *Bot) Start() error {
 	defer stopWeverse()
 	go b.runWeverseLoop(weverseCtx)
 	go b.runXLoop(weverseCtx)
+	go b.runXViralLoop(weverseCtx)
 	go b.runInstagramLoop(weverseCtx)
+	go b.runBilibiliLoop(weverseCtx)
 	go b.runMelonLoop(weverseCtx)
 	go b.runMelonMusicWaveLoop(weverseCtx)
 	go b.runWeiboSuperAutoSignLoop()
+	go b.runWeiboSignMonitorLoop()
+	// ★ 只能启动一次。之前这里写了两遍，两个 goroutine 各持独立 lastDate，
+	//   23:50 时会把同一份日报发两遍。
+	go b.runSignMonitorDailyReport()
 	go b.runWeiboSuperCountDailyPushLoop()
 	go b.runWeiboAppAuthHealthCheckLoop()
 	if b.cfg.WeiboBrowserAuthEnabled || b.cfg.DouyinEnabled || b.cfg.XiaohongshuEnabled {
@@ -1081,6 +1433,46 @@ func (b *Bot) Start() error {
 	}
 	if b.cfg.DouyinIMEnabled && b.douyinMonitor != nil {
 		b.douyinMonitor.StartIMWatchdog()
+	}
+
+	// TikTok（洋抖）监控。与抖音相互独立，开关也不共用 ——
+	// 采集链路、限流特征、UA 要求全都不同，绑一起会造成意料外的连带停机。
+	// ★ 2026-10-04：TikTok 订阅改从 storage/tiktok/settings.json 读，
+	//   回落 config.json 的 TIKTOK_SUBSCRIPTIONS。
+	//
+	//   为什么要改：面板所有平台页都围绕 storage/<平台>/settings.json 构建，
+	//   TikTok 之前唯独没有这个文件，于是配置页里根本没有 TikTok。
+	//   迁移后口径与抖音/B站/X 一致。回落分支保证老配置仍然能启动。
+	if b.tiktokMonitor != nil {
+		ttCfg, ttErr := tiktokmonitor.LoadSettings(tiktokmonitor.Dir(b.cfg.ConfigPath()))
+		tiktokEnabled := ttErr == nil && ttCfg.Enabled
+		accounts := map[string]bool{}
+		if tiktokEnabled {
+			for _, name := range ttCfg.Usernames() {
+				accounts[name] = true
+			}
+		}
+		// 回落到 config.json：settings.json 还没写订阅时仍按老配置启动。
+		if len(accounts) == 0 && b.cfg.TiktokEnabled {
+			for account, item := range b.cfg.TiktokSubscriptions {
+				if item == nil || item.Disabled {
+					continue
+				}
+				name := account
+				if item.Username != "" {
+					name = item.Username
+				}
+				accounts[name] = true
+			}
+			tiktokEnabled = true
+		}
+		if tiktokEnabled {
+			for name := range accounts {
+				// 每个账号一个独立 goroutine（Start 内部自行起循环），
+				// 共用 weverseCtx 随 Bot 一起取消。
+				b.tiktokMonitor.Start(weverseCtx, name)
+			}
+		}
 	}
 
 	// Start Polling Loop
@@ -1105,7 +1497,7 @@ func (b *Bot) Start() error {
 	}
 
 	startupMsg := fmt.Sprintf("🤖 机器人已启动\n本次启动时间：%s\n上次启动时间：%s", startTimeStr, lastTimeStr)
-	b.notifyAdminsQQ(startupMsg)
+	b.notifyAdminsAll(startupMsg)
 
 	// Update LastStartupTime
 	b.cfg.LastStartupTime = startTime.Unix()
@@ -1139,7 +1531,7 @@ func (b *Bot) Start() error {
 
 	// Send Shutdown Notification
 	shutdownMsg := fmt.Sprintf("⚠️ 机器人即将下线，服务暂时不可用。\n本次运行时间：%s", runTimeStr)
-	b.notifyAdminsQQ(shutdownMsg)
+	b.notifyAdminsAll(shutdownMsg)
 	time.Sleep(1 * time.Second)
 
 	b.cfg.Save()
@@ -1175,6 +1567,11 @@ func (b *Bot) handleGroupMessage(event *napcat.Event) {
 		cleanMsg = strings.ReplaceAll(cleanMsg, "[CQ:at,all]", "")
 		cleanMsg = strings.TrimSpace(cleanMsg)
 		if cleanMsg != "" {
+			// 链接提取优先于自然语言分派：一条「链接 + 一句话」的消息
+			// 若先走自然语言分支，就不会被识别成提取请求。
+			if b.tryHandleExtractLink(event, cleanMsg, true) {
+				return
+			}
 			if b.tryHandleNaturalLanguage(event, cleanMsg) {
 				return
 			}
@@ -1247,6 +1644,7 @@ func (b *Bot) tryHandleNaturalLanguage(event *napcat.Event, msg string) bool {
 • 开启监控 / 关闭监控
 • 搜索 <名字> - 搜索房间
 • 登录密码 <密码> - 密码登录
+		"• 直接发链接（B站/X/抖音/微博）→ 提取正文和视频，加 gif 转动图"
 • 检查微博Cookie - 检查Cookie是否可用
 • 重设微博Cookie <Cookie> - 热更新微博Cookie
 • 直接粘贴抓包文本（含Set-Cookie）- 自动提取并更新
@@ -1736,7 +2134,7 @@ func (b *Bot) HandleBotCommand(args []string) string {
 					b.cfg.Save()
 				}
 			}
-			b.weiboMonitor.AddConfig(b.cfg.BoundGroupID, uid, atAll, "", onNew)
+			b.weiboMonitor.AddConfig(b.cfg.BoundGroupID, nil, uid, atAll, "", onNew)
 			b.weiboMonitor.Start()
 			return fmt.Sprintf("[OK] 添加微博监控: UID=%s, @全体=%v", uid, atAll)
 		}

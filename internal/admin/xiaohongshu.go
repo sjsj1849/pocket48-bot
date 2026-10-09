@@ -16,9 +16,10 @@ var xiaohongshuPanelProfilePattern = regexp.MustCompile(`(?i)/user/profile/([a-z
 var xiaohongshuPanelUserIDPattern = regexp.MustCompile(`^[a-zA-Z0-9]{16,64}$`)
 
 type xiaohongshuPanelSubscription struct {
-	GroupID    int64  `json:"groupId,omitempty"`
-	UserID     string `json:"userId"`
-	ProfileURL string `json:"profileUrl,omitempty"`
+	GroupID    int64    `json:"groupId,omitempty"`
+	TargetIDs  []string `json:"targetIds,omitempty"`
+	UserID     string   `json:"userId"`
+	ProfileURL string   `json:"profileUrl,omitempty"`
 	// Target is the raw panel input: internal user_id, full profile URL, or xhslink short URL.
 	Target          string `json:"target,omitempty"`
 	Name            string `json:"name,omitempty"`
@@ -32,14 +33,15 @@ type xiaohongshuPanelSubscription struct {
 }
 
 type xiaohongshuStoredSubscription struct {
-	UserID          string `json:"user_id"`
-	ProfileURL      string `json:"profile_url,omitempty"`
-	Name            string `json:"name,omitempty"`
-	AtAll           bool   `json:"at_all"`
-	LastNoteID      string `json:"last_note_id,omitempty"`
-	LastNoteTime    int64  `json:"last_note_time,omitempty"`
-	LiveInitialized bool   `json:"live_initialized,omitempty"`
-	LiveActive      bool   `json:"live_active,omitempty"`
+	UserID          string   `json:"user_id"`
+	TargetIDs       []string `json:"targetIds,omitempty"`
+	ProfileURL      string   `json:"profile_url,omitempty"`
+	Name            string   `json:"name,omitempty"`
+	AtAll           bool     `json:"at_all"`
+	LastNoteID      string   `json:"last_note_id,omitempty"`
+	LastNoteTime    int64    `json:"last_note_time,omitempty"`
+	LiveInitialized bool     `json:"live_initialized,omitempty"`
+	LiveActive      bool     `json:"live_active,omitempty"`
 }
 
 type xiaohongshuSubscriptionMap map[string]map[string]*xiaohongshuStoredSubscription
@@ -68,6 +70,7 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 					result = append(result, xiaohongshuPanelSubscription{
 						GroupID:         groupID,
 						UserID:          id,
+						TargetIDs:       item.TargetIDs,
 						ProfileURL:      item.ProfileURL,
 						Name:            item.Name,
 						AtAll:           item.AtAll,
@@ -103,8 +106,13 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 		if resolveInput == "" {
 			resolveInput = body.Target
 		}
+		if body.GroupID <= 0 {
+			if ids := qqGroupIDsFromTargets(body.TargetIDs); len(ids) > 0 {
+				body.GroupID = ids[0]
+			}
+		}
 		if body.GroupID <= 0 || resolveInput == "" {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号，以及小红书个人主页链接 / xhslink 分享链接 / 内部 user_id（不是小红书号）"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群），以及小红书个人主页链接 / xhslink 分享链接 / 内部 user_id（不是小红书号）"})
 			return
 		}
 		// Short red-book number (e.g. 956753385) is NOT the internal user_id used by monitoring.
@@ -139,6 +147,7 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 			item = &xiaohongshuStoredSubscription{UserID: body.UserID}
 		}
 		item.ProfileURL, item.AtAll = body.ProfileURL, body.AtAll
+		item.TargetIDs = body.TargetIDs
 		if item.ProfileURL == "" {
 			item.ProfileURL = "https://www.xiaohongshu.com/user/profile/" + body.UserID
 		}
@@ -162,8 +171,13 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 		if oldG <= 0 {
 			oldG = body.GroupID
 		}
+		if body.GroupID <= 0 {
+			if ids := qqGroupIDsFromTargets(body.TargetIDs); len(ids) > 0 {
+				body.GroupID = ids[0]
+			}
+		}
 		if body.GroupID <= 0 || oldUser == "" || oldG <= 0 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "请填写有效 QQ 群号与 user_id"})
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "请选择投递目标（至少一个 QQ 群）与 user_id"})
 			return
 		}
 		if candidate := strings.TrimSpace(body.UserID); candidate != "" && candidate != oldUser {
@@ -196,6 +210,7 @@ func (s *Server) handleXiaohongshuSubscriptions(w http.ResponseWriter, r *http.R
 			item.UserID = oldUser
 		}
 		item.AtAll = body.AtAll
+		item.TargetIDs = body.TargetIDs
 		if n := strings.TrimSpace(body.Name); n != "" {
 			item.Name = n
 		}

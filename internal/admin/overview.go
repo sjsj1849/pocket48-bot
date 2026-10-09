@@ -8,8 +8,10 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"pocket48-bot/internal/bilibili"
 	"pocket48-bot/internal/instagram"
 	"pocket48-bot/internal/melon"
+	"pocket48-bot/internal/tiktokmonitor"
 	"pocket48-bot/internal/weverse"
 	"runtime"
 	"strconv"
@@ -100,6 +102,10 @@ type overviewFeatureFlags struct {
 	XiaohongshuEnabled bool
 	InstagramEnabled   bool
 	MelonEnabled       bool
+	BilibiliEnabled    bool
+	// TiktokEnabled 2026-10-04 新增，此前总览页完全没有 TikTok 卡片。
+	TiktokEnabled bool
+	FeishuEnabled bool
 }
 
 func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
@@ -129,11 +135,23 @@ func loadOverviewFeatureFlags(configPath string) overviewFeatureFlags {
 	flags.DouyinEnabled = readBool("DOUYIN_ENABLED", true)
 	flags.DouyinIMEnabled = readBool("DOUYIN_IM_ENABLED", true) && flags.DouyinEnabled
 	flags.XiaohongshuEnabled = readBool("XIAOHONGSHU_ENABLED", false)
+	flags.FeishuEnabled = readBool("FEISHU_ENABLED", false)
 	if cfg, err := instagram.LoadSettings(instagram.Dir(configPath)); err == nil {
 		flags.InstagramEnabled = cfg.Enabled
 	}
 	if cfg, err := melon.LoadSettings(melon.Dir(configPath)); err == nil {
 		flags.MelonEnabled = cfg.Enabled
+	}
+	if cfg, err := bilibili.LoadSettings(bilibili.Dir(configPath)); err == nil {
+		flags.BilibiliEnabled = cfg.Enabled
+	}
+	// TikTok：settings.json 缺失时回落读 config.json 的 TIKTOK_ENABLED，
+	// 否则「刚迁移、还没打开过面板」时总览页会凭空少一张卡。
+	flags.TiktokEnabled = flags.DouyinEnabled
+	if cfg, err := tiktokmonitor.LoadSettings(tiktokmonitor.Dir(configPath)); err == nil {
+		flags.TiktokEnabled = cfg.Enabled
+	} else {
+		flags.TiktokEnabled = readBool("TIKTOK_ENABLED", false)
 	}
 	return flags
 }
@@ -203,10 +221,16 @@ func buildOverviewAttention(services []serviceState) []attention {
 			if item.Status == "down" {
 				attentionItems = append(attentionItems, attention{ID: item.ID, Title: item.Name + " 监控异常", Description: item.LastEvent, Action: "查看配置", Target: "config"})
 			}
-		case "napcat":
+		case "outbound":
 			if item.Status == "down" {
 				attentionItems = append(attentionItems, attention{
-					ID: "napcat", Title: "OneBot/QQ 连接中断", Description: item.LastEvent, Action: "查看服务", Target: "services",
+					ID: "outbound", Title: "Gateway 异常", Description: item.LastEvent, Action: "查看服务", Target: "services",
+				})
+			}
+		case "outbound_feishu":
+			if item.Status == "down" {
+				attentionItems = append(attentionItems, attention{
+					ID: item.ID, Title: "飞书消息出口异常", Description: item.LastEvent, Action: "查看配置", Target: "config",
 				})
 			}
 		}
@@ -220,14 +244,26 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		{ID: "bot", Name: "Bot", Subtitle: "主控服务与任务调度", Status: choose(active, "healthy", "down"), StatusText: choose(active, "运行中", "已停止"), Uptime: uptime, Detail: "pocket48-bot.service", LastEvent: "任务调度正常"},
 		{ID: "qchat", Name: "QChat", Subtitle: "口袋48实时消息", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "WebSocket", LastEvent: "等待连接状态"},
 		{ID: "pocket_live", Name: "Live NIM", Subtitle: "口袋48直播礼物与结束事件", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "NIM Chatroom", LastEvent: "等待直播链路状态"},
-		{ID: "napcat", Name: "OneBot / LLOneBot", Subtitle: "QQ 协议适配器", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "127.0.0.1:3001", LastEvent: "等待连接状态"},
+		{ID: "outbound", Name: "Gateway", Subtitle: "多平台投递与适配", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "QQ · OneBot", LastEvent: "等待出口状态"},
 		{ID: "weibo", Name: "Weibo", Subtitle: "微博浏览器认证", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待认证状态"},
 	}
+	if flags.FeishuEnabled {
+		states = append(states, serviceState{ID: "outbound_feishu", Name: "Feishu", Subtitle: "原生富文本、卡片与媒体", Status: "attention", StatusText: "待验证", Uptime: uptime, Detail: "Feishu Open API", LastEvent: "等待首次投递"})
+		for i := range states {
+			if states[i].ID == "outbound" {
+				states[i].Detail = "QQ · 飞书"
+			}
+		}
+	}
 	if flags.DouyinEnabled {
-		states = append(states, serviceState{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"})
+		// ★ 兜底文案改成「待验证」而不是「等待登录状态」（2026-10-07）：
+		//   登录态与健康度是两件事，这里只是**还没在日志窗口里找到健康证据**，
+		//   说成「等待登录」会让人误以为掉登录、去面板反复点登录。
+		states = append(states, serviceState{ID: "douyin", Name: "Douyin", Subtitle: "抖音账号与作品监控", Status: "attention", StatusText: "待验证", Uptime: uptime, Detail: "Browser auth", LastEvent: "尚未在最近日志中确认健康状态"})
 	}
 	if flags.XiaohongshuEnabled {
-		states = append(states, serviceState{ID: "xiaohongshu", Name: "Xiaohongshu", Subtitle: "小红书帖子与开播提醒", Status: "attention", StatusText: "检查中", Uptime: uptime, Detail: "Browser auth", LastEvent: "等待登录状态"})
+		// 同抖音：登录态与健康度是两件事，兜底不要说成「等待登录状态」。
+		states = append(states, serviceState{ID: "xiaohongshu", Name: "Xiaohongshu", Subtitle: "小红书帖子与开播提醒", Status: "attention", StatusText: "待验证", Uptime: uptime, Detail: "Browser auth", LastEvent: "尚未在最近日志中确认健康状态"})
 	}
 	if flags.DouyinIMEnabled {
 		states = append(states, serviceState{ID: "douyin_im", Name: "Douyin IM", Subtitle: "抖音群聊只读连接", Status: "attention", StatusText: "未连接", Uptime: uptime, Detail: "群号 296090848505", LastEvent: "等待网页 IM 初始化"})
@@ -261,24 +297,36 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		case strings.Contains(line, "[NIM-room] QChat connected"):
 			setLatest("qchat", "healthy", "运行中", "WebSocket 已连接")
 		case strings.Contains(line, "Connected to NapCat successfully"):
-			setLatest("napcat", "healthy", "运行中", "会话连接正常")
+			setLatest("outbound", "healthy", "运行中", "QQ / OneBot 适配器连接正常")
 		case strings.Contains(line, "NapCat read error (disconnected?)"):
-			setLatest("napcat", "down", "连接中断", "WebSocket 已断开，正在自动重连")
+			setLatest("outbound", "down", "QQ 出口中断", "OneBot WebSocket 已断开，正在自动重连")
 		case strings.Contains(line, "Failed to connect to NapCat"):
-			setLatest("napcat", "down", "连接中断", "无法连接 OneBot/llbot（127.0.0.1:3001），正在重试")
+			setLatest("outbound", "down", "QQ 出口中断", "无法连接 OneBot/llbot（127.0.0.1:3001），正在重试")
 		case strings.Contains(line, "[NAPCAT] Sending "):
-			setLatest("napcat", "healthy", "运行中", "消息发送链路正常")
+			setLatest("outbound", "healthy", "运行中", "QQ 消息投递链路正常")
 		case strings.Contains(line, "[NapCat] status=disconnected"):
-			setLatest("napcat", "down", "连接中断", "OneBot/llbot 已断开，正在自动重连")
+			setLatest("outbound", "down", "QQ 出口中断", "OneBot/llbot 已断开，正在自动重连")
 		case strings.Contains(line, "[NapCat] status=connected"):
-			setLatest("napcat", "healthy", "运行中", "OneBot/llbot 会话已恢复")
+			setLatest("outbound", "healthy", "运行中", "QQ / OneBot 适配器会话已恢复")
+		case strings.Contains(line, "[Outbound:feishu] status=send_failed"), strings.Contains(line, "[Outbound:feishu] status=media_failed"):
+			setLatest("outbound_feishu", "down", "投递异常", "飞书 API 或媒体上传失败")
+			setLatest("outbound", "attention", "部分异常", "Feishu 出口异常，QQ 出口继续运行")
+		case strings.Contains(line, "[Outbound:feishu] status=healthy"):
+			setLatest("outbound_feishu", "healthy", "运行中", "飞书消息投递正常")
+		case strings.Contains(line, "[Outbound:feishu] status=configured"):
+			setLatest("outbound_feishu", "healthy", "已配置", "Feishu 出口已启用，等待首次投递")
 		case strings.Contains(line, "[Weibo-auth] status=healthy"):
 			setLatest("weibo", "healthy", "已认证", "认证状态已刷新")
-		// 抖音健康以作品监控 API 为准：能 HTTP 扫作品且 cookie=yes 即健康。
-		// status=healthy/ready 仍识别，但会被高频 works scan 日志挤出 5000 行窗口。
-		case strings.Contains(line, "douyin works scan via HTTP") && strings.Contains(line, "cookie=yes"):
-			setLatest("douyin", "healthy", "运行中", "作品监控 API 正常（HTTP + Cookie）")
-		case strings.Contains(line, "douyin works scan via HTTP") && strings.Contains(line, "cookie=no"):
+		// 抖音健康以作品监控 API 为准：能扫作品且 cookie=yes 即健康。
+		//
+		// ★ 2026-10-07 修正：原来要求日志含 "douyin works scan via HTTP"，
+		//   但实际文案是「douyin works scan accounts=N cookie=yes」—— 少了 "via HTTP"
+		//   ⇒ 一条都匹配不上，卡片永远停在兜底的「等待登录状态」。
+		//   现在只按 "douyin works scan" + cookie 判定，不绑定具体文案措辞
+		//   （sidecar 改文案就会再次静默失效，这类匹配必须尽量宽松）。
+		case strings.Contains(line, "douyin works scan") && strings.Contains(line, "cookie=yes"):
+			setLatest("douyin", "healthy", "运行中", "作品监控正常（Cookie 有效）")
+		case strings.Contains(line, "douyin works scan") && strings.Contains(line, "cookie=no"):
 			setLatest("douyin", "attention", "待登录", "作品扫描无 Cookie，需浏览器登录")
 		case strings.Contains(line, "[Douyin] status=healthy"):
 			setLatest("douyin", "healthy", "已登录", "浏览器账号登录态有效")
@@ -333,10 +381,20 @@ func buildServiceStates(lines []string, flags overviewFeatureFlags) []serviceSta
 		igCard.Uptime = uptime
 		states = append(states, *igCard)
 	}
+	if flags.BilibiliEnabled {
+		biliCard := bilibiliService(flags.ConfigPath, time.Now())
+		biliCard.Uptime = uptime
+		states = append(states, *biliCard)
+	}
 	if flags.MelonEnabled {
 		melonCard := melonService(flags.ConfigPath, time.Now())
 		melonCard.Uptime = uptime
 		states = append(states, *melonCard)
+	}
+	if flags.TiktokEnabled {
+		ttCard := tiktokService(flags.ConfigPath, time.Now())
+		ttCard.Uptime = uptime
+		states = append(states, *ttCard)
 	}
 	card := xService(flags.ConfigPath, time.Now())
 	card.Uptime = uptime
@@ -729,7 +787,7 @@ func overviewActivity(lines []string, services []serviceState, limit int) []acti
 	// Keep the latest actual Weverse scan visible even when other platforms emit
 	// enough heartbeat messages to fill the recent log window.
 	for _, card := range services {
-		if (card.ID != "weverse" && card.ID != "x" && card.ID != "instagram") || card.LastTime == "—" {
+		if (card.ID != "weverse" && card.ID != "x" && card.ID != "instagram" && card.ID != "bilibili") || card.LastTime == "—" {
 			continue
 		}
 		level := "success"

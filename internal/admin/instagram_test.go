@@ -29,10 +29,19 @@ func TestWeversePostPasswordsRedacted(t *testing.T) {
 	s := &Server{}
 	s.opts.ConfigPath = filepath.Join(t.TempDir(), "config.json")
 	_ = weverse.Write(weverse.Dir(s.opts.ConfigPath), "post-passwords.json", []weverse.PostPassword{{PostID: "1-123", URL: "https://weverse.io/a/artist/1-123", Password: "secret-password"}})
+	history, err := weverse.OpenHistory(weverse.Dir(s.opts.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = history.Record([]weverse.Event{
+		{ID: "post:1-123", PostID: "1-123", Kind: "post", CommunityID: 235, MemberID: "a", Time: time.Now().UnixMilli(), PasswordProtected: true},
+		{ID: "post:1-456", PostID: "1-456", Kind: "post", CommunityID: 235, MemberID: "a", Time: time.Now().UnixMilli(), PasswordProtected: true, URL: "https://weverse.io/a/artist/1-456"},
+	}, "")
+	history.Close()
 	w := httptest.NewRecorder()
 	s.handleWeversePostPasswords(w, httptest.NewRequest(http.MethodGet, "/api/weverse/post-passwords", nil))
-	if w.Code != 200 || strings.Contains(w.Body.String(), "secret-password") || !strings.Contains(w.Body.String(), "1-123") {
-		t.Fatal("password leaked")
+	if w.Code != 200 || strings.Contains(w.Body.String(), "secret-password") || strings.Contains(w.Body.String(), "1-123") || !strings.Contains(w.Body.String(), "1-456") {
+		t.Fatal("password leaked or pending list incorrect", w.Body.String())
 	}
 }
 

@@ -89,7 +89,74 @@ func (c *Client) Search(ctx context.Context, q string) ([]Community, error) {
 	}
 	return result, nil
 }
+
+// membersCacheTTL 是成员名单的兜底刷新间隔。名单本身几乎不变，但保留一个
+// 长 TTL 兜底，以便新成员加入 / 改名后仍能自动生效。
+const membersCacheTTL = 10 * time.Minute
+
+type membersCacheEntry struct {
+	at   time.Time
+	list []Member
+}
+
+// cachedMembers 返回新鲜缓存的成员名单；没有则返回 nil。
+// 缓存挂在 Client 上（而非包级全局），这样不同 Client 互不干扰——
+// 每个社区一个 Client 是既有结构，测试里多个桩 Client 也能各自独立。
+func (c *Client) cachedMembers(id int64) []Member {
+	c.membersMu.Lock()
+	defer c.membersMu.Unlock()
+	entry, ok := c.members[id]
+	if !ok || time.Since(entry.at) > membersCacheTTL || len(entry.list) == 0 {
+		return nil
+	}
+	return entry.list
+}
+
+func (c *Client) storeMembersCache(id int64, list []Member) {
+	c.membersMu.Lock()
+	defer c.membersMu.Unlock()
+	if c.members == nil {
+		c.members = map[int64]*membersCacheEntry{}
+	}
+	c.members[id] = &membersCacheEntry{at: time.Now(), list: list}
+}
+
+// InvalidateMembers 丢弃该 Client 对某社区的成员名单缓存，下一次会回源。
+func (c *Client) InvalidateMembers(id int64) {
+	c.membersMu.Lock()
+	defer c.membersMu.Unlock()
+	delete(c.members, id)
+}
+
+// PrimeMembersFromHistory 用本地历史库里的成员名单预热缓存。bot 启动时立刻可用，
+// 无需等待一次网络请求；缓存过期后仍会回源刷新。
+func (c *Client) PrimeMembersFromHistory(h *History, id int64) bool {
+	if h == nil {
+		return false
+	}
+	list, err := h.Members(id)
+	if err != nil || len(list) == 0 {
+		return false
+	}
+	c.storeMembersCache(id, list)
+	return true
+}
+
+// Members 返回社区成员名单。名单变化极少，因此默认走缓存（TTL 10 分钟）；
+// 需要强制刷新时调用 InvalidateMembers。
 func (c *Client) Members(ctx context.Context, id int64) ([]Member, error) {
+	if list := c.cachedMembers(id); list != nil {
+		return list, nil
+	}
+	list, err := c.fetchMembers(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	c.storeMembersCache(id, list)
+	return list, nil
+}
+
+func (c *Client) fetchMembers(ctx context.Context, id int64) ([]Member, error) {
 	var data any
 	e := c.call(ctx, fmt.Sprintf("/member/v1.1/community-%d/artistMembers?fieldSet=artistMembersV1&filterType=MOMENT", id), true, &data)
 	if e != nil {

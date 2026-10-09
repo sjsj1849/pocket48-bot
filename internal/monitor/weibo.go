@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"math/rand"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/outbound"
 )
 
 const (
@@ -26,7 +28,7 @@ const (
 )
 
 type WeiboMonitor struct {
-	napcat                 *napcat.Client
+	outbound               outbound.Sender
 	configs                map[int64]map[string]*WeiboConfig
 	superPostConfigs       map[int64]map[string]*WeiboSuperPostMonitorConfig
 	mu                     sync.RWMutex
@@ -43,6 +45,17 @@ type WeiboMonitor struct {
 	lastNeg100LogAt        map[string]time.Time
 	backoffLevel           map[string]int
 	nextCheckAt            map[string]time.Time
+
+	// crossGate / crossRec 是跨平台去重的判定与登记钩子，由 logic 层
+	// 在启动时通过 SetCrossDedupe 注入。
+	//
+	// ★ 为什么用回调注入而不是直接 import logic 包：
+	//   logic → monitor 是既有依赖方向（logic/bot.go 要构造
+	//   monitor.WeiboMonitor），反向 import 会造成循环依赖。
+	//   而微博的分发链路（DispatchPerfectWeibo）全部在 monitor 包内
+	//   自调用，没有任何入口在 logic 层，所以在 monitor 上挂钩子最干净。
+	crossGate CrossDedupeGate
+	crossRec  CrossDedupeRecorder
 }
 
 const weiboCookieAlertCooldown = 6 * time.Hour
@@ -52,6 +65,7 @@ const weiboMaxBackoffLevel = 4
 
 type WeiboConfig struct {
 	GroupID     int64
+	Targets     []outbound.Target
 	UID         string
 	ContainerID string
 	LastID      string
@@ -70,6 +84,175 @@ type WeiboSuperPostMonitorConfig struct {
 	Enabled        bool
 	LastPostID     string
 	OnNewSuperPost func(uid, oid, lastPostID string)
+}
+
+// weiboSeconds 是能同时吃下 JSON number 与 string 的秒数类型。
+//
+// ★ 为什么必须容错（2026-10-04 实测）：
+// media_info.duration 在同一条时间线里**类型不统一** ——
+// 短视频给 21.479（number），长视频给 "232"（string）。
+// 直接声明成 float64 时，遇到那条长视频会让 json.Unmarshal 整条报错，
+// 于是**整条微博卡片变成空**（页面完全推不出去），而不是只丢一个时长。
+//
+// 微博的二态字段不止一个（object_type 有数字与字符串两种、
+// page_pic 有时是 URL 字符串有时是 {url:...} 对象）。新加解析代码时
+// 一律按「二态字段会让整个响应解析失败」这条来处理。
+type weiboSeconds float64
+
+func (s *weiboSeconds) UnmarshalJSON(data []byte) error {
+	raw := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if raw == "" || raw == "null" {
+		*s = 0
+		return nil
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || f <= 0 {
+		*s = 0
+		return nil
+	}
+	*s = weiboSeconds(f)
+	return nil
+}
+
+// CrossDedupeGate 判定「别的平台是否更早推过同一条」。
+//
+// 参数与 dedupe.Index.MatchWithAuthor 同构（标题、作者、时长秒、发布时间毫秒）。
+// 返回 true 表示应跳过本次推送。
+type CrossDedupeGate func(title, author string, seconds int, publishedAtMS int64) bool
+
+// CrossDedupeRecorder 登记本平台的首发，供其它平台比对。
+type CrossDedupeRecorder func(title, author string, seconds int, publishedAtMS int64)
+
+// SetCrossDedupe 注入去重判定与登记函数，由 logic 层在启动时调用一次。
+//
+// 传 nil 表示不去重（等价于下线该功能）。未注入时所有微博照常推送，
+// 不会静默变成漏推 —— 装配遗漏的最坏后果只是多推。
+func (m *WeiboMonitor) SetCrossDedupe(gate CrossDedupeGate, rec CrossDedupeRecorder) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.crossGate = gate
+	m.crossRec = rec
+	m.mu.Unlock()
+}
+
+// weiboCardSeconds 取卡片里第一条视频的时长（秒），取不到返回 0。
+//
+// 时长是跨平台去重的二级判定维度（作者名 + 时长差 <= 3s），
+// 为 0 时该维度自动关闭，只按标题指纹判 —— 保守，宁可多推也不漏推。
+//
+// 只取第一条：实测 Hearts2Hearts 的短视频都是单视频条目。
+func weiboCardSeconds(card WeiboCard) int {
+	if card.PageInfo != nil {
+		if s := float64(card.PageInfo.MediaInfo.Duration); s > 0 {
+			return int(math.Round(s))
+		}
+	}
+	if card.MixMediaInfo != nil {
+		for _, item := range card.MixMediaInfo.Items {
+			if item.Data.PageInfo != nil {
+				if s := float64(item.Data.PageInfo.MediaInfo.Duration); s > 0 {
+					return int(math.Round(s))
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// weiboCardCreatedAtMS 把 created_at 解析成毫秒时间戳。
+//
+// 实测格式："Sun Aug 09 23:03:20 +0800 2026"。
+// 解析失败返回 0 —— 此时去重只与索引里已有记录比对，不会误判。
+func weiboCardCreatedAtMS(card WeiboCard) int64 {
+	raw := strings.TrimSpace(card.CreatedAt)
+	if raw == "" {
+		return 0
+	}
+	for _, layout := range []string{
+		"Mon Jan 2 15:04:05 -0700 2006",
+		"Mon Jan 02 15:04:05 -0700 2006",
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UnixMilli()
+		}
+	}
+	return 0
+}
+
+// weiboDedupeTitle 是去重用的标题清洗。
+//
+// ★ 必须走**与展示侧完全一致**的清洗链条（2026-10-04 测试抓出来的）。
+//
+//	展示侧 formatWeiboCleanText 是：
+//	    stripHTML -> removeWeiboSuffix -> removeWeiboTailNoise
+//	    -> stripUnsupportedQQRunes
+//	去重侧原来只有 stripHTML + stripUnsupportedQQRunes，
+//	漏了中间两步，于是真实正文 `明天见kk ♡<a>全文链接</a>`
+//	算出指纹 `明天见kk全文链接`，与其它平台的 `明天见嘻嘻` 对不上 ——
+//	结果就是「同一条短片在四个平台各推一遍」里微博那次仍然漏判。
+//
+//	教训：去重用的文本必须复用展示侧的清洗函数，不要另写一套。
+//	两套口径迟早会漂移，而漂移的表现是「静默漏判」，最难发现。
+//
+// 独立成函数（而不是内联在 crossDecideWeibo 里）是为了可测：
+// 内联版在 gate 未注入时会提前短路，清洗逻辑根本执行不到，
+// 测试只能拿到空串 —— 于是「标题对不对」这个断言永远测不到真东西。
+func (m *WeiboMonitor) weiboDedupeTitle(card WeiboCard) string {
+	if m == nil {
+		return ""
+	}
+	raw := m.resolveWeiboText(card, card.MblogID)
+	title := stripHTML(raw)
+	title = removeWeiboSuffix(title, card.User.ScreenName)
+	title = removeWeiboTailNoise(title)
+	title = stripUnsupportedQQRunes(title)
+	return strings.TrimSpace(title)
+}
+
+// crossDecideWeibo 判定这条微博是否已被别的平台更早推过。
+//
+// 返回的 title 是清洗后的正文，供调用方登记时复用（避免清洗两遍、
+// 也避免两边算出的指纹不一致）。
+//
+// 无回调（未注入）时一律放行。任何装配问题都只会退化成「多推」。
+func (m *WeiboMonitor) crossDecideWeibo(card WeiboCard) (title string, skip bool) {
+	if m == nil {
+		return "", false
+	}
+	title = m.weiboDedupeTitle(card)
+	if title == "" {
+		return "", false
+	}
+
+	m.mu.RLock()
+	gate := m.crossGate
+	m.mu.RUnlock()
+	if gate == nil {
+		return title, false
+	}
+
+	return title, gate(title,
+		strings.TrimSpace(card.User.ScreenName),
+		weiboCardSeconds(card),
+		weiboCardCreatedAtMS(card))
+}
+
+// crossRecordWeibo 登记这条微博的首发，供抖音/B站/TikTok 比对。
+func (m *WeiboMonitor) crossRecordWeibo(title string, card WeiboCard) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	rec := m.crossRec
+	m.mu.RUnlock()
+	if rec == nil || strings.TrimSpace(title) == "" {
+		return
+	}
+	rec(title, strings.TrimSpace(card.User.ScreenName),
+		weiboCardSeconds(card), weiboCardCreatedAtMS(card))
 }
 
 type WeiboCard struct {
@@ -95,43 +278,29 @@ type WeiboCard struct {
 	Title *struct {
 		Text string `json:"text"`
 	} `json:"title,omitempty"`
-	PageInfo *struct {
-		Type      string `json:"type"`
-		VideoURL  string `json:"video_url"`
-		MediaInfo struct {
-			StreamURL   string `json:"stream_url"`
-			StreamURLHD string `json:"stream_url_hd"`
-			MP4HDURL    string `json:"mp4_hd_url"`
-		} `json:"media_info"`
-		PageTitle string `json:"page_title"`
-		PagePic   struct {
-			URL string `json:"url"`
-		} `json:"page_pic"`
-	} `json:"page_info"`
+	// ★ 2026-10-04：由匿名结构体换成具名类型 weiboPageInfoFields。
+	//   这份形状此前在项目里被手抄了 5 份（这里 / MixMediaInfo 两处 /
+	//   fetchMWeiboCardByID 的局部 pi / 测试里一份），加字段漏改任意一处
+	//   都会出事 —— 前后改了 5 轮编译才对齐。
+	PageInfo     *weiboPageInfoFields `json:"page_info"`
 	MixMediaInfo *struct {
 		Items []struct {
 			Type string `json:"type"`
 			Data struct {
-				Type     string `json:"type"`
-				VideoURL string `json:"video_url"`
+				Type     string         `json:"type"`
+				VideoURL string         `json:"video_url"`
+				URLs     weiboVideoURLs `json:"urls"`
 				PageInfo *struct {
-					Type      string `json:"type"`
-					VideoURL  string `json:"video_url"`
-					MediaInfo struct {
-						StreamURL   string `json:"stream_url"`
-						StreamURLHD string `json:"stream_url_hd"`
-						MP4HDURL    string `json:"mp4_hd_url"`
-					} `json:"media_info"`
-					PagePic struct {
+					Type      string         `json:"type"`
+					VideoURL  string         `json:"video_url"`
+					MediaInfo weiboMediaInfo `json:"media_info"`
+					URLs      weiboVideoURLs `json:"urls"`
+					PagePic   struct {
 						URL string `json:"url"`
 					} `json:"page_pic"`
 				} `json:"page_info"`
-				MediaInfo struct {
-					StreamURL   string `json:"stream_url"`
-					StreamURLHD string `json:"stream_url_hd"`
-					MP4HDURL    string `json:"mp4_hd_url"`
-				} `json:"media_info"`
-				PagePic struct {
+				MediaInfo weiboMediaInfo `json:"media_info"`
+				PagePic   struct {
 					URL string `json:"url"`
 				} `json:"page_pic"`
 				PicInfo struct {
@@ -169,10 +338,10 @@ type WeiboContainerResponse struct {
 	} `json:"data"`
 }
 
-func NewWeiboMonitor(napcat *napcat.Client) *WeiboMonitor {
+func NewWeiboMonitor(sender outbound.Sender) *WeiboMonitor {
 	rand.Seed(time.Now().UnixNano())
 	return &WeiboMonitor{
-		napcat:              napcat,
+		outbound:            sender,
 		configs:             make(map[int64]map[string]*WeiboConfig),
 		superPostConfigs:    make(map[int64]map[string]*WeiboSuperPostMonitorConfig),
 		stopCh:              make(chan struct{}),
@@ -452,9 +621,21 @@ func normalizeContainerID(uid, containerID string) string {
 }
 
 // Reconfigure replaces all monitored weibo subscriptions with the new set.
-func (m *WeiboMonitor) AddConfig(groupID int64, uid string, atAll bool, lastID string, onNew func(string, string)) error {
+// sendToTargets delivers to the explicit target list. An empty list means the
+// subscription has no destination configured, so nothing is sent.
+func (m *WeiboMonitor) sendToTargets(config *WeiboConfig, content interface{}) {
+	if m == nil || m.outbound == nil {
+		return
+	}
+	for _, target := range config.Targets {
+		m.outbound.Send(target, content)
+	}
+}
+
+func (m *WeiboMonitor) AddConfig(groupID int64, targets []outbound.Target, uid string, atAll bool, lastID string, onNew func(string, string)) error {
 	config := &WeiboConfig{
 		GroupID:    groupID,
+		Targets:    targets,
 		UID:        uid,
 		AtAll:      atAll,
 		LastID:     lastID,
@@ -714,17 +895,84 @@ type weiboPicInfo struct {
 	} `json:"largest,omitempty"`
 }
 
+// weiboVideoURLs 是 page_info.urls。
+//
+// ★★ 这里有个非常反直觉的坑，2026-10-04 实测确认：
+//
+//	urls.mp4_720p_mp4 -> 720x1564  （真高清）
+//	urls.mp4_hd_mp4   -> 540x1172
+//	media_info.stream_url_hd -> 540x1172  ← 名字叫 hd，其实也是低清
+//
+// 所以「HD」这个词在微博接口里完全不可信，**只有 mp4_720p_mp4 是高清**。
+// 早期只挑 media_info.* 导致长期发 540P，就是踩了这个坑。
+type weiboVideoURLs struct {
+	MP4720p string `json:"mp4_720p_mp4"`
+	MP4HD   string `json:"mp4_hd_mp4"`
+	MP4LD   string `json:"mp4_ld_mp4"`
+}
+
 type weiboPageInfo struct {
 	Type      interface{}   `json:"type"`
 	PageTitle string        `json:"page_title"`
 	PagePic   *weiboPagePic `json:"page_pic,omitempty"`
-	MediaInfo *struct {
-		StreamURL   string `json:"stream_url"`
-		StreamURLHD string `json:"stream_url_hd"`
-		MP4HDURL    string `json:"mp4_hd_url"`
-		ReplayLD    string `json:"replay_ld"`
-		ReplayHD    string `json:"replay_hd"`
-	} `json:"media_info,omitempty"`
+	// ★ 2026-10-04：原先是手抄的匿名 struct，现在统一用 weiboMediaInfo。
+	//   这个匿名副本自己多出来的 ReplayLD / ReplayHD 直接丢掉：
+	//   全项目**没有任何代码读这两个键**，它们也不在实测的 media_info
+	//   键集合里（实测只有 duration / stream_url / stream_url_hd）。
+	MediaInfo *weiboMediaInfo `json:"media_info,omitempty"`
+	URLs      weiboVideoURLs  `json:"urls,omitempty"`
+}
+
+// weiboMediaInfo 是 page_info.media_info。
+//
+// ★ 2026-10-04 抽出：这份结构体此前在项目里被**手抄了 7 份**
+//
+//	（WeiboCard.PageInfo 两处、MixMediaInfo 两处、weiboPageInfo、
+//	fetchMWeiboCardByID 的局部 pi、测试里又一份）。
+//	加字段漏改任意一处的后果分两种：
+//	- 与 WeiboCard.PageInfo 之间要赋值 → 编译失败（还算好）
+//	- 纯字面量比较 → 结构相同判定兼容 → **静默丢字段，无任何报错**
+//	前后改了 4 轮编译才对齐。以后加字段只改这一处。
+//
+// ★ 字段名的坑（实测）：微博的「HD」完全不可信 ——
+//
+//	media_info.stream_url_hd 实际只有 540x1172，
+//	唯一的高清档是 urls.mp4_720p_mp4（720x1564）。
+type weiboMediaInfo struct {
+	StreamURL   string `json:"stream_url"`
+	StreamURLHD string `json:"stream_url_hd"`
+	MP4HDURL    string `json:"mp4_hd_url"`
+	// ReplayHD / ReplayLD 是**直播回放**的地址。
+	//
+	// ★ 别当成冗余字段删掉（2026-10-04 差点删了）：
+	//   短视频有 urls.mp4_720p_mp4 高清档，而直播回放**没有** 720p，
+	//   fetchMWeiboCardByID 里正是靠 replay_hd -> replay_ld 兜底。
+	//   实测短视频的 media_info 里没有这两个键，所以看短时间线像是没人用，
+	//   容易误判 —— 冷门分支就是这样藏的。
+	ReplayLD string `json:"replay_ld"`
+	ReplayHD string `json:"replay_hd"`
+	// Duration 是视频时长（秒），跨平台去重的判定维度之一（2026-10-04 新增）。
+	//
+	// ★ 类型不统一（实测）：短视频给 21.479（number），长视频给 "232"（string）。
+	// 用 weiboSeconds 容错，见该类型注释 —— 直接声明 float64 会让
+	// **整条响应解析失败**，页面完全推不出去。
+	Duration weiboSeconds `json:"duration"`
+}
+
+// weiboPageInfoFields 是 page_info 的通用形状。
+//
+// WeiboCard.PageInfo 与 fetchMWeiboCardByID 里的局部变量都用它，
+// 两者之间可以直接赋值 —— 这正是当初漏改 media_info.Duration 时
+// 在 `card.PageInfo = &pi` 处编译报错的地方。
+type weiboPageInfoFields struct {
+	Type      string         `json:"type"`
+	VideoURL  string         `json:"video_url"`
+	MediaInfo weiboMediaInfo `json:"media_info"`
+	URLs      weiboVideoURLs `json:"urls"`
+	PageTitle string         `json:"page_title"`
+	PagePic   struct {
+		URL string `json:"url"`
+	} `json:"page_pic"`
 }
 
 // weiboPagePic 兼容 page_pic 字段可能是字符串（URL）或对象 {url:...} 的情况
@@ -889,45 +1137,60 @@ func convertWeiboPostToCard(post *weiboMymblogPost, uid string) *WeiboCard {
 
 	// 转换视频/页面信息
 	if post.PageInfo != nil {
-		pi := struct {
-			Type      string `json:"type"`
-			VideoURL  string `json:"video_url"`
-			MediaInfo struct {
-				StreamURL   string `json:"stream_url"`
-				StreamURLHD string `json:"stream_url_hd"`
-				MP4HDURL    string `json:"mp4_hd_url"`
-			} `json:"media_info"`
-			PageTitle string `json:"page_title"`
-			PagePic   struct {
-				URL string `json:"url"`
-			} `json:"page_pic"`
-		}{
+		// ★ 这份内联结构体是 WeiboCard.PageInfo 的**手工副本**
+		//   （项目里同形状的 page_info 已经复制了四份：
+		//   WeiboCard.PageInfo / MixMediaInfo.Items[].Data.PageInfo /
+		//   weiboPageInfo / 这里的 pi）。加字段时必须四处同步，
+		//   漏一处就在 `card.PageInfo = &pi` 处编译失败。
+		//
+		//   2026-10-04 为跨平台去重补 Duration 就是这么踩到的。
+		//   长期应当抽成具名类型（weiboCardPageInfo），但那是独立的重构，
+		//   混在功能改动里会放大回归面 —— 这里只把四处补齐并加注释标记。
+		// ★ 这份结构体原先也是手抄的（WeiboCard.PageInfo 的副本），
+		//   给 media_info 加 Duration 时必须两处同步，漏一处就在
+		//   下面 `card.PageInfo = &pi` 处编译失败。现在统一用具名类型。
+		pi := weiboPageInfoFields{
 			Type:      fmt.Sprintf("%v", post.PageInfo.Type),
 			PageTitle: post.PageInfo.PageTitle,
 		}
 		if post.PageInfo.PagePic != nil {
 			pi.PagePic.URL = post.PageInfo.PagePic.URL
 		}
+		// urls.mp4_720p_mp4 是实测唯一的高清档，必须最先考虑。
+		// 放在 media_info 之前，因为 media_info 里那几个字段全是 540P。
+		pi.URLs = post.PageInfo.URLs
+		videoURL := strings.TrimSpace(post.PageInfo.URLs.MP4720p)
+
 		if post.PageInfo.MediaInfo != nil {
-			// 优先用 replay 地址（直播回放），其次 stream_url
-			videoURL := post.PageInfo.MediaInfo.ReplayHD
+			// 直播回放没有 720p 档，此时才按 replay -> stream 的顺序退。
 			if videoURL == "" {
-				videoURL = post.PageInfo.MediaInfo.ReplayLD
+				videoURL = strings.TrimSpace(post.PageInfo.MediaInfo.ReplayHD)
 			}
 			if videoURL == "" {
-				videoURL = post.PageInfo.MediaInfo.StreamURL
+				videoURL = strings.TrimSpace(post.PageInfo.MediaInfo.ReplayLD)
 			}
 			if videoURL == "" {
-				videoURL = post.PageInfo.MediaInfo.StreamURLHD
+				videoURL = strings.TrimSpace(post.PageInfo.MediaInfo.StreamURLHD)
 			}
 			if videoURL == "" {
-				videoURL = post.PageInfo.MediaInfo.MP4HDURL
+				videoURL = strings.TrimSpace(post.PageInfo.MediaInfo.MP4HDURL)
 			}
-			pi.VideoURL = videoURL
+			if videoURL == "" {
+				videoURL = strings.TrimSpace(post.PageInfo.MediaInfo.StreamURL)
+			}
 			pi.MediaInfo.StreamURL = post.PageInfo.MediaInfo.StreamURL
 			pi.MediaInfo.StreamURLHD = post.PageInfo.MediaInfo.StreamURLHD
 			pi.MediaInfo.MP4HDURL = post.PageInfo.MediaInfo.MP4HDURL
+			// 直播回放地址也要搬过来，否则与上面选出来的 videoURL 不一致。
+			pi.MediaInfo.ReplayLD = post.PageInfo.MediaInfo.ReplayLD
+			pi.MediaInfo.ReplayHD = post.PageInfo.MediaInfo.ReplayHD
+			// ★ 时长也要搬过来，否则 weiboPageInfo 解析到的 duration
+			// 在转成 WeiboCard 的路上被丢掉，去重二级判定永远拿不到时长。
+			pi.MediaInfo.Duration = post.PageInfo.MediaInfo.Duration
 		}
+		// 注意：weiboPageInfo 没有 VideoURL 字段，且实测 page_info.video_url
+		// 本身恒为空串，所以这里不需要再回退它。
+		pi.VideoURL = videoURL
 		card.PageInfo = &pi
 	}
 
@@ -1219,30 +1482,48 @@ func (m *WeiboMonitor) sendFallbackWeiboLink(config *WeiboConfig, cardID string)
 		"[微博监控降级模式]\n检测到新微博（API受限，已走网页回退）\nhttps://weibo.com/%s/%s\n%s",
 		config.UID, cardID, time.Now().Format("2006-01-02 15:04:05"),
 	)))
-	m.napcat.SendGroupMessage(config.GroupID, segments)
+	m.sendToTargets(config, segments)
 }
 
 func (m *WeiboMonitor) DispatchPerfectWeibo(config *WeiboConfig, card WeiboCard, cardID string) {
 	log.Printf("[DEBUG] DispatchPerfectWeibo called for group %d", config.GroupID)
+
+	// ★ 2026-10-04 接入跨平台去重。
+	//
+	// 放在最前面：跳过时必须**一条消息都不发**，而不是只跳视频 ——
+	// 否则会出现「文字推了、视频没推」的半截状态，比完全重复更让人困惑。
+	//
+	// 判定在 monitor 包内无法直接调 dedupe.Index（会与 logic 成环），
+	// 因此由 logic 层通过 SetCrossDedupe 注入 gate/rec 两个闭包。
+	title, skip := m.crossDecideWeibo(card)
+	if skip {
+		log.Printf("[Weibo] 跨平台去重命中，别的平台更早推过同一条，跳过 cardID=%s uid=%s title=%q",
+			cardID, config.UID, title)
+		return
+	}
+	// 推了就登记首发，供抖音/B站/TikTok 反向比对。
+	m.crossRecordWeibo(title, card)
+
 	// 1. 发送文字正文+大图（正文内直接合并微博链接）
 	textMsg := m.formatWeiboCleanText(card, cardID, config.AtAll, config.UID)
 	log.Printf("[DEBUG] Sending weibo text: %+v", textMsg)
-	m.napcat.SendGroupMessage(config.GroupID, textMsg)
+	m.sendToTargets(config, textMsg)
 
 	// 2. 发送视频窗口（支持多视频）
 	videos := collectWeiboVideos(card)
 	for i, video := range videos {
 		videoSeg := napcat.VideoSegment(video.URL, video.Cover)
-		m.napcat.SendGroupMessage(config.GroupID, []napcat.MessageSegment{videoSeg})
+		m.sendToTargets(config, []napcat.MessageSegment{videoSeg})
 		log.Printf("[DEBUG] Sent weibo video %d/%d: %s", i+1, len(videos), video.URL)
 	}
 }
 
 func (m *WeiboMonitor) formatWeiboCleanText(card WeiboCard, cardID string, atAll bool, uid string) []napcat.MessageSegment {
 	var segments []napcat.MessageSegment
-	// Keep the mention with the header; a standalone newline can render as an empty top row in QQ.
+	// @全体成员 独立成行：napcat 的 AtSegment 后若不跟换行，QQ 会把 @ 与紧跟的
+	// 文本段拼成同一行（"@全体成员【名字|微博】"）。与小红书/抖音保持一致。
 	if atAll {
-		segments = append(segments, napcat.AtSegment("all"))
+		segments = append(segments, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
 	header := fmt.Sprintf("【%s|微博】\n", card.User.ScreenName)
 	segments = append(segments, napcat.TextSegment(header))
@@ -1284,7 +1565,7 @@ func (m *WeiboMonitor) sendWeiboShareCard(groupID int64, card WeiboCard, uid str
 	msg := fmt.Sprintf("🔗 微博链接：\n%s", jumpURL)
 
 	fmt.Printf("[Weibo] Sending plain link to group %d: %s\n", groupID, jumpURL)
-	m.napcat.SendGroupMessage(groupID, napcat.TextSegment(msg))
+	outbound.SendGroup(m.outbound, groupID, napcat.TextSegment(msg))
 }
 
 func (m *WeiboMonitor) checkWeiboSuperPostForConfig(config *WeiboSuperPostMonitorConfig) {
@@ -1667,11 +1948,16 @@ func collectWeiboVideos(card WeiboCard) []weiboVideo {
 	}
 
 	if card.PageInfo != nil {
+		// ★ urls.mp4_720p_mp4 必须排第一。实测 media_info 里那几个
+		//   （含名字叫 stream_url_hd 的）全是 540x1172，只有它是 720x1564。
 		videoURL := pickBestWeiboVideoURL(
+			card.PageInfo.URLs.MP4720p,
 			card.PageInfo.VideoURL,
+			card.PageInfo.URLs.MP4HD,
 			card.PageInfo.MediaInfo.StreamURLHD,
 			card.PageInfo.MediaInfo.MP4HDURL,
 			card.PageInfo.MediaInfo.StreamURL,
+			card.PageInfo.URLs.MP4LD,
 		)
 		if videoURL != "" && (isVideoTypeLabel(card.PageInfo.Type) || looksLikeVideoURL(videoURL)) {
 			appendVideo(videoURL, card.PageInfo.PagePic.URL)
@@ -1681,17 +1967,23 @@ func collectWeiboVideos(card WeiboCard) []weiboVideo {
 	if card.MixMediaInfo != nil {
 		for _, item := range card.MixMediaInfo.Items {
 			videoURL := pickBestWeiboVideoURL(
+				item.Data.URLs.MP4720p,
 				item.Data.VideoURL,
+				item.Data.URLs.MP4HD,
 				item.Data.MediaInfo.StreamURLHD,
 				item.Data.MediaInfo.MP4HDURL,
 				item.Data.MediaInfo.StreamURL,
+				item.Data.URLs.MP4LD,
 			)
 			if videoURL == "" && item.Data.PageInfo != nil {
 				videoURL = pickBestWeiboVideoURL(
+					item.Data.PageInfo.URLs.MP4720p,
 					item.Data.PageInfo.VideoURL,
+					item.Data.PageInfo.URLs.MP4HD,
 					item.Data.PageInfo.MediaInfo.StreamURLHD,
 					item.Data.PageInfo.MediaInfo.MP4HDURL,
 					item.Data.PageInfo.MediaInfo.StreamURL,
+					item.Data.PageInfo.URLs.MP4LD,
 				)
 			}
 			if videoURL == "" {
@@ -1719,7 +2011,7 @@ func collectWeiboVideos(card WeiboCard) []weiboVideo {
 
 	if len(videos) == 0 {
 		for _, pic := range card.Pics {
-			if !isVideoTypeLabel(pic.Type) {
+			if !isVideoTypeLabel(pic.Type) && !looksLikeVideoURL(pic.VideoSrc) {
 				continue
 			}
 			videoURL := pickBestWeiboVideoURL(pic.VideoSrc)
@@ -1738,7 +2030,8 @@ func isVideoTypeLabel(label string) bool {
 	if label == "" {
 		return false
 	}
-	return strings.Contains(label, "video") || strings.Contains(label, "movie") || strings.Contains(label, "mp4")
+	return strings.Contains(label, "video") || strings.Contains(label, "movie") || strings.Contains(label, "mp4") ||
+		strings.Contains(label, "livephoto") || strings.Contains(label, "live_photo") || strings.Contains(label, "实况")
 }
 
 func looksLikeVideoURL(url string) bool {
@@ -1862,7 +2155,16 @@ func removeWeiboTailNoise(text string) string {
 		if trimmed == "" {
 			continue
 		}
-		if trimmed == "查看图片" || trimmed == "网页链接" || trimmed == "查看原图" {
+		// ★ 2026-10-04 补「全文链接」。
+		//
+		//   实测 id=5350346069115769 的 text 结尾就是
+		//   `<a href="...">全文链接</a>`，stripHTML 之后变成一行「全文链接」。
+		//   去重侧拿它算指纹会得到 `明天见kk全文链接`，与其它平台的
+		//   `明天见嘻嘻` 对不上，于是这条重复推送仍然漏判。
+		//
+		//   注意匹配要宽松：真实数据里它常与「网页链接」「查看图片」并存，
+		//   而且偶尔带尾随的空白或全角空格，所以用前缀判定而不是全等。
+		if isWeiboTailNoiseLine(trimmed) {
 			continue
 		}
 		cleanLines = append(cleanLines, trimmed)
@@ -1870,9 +2172,45 @@ func removeWeiboTailNoise(text string) string {
 
 	joined := strings.Join(cleanLines, "\n")
 	joined = strings.TrimSpace(joined)
-	joined = strings.TrimSuffix(joined, "查看图片")
-	joined = strings.TrimSuffix(joined, "网页链接")
-	return strings.TrimSpace(joined)
+	// 后缀形态也要清：正文与尾串连在同一行时（实测存在）不会被上面的
+	// 逐行判定拦到。这里按行尾重复剥，直到剥不动为止。
+	for {
+		next := joined
+		for _, noise := range weiboTailNoiseWords {
+			next = strings.TrimSuffix(next, noise)
+		}
+		next = strings.TrimSpace(next)
+		if next == joined {
+			break
+		}
+		joined = next
+	}
+	return joined
+}
+
+// weiboTailNoiseWords 是微博正文里与内容无关的固定尾串。
+//
+// 这些串都是「展开全文 / 查看大图」之类的 UI 文案，与作品内容无关，
+// 混进标题会污染去重指纹，也会让飞书消息多出无意义的行。
+var weiboTailNoiseWords = []string{
+	"查看图片", "查看原图", "网页链接", "全文链接", "收起全文",
+}
+
+// isWeiboTailNoiseLine 判断一整行是否**完全**由尾噪声构成。
+//
+// 用全等而不是 Contains：「全文链接」四个字也可能出现在正文句子里，
+// 那时它是真实内容，不能删。只有整行都是噪声时才丢。
+func isWeiboTailNoiseLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return true
+	}
+	for _, noise := range weiboTailNoiseWords {
+		if line == noise {
+			return true
+		}
+	}
+	return false
 }
 
 func stripUnsupportedQQRunes(text string) string {

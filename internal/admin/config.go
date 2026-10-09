@@ -37,9 +37,13 @@ type configField struct {
 
 var configFields = map[string]configField{
 	// Bot
-	"NAPCAT_WS_URL":                {"NAPCAT_WS_URL", "Bot", "NapCat WebSocket 地址", "例如 ws://localhost:3001", kindString, false, false, nil},
-	"NAPCAT_ACCESS_TOKEN":          {"NAPCAT_ACCESS_TOKEN", "Bot", "NapCat 访问令牌", "留空如果不需要", kindSecret, false, false, nil},
-	"BOUND_GROUP_ID":               {"BOUND_GROUP_ID", "Bot", "默认通知群号", "Bot 内部通知和未特别指定群号的订阅转发到该群", kindInteger, false, false, nil},
+	"QQ_ENABLED":                   {"QQ_ENABLED", "消息出口", "启用 QQ 出口", "关闭后不再投递任何 QQ 消息，也不再连接 OneBot；入站指令同时停用", kindBoolean, false, false, nil},
+	"NAPCAT_WS_URL":                {"NAPCAT_WS_URL", "消息出口", "OneBot WebSocket 地址", "QQ 出口依赖 OneBot（LLOneBot / NapCat）。例如 ws://localhost:3001", kindString, false, false, nil},
+	"NAPCAT_ACCESS_TOKEN":          {"NAPCAT_ACCESS_TOKEN", "消息出口", "OneBot 访问令牌", "留空如果不需要", kindSecret, false, false, nil},
+	"FEISHU_ENABLED":               {"FEISHU_ENABLED", "消息出口", "启用飞书出口", "将已映射的 QQ 群订阅同时投递到飞书", kindBoolean, false, false, nil},
+	"FEISHU_APP_ID":                {"FEISHU_APP_ID", "消息出口", "飞书 App ID", "飞书自建应用的 App ID", kindString, false, false, nil},
+	"FEISHU_APP_SECRET":            {"FEISHU_APP_SECRET", "消息出口", "飞书 App Secret", "飞书自建应用密钥；仅用于服务端鉴权", kindSecret, false, false, nil},
+	"FEISHU_UPLOAD_CONCURRENCY":    {"FEISHU_UPLOAD_CONCURRENCY", "消息出口", "媒体上传并发", "飞书图片并行上传数量，建议 2–4", kindInteger, false, false, nil},
 	"COMMAND_PREFIX":               {"COMMAND_PREFIX", "Bot", "命令前缀", "触发的命令符号", kindString, false, false, nil},
 	"DISABLE_GROUP_COMMANDS":       {"DISABLE_GROUP_COMMANDS", "Bot", "禁用群聊指令", "开启后不再响应群里的手动命令", kindBoolean, false, false, nil},
 	"MEDIA_DELIVERY":               {"MEDIA_DELIVERY", "Bot", "媒体发送方式", "local（本机下载转发）或 remote（直传链接）", kindString, false, false, nil},
@@ -59,7 +63,7 @@ var configFields = map[string]configField{
 	"LIVE_MONITORING":                {"LIVE_MONITORING", "口袋48", "直播监控", "监控口袋48直播状态", kindBoolean, false, false, nil},
 	"POLLING_INTERVAL":               {"POLLING_INTERVAL", "口袋48", "消息轮询间隔（秒）", "口袋48实时消息轮询间隔，建议 3-5 秒", kindInteger, false, false, nil},
 	"NIM_ENABLED":                    {"NIM_ENABLED", "口袋48", "NIM 实时消息（IM）", "通过 NIM SDK 获取实时消息，比轮询快", kindBoolean, false, false, nil},
-	"NIM_ROOM_MESSAGE_ENABLED":       {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到 QQ", kindBoolean, false, false, nil},
+	"NIM_ROOM_MESSAGE_ENABLED":       {"NIM_ROOM_MESSAGE_ENABLED", "口袋48", "NIM 房间消息", "将房间实时消息转发到已配置的消息出口", kindBoolean, false, false, nil},
 	"NIM_ROOM_MESSAGE_POLL_FALLBACK": {"NIM_ROOM_MESSAGE_POLL_FALLBACK", "口袋48", "NIM 轮询兜底", "NIM 连接异常时自动切换至轮询模式", kindBoolean, false, false, nil},
 	"NIM_LIVE_DANMAKU_ENABLED":       {"NIM_LIVE_DANMAKU_ENABLED", "口袋48", "NIM 直播弹幕", "转发口袋48直播间弹幕", kindBoolean, false, false, nil},
 	"NIM_VIEWER_EVENT_ENABLED":       {"NIM_VIEWER_EVENT_ENABLED", "口袋48", "成员串门提醒", "仅转发已识别成员进入/离开其他成员直播间，并在可计算时附观看时长；普通粉丝会被过滤", kindBoolean, false, false, nil},
@@ -72,32 +76,43 @@ var configFields = map[string]configField{
 	"WEIBO_SUPER_COUNT_ENABLED":     {"WEIBO_SUPER_COUNT_ENABLED", "微博", "超话日报", "全局开关：每日统计统一「超话订阅」中已勾选日报的超话，并按分组推送", kindBoolean, false, false, nil},
 	"WEIBO_SUPER_COUNT_DELIVERY":    {"WEIBO_SUPER_COUNT_DELIVERY", "微博", "日报发送渠道", "email=仅邮件（默认），qq=仅QQ，both=邮件+QQ", kindString, false, false, nil},
 	"WEIBO_SUPER_COUNT_QQ":          {"WEIBO_SUPER_COUNT_QQ", "微博", "日报额外 QQ 号", "仅渠道含 QQ 时生效。留空则只发给管理员；多个用逗号/空格/换行分隔", kindString, false, false, nil},
+	"WEIBO_REPORT_IMAGE_TARGETS":    {"WEIBO_REPORT_IMAGE_TARGETS", "微博", "日报图片投递目标", "勾选后日报 PNG 会额外投递到这些目标（QQ 群/私聊/飞书群/私聊）。", kindStringList, false, false, nil},
 	// 抖音
 	"DOUYIN_ENABLED":                     {"DOUYIN_ENABLED", "抖音", "启用抖音", "作品、直播与 IM 总开关", kindBoolean, false, false, nil},
-	"DOUYIN_POLL_SECONDS":                {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "秒，建议 ≥ 60", kindInteger, false, false, nil},
+	"DOUYIN_POLL_SECONDS":                {"DOUYIN_POLL_SECONDS", "抖音", "作品轮询间隔", "10–3600 秒；间隔越短通知越快，风控时会自动退避", kindInteger, false, false, nil},
 	"DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT": {"DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT", "抖音", "直播 Cookie 凭据名称", "可选；Cookie 本身只能用 pocket48-douyin-cookie 写入系统凭据库", kindString, false, false, nil},
-	"DOUYIN_IM_ENABLED":                  {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到 QQ", kindBoolean, false, false, nil},
+	"DOUYIN_IM_ENABLED":                  {"DOUYIN_IM_ENABLED", "抖音", "群聊转发", "将指定抖音群消息转到已配置的消息出口", kindBoolean, false, false, nil},
 	"DOUYIN_IM_PRIVATE_ENABLED":          {"DOUYIN_IM_PRIVATE_ENABLED", "抖音", "私信提醒", "私信通知到默认通知群", kindBoolean, false, false, nil},
 	"DOUYIN_IM_GROUP_NAME":               {"DOUYIN_IM_GROUP_NAME", "抖音", "目标群名（辅助）", "可选展示名；多群时优先用抖音回传的群名", kindString, false, false, nil},
 	"DOUYIN_IM_GROUP_NUMBER":             {"DOUYIN_IM_GROUP_NUMBER", "抖音", "目标群号（可多个）", "要转发的抖音群号，多个用逗号/空格/换行分隔。与「创作者订阅」独立：那边监控作品/开播，这里监控群主发言", kindString, false, false, nil},
+	// B 站。面板内的启用开关写入 storage/bilibili/settings.json 并即时生效；
+	// 这个 config.json 字段作为主开关，用于控制面板配置项的可见性。
+	"BILIBILI_ENABLED": {"BILIBILI_ENABLED", "Bilibili", "启用 B 站监控", "UP 主动态（新视频 / 图文 / 专栏）与直播间开播、下播通知。建议在 B 站面板内切换，无需重启", kindBoolean, false, false, nil},
+	// TikTok（洋抖）。2026-10-04 补：这个键一直在 config.json 里（bot 一直读它），
+	// 但从没登记进面板字段表，所以配置页连这一组都渲染不出来 —— 与「没有独立
+	// settings.json」是两层独立的根因，两个都得补齐。
+	"TIKTOK_ENABLED": {"TIKTOK_ENABLED", "TikTok", "启用 TikTok 监控", "洋抖作品监控。与抖音、B站共用同一套跨平台去重，同一条内容只推最早发布的那一次。建议在 TikTok 面板内切换，无需重启", kindBoolean, false, false, nil},
 	// 小红书
 	"XIAOHONGSHU_ENABLED":      {"XIAOHONGSHU_ENABLED", "小红书", "启用小红书", "帖子监控与可用时的开播提醒", kindBoolean, false, false, nil},
 	"XIAOHONGSHU_POLL_SECONDS": {"XIAOHONGSHU_POLL_SECONDS", "小红书", "帖子轮询间隔", "秒，最低 30", kindInteger, false, false, nil},
 }
 
-var configGroupOrder = []string{"Bot", "口袋48", "微博", "抖音", "小红书"}
+var configGroupOrder = []string{"Bot", "消息出口", "口袋48", "微博", "抖音", "小红书", "Bilibili", "TikTok"}
 
 var configFieldOrder = []string{
-	"NAPCAT_WS_URL", "NAPCAT_ACCESS_TOKEN", "BOUND_GROUP_ID", "COMMAND_PREFIX", "DISABLE_GROUP_COMMANDS", "MEDIA_DELIVERY",
+	"COMMAND_PREFIX", "DISABLE_GROUP_COMMANDS", "MEDIA_DELIVERY",
+	"QQ_ENABLED", "NAPCAT_WS_URL", "NAPCAT_ACCESS_TOKEN",
+	"FEISHU_ENABLED", "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_UPLOAD_CONCURRENCY",
 	"ALERT_EMAIL_ENABLED", "ALERT_EMAIL_TO", "ALERT_EMAIL_FROM", "ALERT_EMAIL_SMTP_HOST", "ALERT_EMAIL_SMTP_PORT",
 	"ALERT_EMAIL_SMTP_USER", "ALERT_EMAIL_SMTP_PASSWORD", "ALERT_EMAIL_COOLDOWN_MINUTES", "ADMIN_PANEL_URL",
 	"POCKET_USERNAME", "POCKET_PASSWORD", "POCKET_TOKEN", "LIVE_MONITORING", "POLLING_INTERVAL",
 	"NIM_ENABLED", "NIM_ROOM_MESSAGE_ENABLED", "NIM_ROOM_MESSAGE_POLL_FALLBACK", "NIM_LIVE_DANMAKU_ENABLED", "NIM_VIEWER_EVENT_ENABLED",
 	"WEIBO_BROWSER_AUTH_ENABLED", "WEIBO_BROWSER_REFRESH_MINUTES", "WEIBO_COOKIE", "WEIBO_MWEIBO_COOKIE",
-	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED", "WEIBO_SUPER_COUNT_DELIVERY", "WEIBO_SUPER_COUNT_QQ",
+	"WEIBO_SUPER_AUTO_ENABLED", "WEIBO_SUPER_COUNT_ENABLED", "WEIBO_SUPER_COUNT_DELIVERY", "WEIBO_SUPER_COUNT_QQ", "WEIBO_REPORT_IMAGE_TARGETS",
 	"DOUYIN_ENABLED", "DOUYIN_POLL_SECONDS", "DOUYIN_LIVE_COOKIE_KEYRING_ACCOUNT", "DOUYIN_IM_ENABLED", "DOUYIN_IM_PRIVATE_ENABLED",
 	"DOUYIN_IM_GROUP_NUMBER", "DOUYIN_IM_GROUP_NAME",
 	"XIAOHONGSHU_ENABLED", "XIAOHONGSHU_POLL_SECONDS",
+	"BILIBILI_ENABLED",
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +215,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "Cookie 刷新周期：不能小于 5 分钟"})
 			return
 		}
+		if key == "DOUYIN_POLL_SECONDS" && (value.(int64) < 10 || value.(int64) > 3600) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "抖音作品轮询间隔：需为 10–3600 秒"})
+			return
+		}
+		if key == "FEISHU_UPLOAD_CONCURRENCY" && (value.(int64) < 1 || value.(int64) > 8) {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: "飞书媒体上传并发：需为 1–8"})
+			return
+		}
 		validated[key] = value
 	}
 
@@ -232,7 +255,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 func configFieldNeedsRestart(key string) bool {
 	switch key {
 	// Network / process wiring
-	case "NAPCAT_WS_URL", "NAPCAT_ACCESS_TOKEN":
+	case "QQ_ENABLED", "NAPCAT_WS_URL", "NAPCAT_ACCESS_TOKEN", "FEISHU_ENABLED", "FEISHU_APP_ID", "FEISHU_APP_SECRET":
 		return true
 	// Pocket login credentials (token refresh path needs restart for clean re-auth)
 	case "POCKET_USERNAME", "POCKET_PASSWORD", "POCKET_TOKEN":
@@ -243,7 +266,12 @@ func configFieldNeedsRestart(key string) bool {
 	// Platform master switches that start long-lived monitors/sidecars at boot
 	case "DOUYIN_ENABLED", "XIAOHONGSHU_ENABLED":
 		return true
-	// NIM_* / LIVE_MONITORING / POLLING_INTERVAL: hot via cfg (commands already mutate LiveMonitoring)
+	// NIM bridge and its room/live loops spawn once at boot; flipping these
+	// master switches does not start/stop them, so a restart is required.
+	case "NIM_ENABLED", "NIM_ROOM_MESSAGE_ENABLED":
+		return true
+	// Remaining NIM feature flags (danmaku/viewer/poll-fallback) + LIVE_MONITORING
+	// + POLLING_INTERVAL: hot via cfg (commands already mutate LiveMonitoring)
 	default:
 		return false
 	}
@@ -308,6 +336,15 @@ func (s *Server) writeConfigNoRestart(values map[string]any) error {
 	}
 	if err := writeJSONAtomic(s.opts.ConfigPath, config); err != nil {
 		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	// B 站主开关同时驱动面板可见性与运行状态；轮询每轮重读 settings，故热生效。
+	if _, touched := values["BILIBILI_ENABLED"]; touched {
+		syncBilibiliMasterSwitch(s.opts.ConfigPath)
+	}
+	// TikTok 同理。bot 侧从 settings.json 读订阅（回落 config.json），
+	// 所以主开关两边都要对齐。
+	if _, touched := values["TIKTOK_ENABLED"]; touched {
+		syncTiktokMasterSwitch(s.opts.ConfigPath)
 	}
 	return nil
 }

@@ -45,16 +45,17 @@ type Event struct {
 	MediaOrderKnown bool    `json:"mediaOrderKnown"`
 }
 type Subscription struct {
-	ID       string `json:"id"`
-	UserID   string `json:"userId"`
-	Username string `json:"username"`
-	Name     string `json:"name"`
-	GroupID  int64  `json:"groupId"`
-	Enabled  bool   `json:"enabled"`
-	Posts    bool   `json:"posts"`
-	Reels    bool   `json:"reels"`
-	Stories  bool   `json:"stories"`
-	AtAll    bool   `json:"atAll"`
+	ID        string   `json:"id"`
+	UserID    string   `json:"userId"`
+	Username  string   `json:"username"`
+	Name      string   `json:"name"`
+	GroupID   int64    `json:"groupId"`
+	TargetIDs []string `json:"targetIds,omitempty"`
+	Enabled   bool     `json:"enabled"`
+	Posts     bool     `json:"posts"`
+	Reels     bool     `json:"reels"`
+	Stories   bool     `json:"stories"`
+	AtAll     bool     `json:"atAll"`
 }
 type Settings struct {
 	Enabled       bool           `json:"enabled"`

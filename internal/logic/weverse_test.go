@@ -3,22 +3,24 @@ package logic
 import (
 	"fmt"
 	"pocket48-bot/internal/melon"
+	"pocket48-bot/internal/message"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/weverse"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatWeverseOriginalAndChinese(t *testing.T) {
 	e := weverse.Event{Kind: "comment", Author: "CARMEN", ParentAuthor: "粉丝昵称", Body: "안녕", Translation: "你好", ParentBody: "잘 지내?", ParentTranslation: "最近好吗？", URL: "https://weverse.io/hearts2hearts/fanpost/1/comment/2"}
 	got := formatWeverseEvent(e)
-	want := "【CARMEN|Weverse】\n粉丝昵称：最近好吗？\nCARMEN：你好\n\n粉丝昵称（原文）：잘 지내?\nCARMEN（原文）：안녕\n\n" + e.URL
+	want := "【CARMEN|Weverse】\n粉丝昵称：最近好吗？\nCARMEN：你好\n\n粉丝昵称：잘 지내?\nCARMEN：안녕\n\n" + e.URL
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 	e.ParentTranslation = ""
 	got = formatWeverseEvent(e)
-	if !strings.Contains(got, "粉丝昵称：（译文暂不可用，原文见下）") || !strings.Contains(got, "粉丝昵称（原文）：잘 지내?") {
+	if !strings.Contains(got, "粉丝昵称：（译文暂不可用，原文见下）") || !strings.Contains(got, "粉丝昵称：잘 지내?") {
 		t.Fatal(got)
 	}
 	e.Translation = ""
@@ -61,7 +63,7 @@ func TestWeverseReplyShowsDifferentPostAuthor(t *testing.T) {
 func TestWeverseLiveEndNotification(t *testing.T) {
 	e := weverse.Event{Kind: "live_end", Author: "JIWOO", Body: "방송", Translation: "直播标题", LiveDuration: 2076, Time: 100000, URL: "https://weverse.io/hearts2hearts/live/1-2"}
 	got := formatWeverseEvent(e)
-	for _, want := range []string{"【JIWOO|Weverse】", "直播已结束", "直播时长：0小时34分36秒", "JIWOO：直播标题", "JIWOO（原文）：방송", e.URL} {
+	for _, want := range []string{"【JIWOO|Weverse】", "直播已结束", "直播时长：0小时34分36秒", "JIWOO：直播标题", "JIWOO：방송", e.URL} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q: %s", want, got)
 		}
@@ -74,7 +76,7 @@ func TestWeverseLiveEndNotification(t *testing.T) {
 func TestWeverseLiveChatNotification(t *testing.T) {
 	e := weverse.Event{Kind: "live_chat", Author: "YUHA", Body: "웃겨 정말", Translation: "真好笑。", LiveHostAuthor: "JUUN", Time: 100000, URL: "https://weverse.io/hearts2hearts/live/1-2"}
 	got := formatWeverseEvent(e)
-	for _, want := range []string{"【YUHA|Weverse】", "来自 JUUN 的直播", "YUHA：真好笑。", "YUHA（原文）：웃겨 정말", e.URL} {
+	for _, want := range []string{"【YUHA|Weverse】", "来自 JUUN 的直播", "YUHA：真好笑。", "YUHA：웃겨 정말", e.URL} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q: %s", want, got)
 		}
@@ -133,7 +135,7 @@ func TestWeverseMediaBeforeFooter(t *testing.T) {
 			t.Fatal(segments)
 		}
 		body := segments[0].(napcat.MessageSegment).Data["text"]
-		if strings.Contains(body, e.URL) || strings.Contains(body, "────────") || !strings.Contains(body, "STELLA（原文）：안녕") {
+		if strings.Contains(body, e.URL) || strings.Contains(body, "────────") || !strings.Contains(body, "STELLA：안녕") {
 			t.Fatal(body)
 		}
 		for i, image := range images {
@@ -203,32 +205,37 @@ func TestMelonMusicWaveMessagePreservesDialogueOrderAndFooter(t *testing.T) {
 		{Author: "유하 (YUHA)", Body: "세 번째", URL: melon.Hearts2HeartsMusicWaveURL, Time: 102000},
 	}
 	messages := melonMusicWaveMessages(sub, events)
-	if len(messages) != 1 || len(messages[0]) != 3 {
+	if len(messages) != 1 {
 		t.Fatalf("messages=%#v", messages)
 	}
-	if messages[0][0].(napcat.MessageSegment).Type != "at" {
-		t.Fatal("missing at-all")
+	doc := messages[0].(*message.Document)
+	if len(doc.Turns) != 3 {
+		t.Fatalf("turns=%#v", doc.Turns)
 	}
-	body := messages[0][2].(napcat.MessageSegment).Data["text"]
-	first, second, third := strings.Index(body, "YUHA)：첫 번째"), strings.Index(body, "STELLA)：두 번째"), strings.Index(body, "YUHA)：세 번째")
-	if !(first >= 0 && first < second && second < third) || strings.Contains(body, "试推") || strings.Contains(body, "来源：") {
-		t.Fatal(body)
+	if doc.Turns[0].Author != "유하 (YUHA)" || doc.Turns[1].Author != "스텔라 (STELLA)" || doc.Turns[2].Author != "유하 (YUHA)" {
+		t.Fatalf("dialogue order broken: %#v", doc.Turns)
 	}
-	if !strings.HasSuffix(body, melon.Hearts2HeartsMusicWaveURL+"\n\n1970-01-01 08:01:42") {
-		t.Fatal("footer not last", body)
+	if !doc.MentionAll {
+		t.Fatal("missing at-all (STELLA should trigger mention)")
+	}
+	if doc.Link != melon.Hearts2HeartsMusicWaveURL {
+		t.Fatalf("link=%q", doc.Link)
+	}
+	if got := doc.CreatedAt.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05"); got != "1970-01-01 08:01:42" {
+		t.Fatalf("footer time = %q", got)
 	}
 	withoutStella := melonMusicWaveMessages(sub, []melon.Event{{Author: "유하 (YUHA)", Body: "안녕", Time: 103000}})
-	if len(withoutStella) != 1 || withoutStella[0][0].(napcat.MessageSegment).Type == "at" {
-		t.Fatal("non-STELLA message mentioned all", withoutStella)
+	if withoutStella[0].(*message.Document).MentionAll {
+		t.Fatal("non-STELLA message mentioned all")
 	}
 }
 
-func TestMelonMusicWaveMessageLimitsEachCardForQQTranslation(t *testing.T) {
+func TestMelonMusicWaveMessageCombinesTenEventsPerCard(t *testing.T) {
 	sub := melon.Subscription{ArtistName: "Hearts2Hearts", AtAll: true, AtAllAuthorNames: []string{"STELLA"}}
-	events := make([]melon.Event, 0, 9)
-	for i := 0; i < 9; i++ {
+	events := make([]melon.Event, 0, 11)
+	for i := 0; i < 11; i++ {
 		author := "유하 (YUHA)"
-		if i == 8 {
+		if i == 10 {
 			author = "스텔라 (STELLA)"
 		}
 		events = append(events, melon.Event{Author: author, Body: fmt.Sprintf("message-%d", i+1), URL: melon.Hearts2HeartsMusicWaveURL, Time: int64(100000 + i)})
@@ -237,8 +244,39 @@ func TestMelonMusicWaveMessageLimitsEachCardForQQTranslation(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("expected two short cards, got %d", len(messages))
 	}
-	if messages[0][0].(napcat.MessageSegment).Type == "at" || messages[1][0].(napcat.MessageSegment).Type != "at" {
+	if messages[0].(*message.Document).MentionAll || !messages[1].(*message.Document).MentionAll {
 		t.Fatal("STELLA mention was not scoped to her card", messages)
+	}
+}
+
+func TestMelonMusicWaveMessageIncludesInlineTranslation(t *testing.T) {
+	messages := melonMusicWaveMessages(melon.Subscription{ArtistName: "Hearts2Hearts"}, []melon.Event{{Author: "유하 (YUHA)", Body: "안녕", Translation: "你好"}})
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	doc := messages[0].(*message.Document)
+	if doc.Source != "Melon Music Wave" || doc.Author != "유하 (YUHA)" {
+		t.Fatalf("source=%q author=%q", doc.Source, doc.Author)
+	}
+	if len(doc.Turns) != 1 || doc.Turns[0].Author != "유하 (YUHA)" || doc.Turns[0].Text != "안녕" || doc.Turns[0].Translation != "你好" {
+		t.Fatalf("turns = %#v", doc.Turns)
+	}
+}
+
+func TestMelonMessageIncludesInlineTranslation(t *testing.T) {
+	doc := melonMessage(melon.Subscription{ArtistName: "Hearts2Hearts"}, melon.Event{
+		Title:       "Melon 官方文章",
+		Body:        "9월 차트에서 포착한 다양한 행보",
+		Translation: "九月榜单中呈现的多样动向",
+	}).(*message.Document)
+	if doc.Body != "9월 차트에서 포착한 다양한 행보" {
+		t.Fatal(doc.Body)
+	}
+	if doc.Translation != "九月榜单中呈现的多样动向" {
+		t.Fatal(doc.Translation)
+	}
+	if doc.Source != "Melon" || doc.Label != "Melon 官方文章" || doc.Author != "Hearts2Hearts" {
+		t.Fatalf("source=%q label=%q author=%q", doc.Source, doc.Label, doc.Author)
 	}
 }
 

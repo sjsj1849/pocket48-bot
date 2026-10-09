@@ -19,6 +19,7 @@ type Client struct {
 	cfg        *config.Config
 	conn       *websocket.Conn
 	sendChan   chan APIRequest
+	enqueueMu  sync.Mutex
 	mu         sync.Mutex
 	writerOnce sync.Once
 	requestSeq atomic.Uint64
@@ -304,6 +305,16 @@ func (c *Client) writeLoop() {
 }
 
 func (c *Client) SendGroupMessage(groupID int64, message interface{}) {
+	// Keep at-all and the notification body in one QQ message. Move a leading
+	// at-all below the title line so it remains on its own line, while the title
+	// still occupies line one if QQ drops the at segment after quota exhaustion.
+	message = normalizeLeadingAtAll(message)
+	c.enqueueMu.Lock()
+	defer c.enqueueMu.Unlock()
+	c.enqueueGroupMessage(groupID, message)
+}
+
+func (c *Client) enqueueGroupMessage(groupID int64, message interface{}) {
 	depth := len(c.sendChan)
 	if depth > 50 {
 		log.Printf("[NAPCAT-QUEUE] sendChan depth=%d (cap=%d) — queue building up", depth, cap(c.sendChan))
@@ -316,6 +327,102 @@ func (c *Client) SendGroupMessage(groupID int64, message interface{}) {
 			Message: message,
 		},
 	}
+}
+
+// normalizeLeadingAtAll supports both segment slice shapes used by the bot.
+// Only a leading at-all is moved; ordinary user mentions remain unchanged.
+func normalizeLeadingAtAll(message interface{}) interface{} {
+	switch segments := message.(type) {
+	case []MessageSegment:
+		if len(segments) == 0 || !isAtAll(segments[0]) {
+			return message
+		}
+		remaining := trimLeadingLineBreaks(append([]MessageSegment(nil), segments[1:]...))
+		if len(remaining) == 0 {
+			return []MessageSegment{segments[0]}
+		}
+		return placeAtAllAfterTitle(segments[0], remaining)
+	case []interface{}:
+		if len(segments) == 0 {
+			return message
+		}
+		first, valid := segments[0].(MessageSegment)
+		if !valid || !isAtAll(first) {
+			return message
+		}
+		remaining := trimLeadingInterfaceLineBreaks(append([]interface{}(nil), segments[1:]...))
+		if len(remaining) == 0 {
+			return []interface{}{first}
+		}
+		return placeInterfaceAtAllAfterTitle(first, remaining)
+	default:
+		return message
+	}
+}
+
+func placeAtAllAfterTitle(atAll MessageSegment, body []MessageSegment) []MessageSegment {
+	if body[0].Type != "text" {
+		return append([]MessageSegment{atAll, TextSegment("\n")}, body...)
+	}
+	title, rest, found := strings.Cut(body[0].Data["text"], "\n")
+	if !found || strings.TrimSpace(title) == "" {
+		return append([]MessageSegment{atAll, TextSegment("\n")}, body...)
+	}
+	result := []MessageSegment{TextSegment(title + "\n"), atAll}
+	if rest != "" {
+		result = append(result, TextSegment("\n"+rest))
+	}
+	return append(result, body[1:]...)
+}
+
+func placeInterfaceAtAllAfterTitle(atAll MessageSegment, body []interface{}) []interface{} {
+	first, valid := body[0].(MessageSegment)
+	if !valid || first.Type != "text" {
+		return append([]interface{}{atAll, TextSegment("\n")}, body...)
+	}
+	title, rest, found := strings.Cut(first.Data["text"], "\n")
+	if !found || strings.TrimSpace(title) == "" {
+		return append([]interface{}{atAll, TextSegment("\n")}, body...)
+	}
+	result := []interface{}{TextSegment(title + "\n"), atAll}
+	if rest != "" {
+		result = append(result, TextSegment("\n"+rest))
+	}
+	return append(result, body[1:]...)
+}
+
+func isAtAll(segment MessageSegment) bool {
+	return segment.Type == "at" && segment.Data["qq"] == "all"
+}
+
+func trimLeadingLineBreaks(segments []MessageSegment) []MessageSegment {
+	for len(segments) > 0 && segments[0].Type == "text" {
+		text := strings.TrimLeft(segments[0].Data["text"], "\r\n")
+		if text == "" {
+			segments = segments[1:]
+			continue
+		}
+		segments[0] = TextSegment(text)
+		break
+	}
+	return segments
+}
+
+func trimLeadingInterfaceLineBreaks(segments []interface{}) []interface{} {
+	for len(segments) > 0 {
+		segment, valid := segments[0].(MessageSegment)
+		if !valid || segment.Type != "text" {
+			break
+		}
+		text := strings.TrimLeft(segment.Data["text"], "\r\n")
+		if text == "" {
+			segments = segments[1:]
+			continue
+		}
+		segments[0] = TextSegment(text)
+		break
+	}
+	return segments
 }
 
 func (c *Client) SendPrivateMessage(userID int64, message interface{}) {

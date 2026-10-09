@@ -188,11 +188,13 @@ func enrichPocketRoomName(client *pocket48.Client, roomID int64) string {
 	if err != nil || info == nil {
 		return ""
 	}
-	if info.ChannelName != "" && info.ChannelName != "直播" {
-		return info.ChannelName
-	}
+	// OwnerName is the idol's name (e.g. "胡晓慧"); ChannelName is the room
+	// kind label ("包间", "直播", ...). Prefer the idol name for display.
 	if info.OwnerName != "" {
-		return info.OwnerName + "的房间"
+		return info.OwnerName
+	}
+	if info.ChannelName != "" && info.ChannelName != "直播" && info.ChannelName != "包间" {
+		return info.ChannelName
 	}
 	return ""
 }

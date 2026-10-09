@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"pocket48-bot/internal/message"
-	"pocket48-bot/internal/napcat"
 )
 
 // TestFeishuRendersNapcatAtSegment 验证飞书能正确渲染微博等平台直接投递的
@@ -17,12 +16,12 @@ import (
 //     "昵称：正文" 分隔符，把标记塞进卡片头部，并连带导致首行标题
 //     【昵称|来源】解析失败、来源回落到 "Pocket48"
 func TestFeishuRendersNapcatAtSegment(t *testing.T) {
-	segments := []napcat.MessageSegment{
-		napcat.AtSegment("all"),
-		napcat.TextSegment("\n"),
-		napcat.TextSegment("【未 Injuries|微博】\n"),
-		napcat.TextSegment("正文内容\n\n微博链接：https://weibo.com/1/ABC\n"),
-		napcat.TextSegment("\n2026-10-02 20:15:00"),
+	segments := []message.Segment{
+		message.MentionAll(),
+		message.Text("\n"),
+		message.Text("【未 Injuries|微博】\n"),
+		message.Text("正文内容\n\n微博链接：https://weibo.com/1/ABC\n"),
+		message.Text("\n2026-10-02 20:15:00"),
 	}
 
 	content := renderFeishuContent(segments)
@@ -54,9 +53,9 @@ func TestFeishuRendersNapcatAtSegment(t *testing.T) {
 
 // TestFeishuAtSegmentSpecificQQ 指定 @某人 时不应把 at 标记当成昵称。
 func TestFeishuAtSegmentSpecificQQ(t *testing.T) {
-	content := renderFeishuContent([]napcat.MessageSegment{
-		napcat.AtSegment("123456"),
-		napcat.TextSegment("正文"),
+	content := renderFeishuContent([]message.Segment{
+		message.Mention("123456"),
+		message.Text("正文"),
 	})
 	if strings.Contains(content.sender, "<at") {
 		t.Errorf("发送者不应含 at 标记：%q", content.sender)

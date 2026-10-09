@@ -233,6 +233,10 @@ func TestEventsChangedNotificationAndNestedReplies(t *testing.T) {
 			}})
 		case "/comment/v1.0/comment-fan":
 			respond(w, Object{"commentId": "fan", "author": Object{"memberId": "fan", "profileType": "FAN", "profileName": "粉丝昵称"}, "body": "잘 지내?", "createdAt": now})
+		case "/comment/v1.0/member-carmen/comments":
+			// 回复采集已改为「按成员维度」：每位成员 1 个请求直接给出其评论，
+			// 不再逐帖回帖拉取。这里返回该成员最新的一条回复。
+			respond(w, Object{"data": []any{Object{"commentId": "member-first", "author": artist, "body": "member reply", "createdAt": now, "root": Object{"type": "POST", "data": Object{"postId": "1-2", "body": "fan post", "author": artist}}}}})
 		case "/comment/v1.0/comment-fan/artistComments":
 			items := []any{comment("first")}
 			if revision.Load() > 0 {
@@ -359,7 +363,9 @@ func TestOfficialArtistMemberProfiles(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		respond(w, []any{Object{"memberId": "artist-id", "artistOfficialProfile": Object{"officialName": "CARMEN", "officialImageUrl": "https://example.com/artist.jpg"}}})
 	})
-	members, err := c.Members(context.Background(), 235)
+	// 用一个独立的 community id：Members 现在带进程内缓存，复用真实社区 ID 会
+	// 命中上一次真实拉取的结果，导致测试拿到非桩数据。
+	members, err := c.Members(context.Background(), 99235)
 	if err != nil || len(members) != 1 || members[0].Name != "CARMEN" || members[0].ID != "artist-id" {
 		t.Fatalf("%v %v", members, err)
 	}

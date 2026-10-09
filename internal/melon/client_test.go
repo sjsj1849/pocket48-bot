@@ -59,6 +59,25 @@ func TestParseTimeline(t *testing.T) {
 	}
 }
 
+func TestParseTimelineUsesMagazineHeadline(t *testing.T) {
+	html := []byte(`
+<div class="box_act musicstory">
+ <p class="box_desc">멜론매거진이 등록되었습니다.</p>
+ <div class="musicstory_wrap">
+  <a href="javascript:melon.link.goMstoryDetail(17281);" title="cover" class="wrap_thumb"><img src="https://cdnimg.melon.co.kr/cover.jpg" /></a>
+  <div class="musicstory_info"><a href="javascript:melon.link.goMstoryDetail(17281);">9월 차트에서 포착한 다양한 행보&#128099;</a></div>
+ </div>
+ <p class="reg_date">2026년 09월 30일</p>
+</div><!-- ▲▲▲ 멜론매거진 ▲▲▲ -->`)
+	events := parseTimeline(Hearts2HeartsArtistID, html)
+	if len(events) != 1 {
+		t.Fatalf("events=%d: %#v", len(events), events)
+	}
+	if events[0].ID != "magazine:17281" || events[0].Body != "9월 차트에서 포착한 다양한 행보👣" {
+		t.Fatalf("magazine=%#v", events[0])
+	}
+}
+
 func TestRuntimeFirstScanBuildsBaseline(t *testing.T) {
 	sub := Subscription{ArtistID: Hearts2HeartsArtistID, Releases: true, ArtistNotes: true}
 	events := []Event{{ID: "album:1", Kind: "album", ArtistID: Hearts2HeartsArtistID}}

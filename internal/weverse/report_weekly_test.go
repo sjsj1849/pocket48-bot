@@ -22,22 +22,34 @@ func TestWeeklyPeriodNormalizesAcrossMonthAndYear(t *testing.T) {
 		}
 	}
 }
-func TestWeeklyScheduleNoOldSendAndMondayClockWithCatchup(t *testing.T) {
+func TestWeeklyScheduleNoOldSendAndMidnightCatchup(t *testing.T) {
 	s := ReportSettings{Enabled: true, Weekly: true, SendTime: "09:00", EnabledAt: "2026-09-01T00:00:00+08:00", WeeklyEnabledAt: "2026-09-15T00:00:00+08:00"}
 	at := func(date string) time.Time { v, _ := time.Parse(time.RFC3339, date); return v }
-	for _, date := range []string{"2026-09-15T10:00:00+08:00", "2026-09-21T08:59:59+08:00"} {
+	for _, date := range []string{"2026-09-15T10:00:00+08:00", "2026-09-20T23:59:59+08:00"} {
 		if p := DueReportPeriods(s, at(date)); len(p) != 0 {
 			t.Fatal("early report", p)
 		}
 	}
-	for _, date := range []string{"2026-09-21T09:00:00+08:00", "2026-09-23T10:00:00+08:00"} {
+	for _, date := range []string{"2026-09-21T00:00:00+08:00", "2026-09-23T10:00:00+08:00"} {
 		p := DueReportPeriods(s, at(date).UTC())
 		if len(p) != 1 || p[0].Key != "weekly-2026-09-14" {
 			t.Fatal(p)
 		}
 	}
 	s.Weekly = false
-	if p := DueReportPeriods(s, at("2026-09-21T09:00:00+08:00")); len(p) != 0 {
+	if p := DueReportPeriods(s, at("2026-09-21T00:00:00+08:00")); len(p) != 0 {
+		t.Fatal(p)
+	}
+}
+
+func TestMonthlyScheduleIgnoresLegacySendTime(t *testing.T) {
+	s := ReportSettings{Enabled: true, Monthly: true, SendTime: "09:00", EnabledAt: "2026-09-30T00:00:00+08:00"}
+	at := func(date string) time.Time { v, _ := time.Parse(time.RFC3339, date); return v }
+	if p := DueReportPeriods(s, at("2026-09-30T23:59:59+08:00")); len(p) != 0 {
+		t.Fatal("early report", p)
+	}
+	p := DueReportPeriods(s, at("2026-10-01T00:00:00+08:00"))
+	if len(p) != 1 || p[0].Key != "monthly-2026-09" {
 		t.Fatal(p)
 	}
 }

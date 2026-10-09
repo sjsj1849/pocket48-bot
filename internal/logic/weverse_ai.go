@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"pocket48-bot/internal/hearts2hearts"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/weverse"
 	"strings"
@@ -104,7 +105,11 @@ func (b *Bot) runWeverseAISummaryLoop(ctx context.Context, dir string) {
 				err = weverse.SaveAIContext(dir, job)
 			}
 			if err == nil {
-				job.Result, err = weverse.SummarizeAI(callCtx, ai, *job)
+				var glossary hearts2hearts.Glossary
+				glossary, err = hearts2hearts.Load(b.cfg.ConfigPath())
+				if err == nil {
+					job.Result, err = weverse.SummarizeAIWithGlossary(callCtx, ai, *job, glossary)
+				}
 			}
 			cancel()
 			if ctx.Err() != nil {
@@ -131,7 +136,7 @@ func (b *Bot) runWeverseAISummaryLoop(ctx context.Context, dir string) {
 		s, allowed := aiSubscription(cfg, job)
 		if allowed {
 			for _, segments := range weverseAISegments(s, job) {
-				b.napcat.SendGroupMessage(s.GroupID, segments)
+				b.sendToTargetIDs(s.TargetIDs, segments)
 			}
 			log.Printf("[Weverse AI] 已转发 %s 的聊天整理（%d 条回复）", job.Author, len(job.Entries))
 		}

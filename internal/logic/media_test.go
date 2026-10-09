@@ -29,6 +29,27 @@ func TestDownloadMediaFindsRefinedExtensionCache(t *testing.T) {
 	}
 }
 
+func TestLocalizeDouyinVideoUsesLocalMP4Cache(t *testing.T) {
+	url := "https://invalid.example/douyin-video-cache-test"
+	hash := md5.Sum([]byte(url))
+	cached := filepath.Join(mediaCacheDir, hex.EncodeToString(hash[:])+".mp4")
+	if err := os.WriteFile(cached, []byte("cached video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cached) })
+
+	if got := localizeDouyinVideo(url); got != cached {
+		t.Fatalf("localizeDouyinVideo returned %q, want %q", got, cached)
+	}
+}
+
+func TestLocalizeDouyinVideoDropsFailedRemoteURL(t *testing.T) {
+	url := "http://127.0.0.1:1/douyin-video-download-failure.mp4"
+	if got := localizeDouyinVideo(url); got != "" {
+		t.Fatalf("localizeDouyinVideo returned %q after download failure, want empty", got)
+	}
+}
+
 func TestQChatMediaPrefersLocalCacheOverDirectURL(t *testing.T) {
 	url := "https://invalid.example/qchat-local-media-test.jpg"
 	hash := md5.Sum([]byte(url))

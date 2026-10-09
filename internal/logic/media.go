@@ -9,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptrace"
+
 	"os"
 	"path/filepath"
+	"pocket48-bot/internal/mediafetch"
 	"pocket48-bot/internal/napcat"
 	"strings"
 	"sync"
@@ -114,7 +116,7 @@ func init() {
 
 // downloadMedia downloads a media file from url to local cache.
 // Returns local file path on success, or empty string + error on failure.
-func (b *Bot) downloadMedia(url string) (string, error) {
+func downloadMediaFile(url string) (string, error) {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return "", fmt.Errorf("empty url")
@@ -149,6 +151,8 @@ func (b *Bot) downloadMedia(url string) (string, error) {
 		return "", fmt.Errorf("build download request failed: %w", err)
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), downloadTrace.clientTrace(started)))
+	// 抖音 CDN 不带 Referer 一律 403（2026-10-04 实测）。
+	mediafetch.ApplyReferer(req, url)
 	resp, err := mediaHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
@@ -199,6 +203,10 @@ func (b *Bot) downloadMedia(url string) (string, error) {
 		dnsElapsed.Round(time.Millisecond), connectElapsed.Round(time.Millisecond), tlsElapsed.Round(time.Millisecond), reused, rateMiB,
 	)
 	return localPath, nil
+}
+
+func (b *Bot) downloadMedia(url string) (string, error) {
+	return downloadMediaFile(url)
 }
 
 // guessExt guesses file extension from URL path

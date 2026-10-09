@@ -151,9 +151,9 @@ func TestAdvanceRoomMessageCursorPersistsAndMonotonic(t *testing.T) {
 	dir := t.TempDir()
 	store := storage.NewStorage(dir, "")
 	bot := &Bot{
-		storage:       store,
-		lastMsgTime:   make(map[int64]int64),
-		cursorLoaded:  make(map[int64]bool),
+		storage:        store,
+		lastMsgTime:    make(map[int64]int64),
+		cursorLoaded:   make(map[int64]bool),
 		seenMessageIDs: make(map[string]time.Time),
 	}
 	msgOlder := &pocket48.Message{Room: &pocket48.RoomInfo{ChannelID: 1279287}, MsgIDServer: "a", Time: 1000}
@@ -451,7 +451,7 @@ func TestQChatOwnerIdentityRejectsNonOwnerRESTSender(t *testing.T) {
 	}
 }
 
-func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
+func TestLiveSessionAggregatesGiftScoreAndOnlinePeaks(t *testing.T) {
 	_ = os.Remove(liveSessionPath(123))
 	t.Cleanup(func() { _ = os.Remove(liveSessionPath(123)) })
 	bot := &Bot{liveSessions: make(map[int64]*LiveGiftSession)}
@@ -459,7 +459,8 @@ func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
 	if !bot.beginLiveSession(room, "live-1", 789, 12) {
 		t.Fatal("new live session was not started")
 	}
-	bot.handleLiveUpdate(123, &LiveUpdate{OnlineNum: 34})
+	bot.handleLiveOnline(123, &LiveOnline{OnlineMemberNum: 9})
+	bot.handleLiveOnline(123, &LiveOnline{OnlineMemberNum: 6})
 	// Score gift: must not also count as chicken legs (even if chickenLeg field present).
 	bot.handleDanmakuGift(123, &GiftMessage{
 		GiftName: "鎏光碟影",
@@ -474,7 +475,7 @@ func TestLiveSessionAggregatesGiftScoreAndPeakOnline(t *testing.T) {
 	})
 
 	session := bot.liveSessions[123]
-	if session == nil || session.ChickenLegs != 10 || session.AnnualScore != 5 || session.PeakOnline != 34 {
+	if session == nil || session.ChickenLegs != 10 || session.AnnualScore != 5 || session.CurrentOnline != 6 || session.PeakConcurrent != 9 {
 		t.Fatalf("unexpected live statistics: %#v", session)
 	}
 }
@@ -512,12 +513,12 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 	// use a fake session and intercept by checking getRoomName + formatLiveDuration + header convention.
 	started := time.Now().Add(-12*time.Minute - 7*time.Second).UnixMilli()
 	bot.liveSessions[1279287] = &LiveGiftSession{
-		LiveID:        "live-x",
-		LiveOwnerName: "胡晓慧",
-		StartedAt:     started,
-		ChickenLegs:   0,
-		AnnualScore:   112,
-		PeakOnline:    497,
+		LiveID:         "live-x",
+		LiveOwnerName:  "胡晓慧",
+		StartedAt:      started,
+		ChickenLegs:    0,
+		AnnualScore:    112,
+		PeakConcurrent: 37,
 	}
 	// Don't call finishLiveSession (would send). Validate component helpers used by the new format.
 	if got := formatLiveDuration(12*time.Minute + 7*time.Second); got != "0小时12分7秒" {
@@ -525,8 +526,8 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 	}
 	owner := "胡晓慧"
 	channel := "包间"
-	text := fmt.Sprintf("【%s|%s】\n记分值：%s\n最高人气：%d\n直播时长：%s\n%s",
-		owner, channel, formatScoreValue(112), 497, formatLiveDuration(12*time.Minute+7*time.Second), "2026-07-20 00:50:00")
+	text := fmt.Sprintf("【%s|%s】\n记分值：%s\n最高同时在线：%d\n直播时长：%s\n%s",
+		owner, channel, formatScoreValue(112), 37, formatLiveDuration(12*time.Minute+7*time.Second), "2026-07-20 00:50:00")
 	if !strings.HasPrefix(text, "【胡晓慧|包间】\n") {
 		t.Fatalf("header missing: %q", text)
 	}
@@ -538,7 +539,7 @@ func TestFinishLiveSessionMessageFormat(t *testing.T) {
 	}
 	// duration must appear after score/peak
 	iScore := strings.Index(text, "记分值")
-	iPeak := strings.Index(text, "最高人气")
+	iPeak := strings.Index(text, "最高同时在线")
 	iDur := strings.Index(text, "直播时长")
 	iTime := strings.Index(text, "2026-07-20")
 	if !(iScore < iPeak && iPeak < iDur && iDur < iTime) {
@@ -555,7 +556,7 @@ func TestBeginLiveSessionDoesNotResetSameLive(t *testing.T) {
 	bot.beginLiveSession(room, "live-1", 789, 10)
 	bot.liveSessions[123].ChickenLegs = 99
 	bot.beginLiveSession(room, "live-1", 789, 20)
-	if got := bot.liveSessions[123]; got.ChickenLegs != 99 || got.PeakOnline != 20 {
+	if got := bot.liveSessions[123]; got.ChickenLegs != 99 {
 		t.Fatalf("same live was reset: %#v", got)
 	}
 }

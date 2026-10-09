@@ -1,12 +1,14 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Config describes the local archive rotation defaults shown by the bot's
@@ -28,6 +30,17 @@ type QChatIdentity struct {
 	UserID    int64  `json:"user_id"`
 	Nickname  string `json:"nickname,omitempty"`
 	UpdatedAt int64  `json:"updated_at"`
+}
+
+type PocketActivity struct {
+	Type         string `json:"type"`
+	MemberRoomID int64  `json:"member_room_id"`
+	MemberUserID int64  `json:"member_user_id"`
+	MemberName   string `json:"member_name"`
+	TargetRoomID int64  `json:"target_room_id,omitempty"`
+	TargetName   string `json:"target_name,omitempty"`
+	At           int64  `json:"at"`
+	Duration     int64  `json:"duration,omitempty"`
 }
 
 type Storage struct {
@@ -136,6 +149,62 @@ func (s *Storage) SaveQChatIdentity(roomID int64, identity QChatIdentity) error 
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func (s *Storage) AppendPocketActivity(activity PocketActivity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if activity.At == 0 {
+		activity.At = time.Now().UnixMilli()
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(s.dir, "pocket-activity.jsonl")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	encoded, err := json.Marshal(activity)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(append(encoded, '\n'))
+	return err
+}
+
+func (s *Storage) PocketActivities(memberRoomID int64, limit int) ([]PocketActivity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	file, err := os.Open(filepath.Join(s.dir, "pocket-activity.jsonl"))
+	if os.IsNotExist(err) {
+		return []PocketActivity{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	items := make([]PocketActivity, 0, limit)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		var item PocketActivity
+		if json.Unmarshal(scanner.Bytes(), &item) != nil || (memberRoomID != 0 && item.MemberRoomID != memberRoomID) {
+			continue
+		}
+		items = append(items, item)
+		if len(items) > limit {
+			items = items[1:]
+		}
+	}
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+	return items, scanner.Err()
 }
 
 func (s *Storage) IsCOSAvailable() bool {

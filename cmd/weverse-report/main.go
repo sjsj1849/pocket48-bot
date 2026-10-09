@@ -27,6 +27,8 @@ func main() {
 	month := flag.Int("month", int(now.Month()), "月份")
 	refresh := flag.Bool("refresh-posts", false, "刷新已记录主帖的累计互动与附件")
 	backfill := flag.Bool("backfill", false, "回采当期可见历史，不转发旧消息")
+	backfillNotifications := flag.Bool("backfill-notifications", false, "仅从通知历史回采成员回复，不扫描成员主帖")
+	backfillMemberComments := flag.Bool("backfill-member-comments", false, "从成员主页评论历史回采全部成员回复，不扫描成员主帖")
 	send := flag.Bool("send", false, "发送报表邮件及 Excel/PNG 附件")
 	enable := flag.Bool("enable", false, "启用月报、上半年报和年报")
 	out := flag.String("out", "", "可选附件输出目录")
@@ -87,6 +89,53 @@ func main() {
 		}
 		_ = weverse.Write(dir, "report-backfill.json", progress)
 		must(e)
+	}
+	if *backfillNotifications {
+		monitor, e := weverse.LoadSettings(dir)
+		must(e)
+		slug := ""
+		for _, subscription := range monitor.Subscriptions {
+			if subscription.CommunityID == settings.CommunityID {
+				slug = subscription.Slug
+				break
+			}
+		}
+		if slug == "" {
+			must(fmt.Errorf("请先订阅报表目标社区"))
+		}
+		client := weverse.NewClient(dir, monitor.ProxyURL)
+		defer client.HTTP.CloseIdleConnections()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		parsed, inaccessible, e := client.BackfillReportNotificationComments(ctx, h, settings, period, slug)
+		must(e)
+		fmt.Printf("通知历史解析 %d 条当期成员回复，%d 个通知关联帖子当前不可访问\n", parsed, inaccessible)
+	}
+	if *backfillMemberComments {
+		monitor, e := weverse.LoadSettings(dir)
+		must(e)
+		slug := ""
+		for _, subscription := range monitor.Subscriptions {
+			if subscription.CommunityID == settings.CommunityID {
+				slug = subscription.Slug
+				break
+			}
+		}
+		if slug == "" {
+			must(fmt.Errorf("请先订阅报表目标社区"))
+		}
+		client := weverse.NewClient(dir, monitor.ProxyURL)
+		defer client.HTTP.CloseIdleConnections()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		counts, e := client.BackfillReportMemberComments(ctx, h, settings, period, slug)
+		must(e)
+		members, e := h.Members(settings.CommunityID)
+		must(e)
+		for _, member := range members {
+			count := counts[member.ID]
+			fmt.Printf("%s：解析 %d 条当期回复，其中回复粉丝 %d 条\n", member.Name, count.Replies, count.FanReplies)
+		}
 	}
 	if *refresh {
 		monitor, e := weverse.LoadSettings(dir)

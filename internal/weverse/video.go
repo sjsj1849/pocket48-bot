@@ -41,10 +41,29 @@ func eventVideos(p Object) []VideoAttachment {
 	for _, key := range []string{"moment", "momentW1"} {
 		d := obj(obj(obj(p["extension"])[key])["video"])
 		id := str(d["videoId"])
-		if id != "" && !seen[id] {
-			items = append(items, VideoAttachment{ID: id, CoverURL: text(d, "thumb", "thumbnailUrl")})
-			seen[id] = true
+		if id == "" || seen[id] {
+			continue
 		}
+		seen[id] = true
+		// Moments carry the video in a different shape than orderedAttachments,
+		// and the cover key has varied across payload versions ("thumb" vs
+		// "thumbnailUrl"), so try both plus the uploadInfo nesting used by
+		// regular posts. A missing cover is not fatal: ResolveEventVideos fills
+		// the direct URL later and Feishu/QQ render their own thumbnail.
+		cover := text(d, "thumb", "thumbnailUrl", "imageUrl", "coverUrl", "coverImageUrl")
+		if cover == "" {
+			cover = text(obj(d["uploadInfo"]), "imageUrl")
+		}
+		if !strings.HasPrefix(cover, "https://") {
+			cover = ""
+		}
+		// Moments sometimes embed the playable URL directly; when present it
+		// saves a round trip through the playInfo endpoint.
+		direct := text(d, "url", "videoUrl", "playUrl", "source")
+		if !strings.HasPrefix(direct, "https://") {
+			direct = ""
+		}
+		items = append(items, VideoAttachment{ID: id, CoverURL: cover, URL: direct})
 	}
 	return items
 }

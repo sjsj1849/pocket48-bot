@@ -38,6 +38,13 @@ func (b *Bot) handlePrivateMessage(event *napcat.Event) {
 		return
 	}
 
+	// 链接提取：私聊直接发链接即触发，无需指令。
+	// 放在命令前缀判断之前 —— 用户贴的链接本身不会以 prefix 开头，
+	// 但如果带了一句话（如「帮我看看这个链接」）也可能撞上命令前缀。
+	if b.tryHandleExtractLink(event, msg, true) {
+		return
+	}
+
 	if strings.HasPrefix(msg, prefix) {
 		args := parseCommandArgs(msg[len(prefix):])
 		if len(args) > 0 {
@@ -115,7 +122,7 @@ func (b *Bot) handleMemberJoin(event *napcat.Event) {
 
 	msg := cfg.Messages[rand.Intn(len(cfg.Messages))]
 	atSeg := napcat.AtSegment(strconv.FormatInt(event.UserID, 10))
-	b.napcat.SendGroupMessage(gid, []napcat.MessageSegment{atSeg, napcat.TextSegment(" " + msg)})
+	b.sendGroup(gid, []napcat.MessageSegment{atSeg, napcat.TextSegment(" " + msg)})
 	log.Printf("[Bot] 欢迎新成员: 群=%d, 用户=%d", gid, event.UserID)
 }
 

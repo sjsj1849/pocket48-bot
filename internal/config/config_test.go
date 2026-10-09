@@ -49,10 +49,28 @@ func TestLoadConfigInitializesDouyinDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsTenSecondDouyinPolling(t *testing.T) {
+	cfg := loadTestConfig(t, `{"DOUYIN_POLL_SECONDS":10}`)
+	if cfg.DouyinPollSeconds != 10 {
+		t.Fatalf("poll seconds=%d", cfg.DouyinPollSeconds)
+	}
+}
+
 func TestNIMSafeDefaults(t *testing.T) {
 	cfg := loadTestConfig(t, `{}`)
 	if !cfg.NIMRoomMessagePollFallback || !cfg.NIMLiveDanmakuEnabled {
 		t.Fatalf("unexpected NIM defaults: %#v", cfg)
+	}
+}
+
+func TestFeishuRouteParsing(t *testing.T) {
+	cfg := loadTestConfig(t, `{"FEISHU_GROUP_MAP":{"1":"oc-one"},"FEISHU_GROUP_ROUTES":"2=oc-two, 3=oc-three"}`)
+	routes := cfg.FeishuRoutes()
+	if routes["1"] != "oc-one" || routes["2"] != "oc-two" || routes["3"] != "oc-three" {
+		t.Fatalf("routes = %#v", routes)
+	}
+	if cfg.FeishuUploadConcurrency != 3 {
+		t.Fatalf("upload concurrency = %d", cfg.FeishuUploadConcurrency)
 	}
 }
 

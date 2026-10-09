@@ -84,6 +84,7 @@ func New(opts Options) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/bilibili/browser", s.handleBrowserBilibili)
 	mux.Handle("/api/", s.requireSession(http.HandlerFunc(s.handleAPI)))
 	mux.Handle("/", s.staticHandler())
 	s.httpServer = &http.Server{
@@ -114,7 +115,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; frame-ancestors 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob: https://phinf.wevpstatic.net; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:; frame-ancestors 'self'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -215,19 +216,35 @@ func (s *Server) pruneSessionsLocked() {
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/api/weverse/reports", "/api/weverse/reports/preview", "/api/weverse/reports/download", "/api/weverse/reports/send", "/api/weverse/reports/backfill":
+	case "/api/weverse/reports", "/api/weverse/reports/preview", "/api/weverse/reports/download", "/api/weverse/reports/send", "/api/weverse/reports/backfill", "/api/weverse/reports/lives":
 		s.handleWeverseReports(w, r)
 	case "/api/weverse/post-passwords":
 		s.handleWeversePostPasswords(w, r)
 	case "/api/weverse/ai":
 		s.handleWeverseAI(w, r)
+	case "/api/outbound/targets":
+		s.handleOutboundTargets(w, r)
+	case "/api/weibo/sign-monitor":
+		s.handleWeiboSignMonitor(w, r)
+	case "/api/feishu/chats", "/api/feishu/test":
+		s.handleFeishu(w, r)
+	case "/api/hearts2hearts/glossary":
+		s.handleHearts2HeartsGlossary(w, r)
 	case "/api/instagram/browser":
 		s.handleInstagramBrowser(w, r)
 	case "/api/instagram/settings", "/api/instagram/search", "/api/instagram/preview", "/api/instagram/session":
 		s.handleInstagram(w, r)
+	case "/api/bilibili/settings", "/api/bilibili/search", "/api/bilibili/preview":
+		s.handleBilibili(w, r)
+	// ★ TikTok 配置页（2026-10-04 补齐）。此前面板里完全没有 TikTok，
+	//   根因是配置寄居在 config.json 的 TIKTOK_SUBSCRIPTIONS，
+	//   而面板所有平台页都围绕 storage/<平台>/settings.json 构建。
+	//   handler 写好了没注册 = 路由表里查不到（这个坑抖音/TikTok 登录入口也踩过）。
+	case "/api/tiktok/settings", "/api/tiktok/preview":
+		s.handleTiktok(w, r)
 	case "/api/melon/settings", "/api/melon/search", "/api/melon/preview":
 		s.handleMelon(w, r)
-	case "/api/x/settings", "/api/x/search", "/api/x/preview":
+	case "/api/x/settings", "/api/x/search", "/api/x/preview", "/api/x/viral", "/api/x/viral/confirm", "/api/x/viral/snapshot", "/api/x/viral/export.csv", "/api/x/viral/report.html":
 		s.handleX(w, r)
 	case "/api/weverse/settings", "/api/weverse/search", "/api/weverse/members", "/api/weverse/browser", "/api/weverse/preview":
 		s.handleWeverse(w, r)
@@ -269,6 +286,16 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleBrowserX(w, r)
 	case "/api/browser/weibo":
 		s.handleBrowserWeibo(w, r)
+	case "/api/browser/bilibili":
+		s.handleBrowserBilibili(w, r)
+	// ★ 抖音与 TikTok 的登录入口 2026-10-04 补上。
+	//   之前路由表里只有 status/x/weibo/session/ws，抖音与 B 站的 handler
+	//   都写好了却没注册 —— 表现就是浏览器页面只有 X 和微博两个按钮，
+	//   用户问「为什么抖音没有同步登录态的按钮」，根因在这里而不是前端。
+	case "/api/browser/douyin":
+		s.handleBrowserDouyin(w, r)
+	case "/api/browser/tiktok":
+		s.handleBrowserTiktok(w, r)
 	case "/api/browser/session":
 		s.handleBrowserSession(w, r)
 	case "/api/browser/ws":

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"pocket48-bot/internal/weverse"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWeverseReportPanelDoesNotExposeSMTPSecretsAndExportsWorkbook(t *testing.T) {
@@ -46,6 +48,33 @@ func TestWeverseReportPanelDoesNotExposeSMTPSecretsAndExportsWorkbook(t *testing
 	s.handleWeverseReports(response, httptest.NewRequest(http.MethodGet, "/api/weverse/reports/download?kind=monthly&year=2026&month=13", nil))
 	if response.Code != 400 {
 		t.Fatal("invalid period accepted")
+	}
+}
+
+func TestWeverseLiveAssignmentPanelPersistsParticipants(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := weverse.OpenHistory(weverse.Dir(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.SaveMembers(235, []weverse.Member{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}})
+	_ = h.Record([]weverse.Event{{ID: "live:one", PostID: "one", Kind: "live", CommunityID: 235, MemberID: "a", Author: "A", Body: "一起直播", CoverURL: "https://example.com/live.jpg", Time: time.Now().UnixMilli(), LiveStartedAt: time.Now().UnixMilli(), LiveDuration: 600}}, "")
+	h.Close()
+	s := &Server{opts: Options{ConfigPath: cfg}}
+	response := httptest.NewRecorder()
+	s.handleWeverseReports(response, httptest.NewRequest(http.MethodPut, "/api/weverse/reports/lives", bytes.NewBufferString(`{"postId":"one","participants":["a","b"]}`)))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"lives":[]`) {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	date := time.Now().In(weverse.ReportLocation).Format("2006-01-02")
+	response = httptest.NewRecorder()
+	s.handleWeverseReports(response, httptest.NewRequest(http.MethodGet, "/api/weverse/reports/lives?date="+date, nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"confirmed":true`) || !strings.Contains(response.Body.String(), `"coverUrl":"https://example.com/live.jpg"`) {
+		t.Fatal(response.Code, response.Body.String())
 	}
 }
 

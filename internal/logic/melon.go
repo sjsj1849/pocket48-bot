@@ -2,37 +2,93 @@ package logic
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"pocket48-bot/internal/melon"
-	"pocket48-bot/internal/napcat"
+	"pocket48-bot/internal/message"
 	"strings"
 	"time"
 )
 
-func melonMessage(sub melon.Subscription, event melon.Event) []interface{} {
+func melonMessage(sub melon.Subscription, event melon.Event) interface{} {
 	name := strings.TrimSpace(sub.ArtistName)
 	if name == "" {
 		name = "Melon 艺人"
 	}
-	parts := []interface{}{}
-	if sub.MentionsAll(event.Author) {
-		parts = append(parts, napcat.AtSegment("all"), napcat.TextSegment("\n"))
+	body := strings.TrimSpace(event.Body)
+	translation := strings.TrimSpace(event.Translation)
+	if translation == body {
+		translation = ""
 	}
-	parts = append(parts, napcat.TextSegment(fmt.Sprintf("【%s|Melon】\n%s\n%s", name, event.Title, event.Body)))
-	for _, image := range event.Images {
-		if image != "" {
-			parts = append(parts, napcat.TextSegment("\n"), napcat.ImageSegment(image))
-		}
+
+	// event.Title is a source tag (e.g. "Melon 官方文章" / "新专辑"), not the
+	// post's own title. It goes into the footer; Body carries the real content.
+	label := strings.TrimSpace(event.Title)
+
+	// ★ 单人内容（artist_note）顶栏用**真人名**，不是组合名（2026-10-05 修）。
+	//
+	// 现象：新专辑发布时 Melon 会给每位成员各发一条 Artist Note，
+	// 连着来一批（实测 17:01:16 一次入队 9 条 = 1 专辑 + 8 条单人）。
+	// 原来顶栏一律写订阅的艺人名 Hearts2Hearts，
+	// 于是「谁发的」完全看不出来 —— 用户原话「顶栏不要写 hearts to hearts」。
+	//
+	// event.Author 就是 note.ArtistName（真实成员名），原先只用来算
+	// MentionAll，白白浪费了。
+	author := name
+	if who := strings.TrimSpace(event.Author); who != "" {
+		author = who
 	}
-	footer := event.URL
+
+	// ★ 底栏来源：kind 决定板块名（Artist Note / 新专辑 / Music Wave…），
+	//   但要带上平台 —— 用户要求底栏写「Melon Artist Note」而不是光秃秃的
+	//   「artist note」。formatMelonLabel 统一处理。
+	doc := &message.Document{
+		Source:      "Melon",
+		Label:       formatMelonLabel(event, label),
+		Author:      author,
+		Body:        body,
+		Translation: translation,
+		Link:        event.URL,
+		MentionAll:  sub.MentionsAll(event.Author),
+	}
 	if event.Time > 0 {
-		footer += "\n\n" + time.UnixMilli(event.Time).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02")
+		doc.CreatedAt = time.UnixMilli(event.Time).In(time.FixedZone("CST", 8*3600))
 	}
-	if footer != "" {
-		parts = append(parts, napcat.TextSegment("\n\n"+footer))
+	// ★ 每人一条 Artist Note 都带两张图（成员照 + 专辑封面），
+	//   连着 8 条就是 16 张图刷屏 —— 用户问「那张单人照是什么，为什么每次都有」。
+	//   它们是 parseAlbumArtistNotes 里拼的 [ArtistImage, albumImage]。
+	//   专辑封面在 album 那条里已经有了，所以这里只保留**第一张**
+	//   （成员照），封面不重复发。
+	for i, image := range event.Images {
+		if image == "" {
+			continue
+		}
+		if i > 0 {
+			break
+		}
+		doc.Media = append(doc.Media, message.Media{Kind: "image", Source: image})
 	}
-	return parts
+	return doc
+}
+
+// formatMelonLabel 产出底栏来源标签。
+//
+// ★ 2026-10-05 用户指出底栏最左边出现「artist note」很难懂，
+//
+//	要求标明平台。统一加「Melon」前缀。
+//	artist_note -> "Melon Artist Note"（其余 kind 沿用 event.Title）。
+func formatMelonLabel(event melon.Event, label string) string {
+	if event.Kind == "artist_note" {
+		// event.Title 形如 "Artist Note · 成员名"，成员名已在顶栏，
+		// 底栏只需要板块名，别重复。
+		return "Melon Artist Note"
+	}
+	if label == "" {
+		return "Melon"
+	}
+	if strings.HasPrefix(label, "Melon") {
+		return label
+	}
+	return "Melon " + label
 }
 
 func (b *Bot) runMelonLoop(ctx context.Context) {
@@ -88,6 +144,14 @@ func (b *Bot) runMelonLoop(ctx context.Context) {
 				}
 				cursor := state.Subscriptions[sub.ID]
 				pending := melon.Pending(cursor, sub, events)
+				if settings.MusicWaveTranslate && len(pending) > 0 {
+					translated, translateErr := translateMelonEvents(ctx, b.cfg.ConfigPath(), settings, pending)
+					if translateErr != nil {
+						log.Printf("[Melon] 中文翻译失败，保留原文发送: %v", translateErr)
+					} else {
+						pending = translated
+					}
+				}
 				state.Subscriptions[sub.ID] = melon.Advance(cursor, sub, events)
 				if err := melon.Write(dir, "state.json", state); err != nil {
 					state.Subscriptions[sub.ID] = cursor
@@ -96,10 +160,7 @@ func (b *Bot) runMelonLoop(ctx context.Context) {
 				}
 				for _, event := range pending {
 					message := melonMessage(sub, event)
-					if strings.EqualFold(b.cfg.MediaDelivery, "local") {
-						b.localizeMessageGroups([][]interface{}{message})
-					}
-					b.napcat.SendGroupMessage(sub.GroupID, message)
+					b.sendToTargetIDs(sub.TargetIDs, message)
 					status.Forwarded++
 					log.Printf("[Melon] 新内容已入推送队列: artist=%s event=%s group=%d", sub.ArtistID, event.ID, sub.GroupID)
 				}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"pocket48-bot/internal/hearts2hearts"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +73,9 @@ func TestAIUsesWholeOriginalConversationAndSanitizesErrors(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
-		if payload.Model != "grok-4.5" || len(payload.Messages) != 2 || !strings.Contains(payload.Messages[1].Content, "parent-original") || !strings.Contains(payload.Messages[1].Content, "second-reply") || !strings.Contains(payload.Messages[1].Content, "artist") || !strings.Contains(payload.Messages[1].Content, "完整通顺") || !strings.Contains(payload.Messages[1].Content, "root-original") || !strings.Contains(payload.Messages[1].Content, `"imageCount":5`) {
-			t.Error("missing context")
+		content := payload.Messages[1].Content
+		if payload.Model != "grok-4.5" || len(payload.Messages) != 2 || !strings.Contains(content, "parent-original") || !strings.Contains(content, "second-reply") || !strings.Contains(content, "artist") || !strings.Contains(content, "完整通顺") || !strings.Contains(content, "root-original") || !strings.Contains(content, `"imageCount":5`) || !strings.Contains(content, "태자님") || !strings.Contains(content, "太子殿下") {
+			t.Errorf("missing context: glossary=%v image=%v", strings.Contains(content, "태자님"), strings.Contains(content, `"imageCount":5`))
 		}
 		w.WriteHeader(code)
 		if code == 200 {
@@ -86,14 +88,41 @@ func TestAIUsesWholeOriginalConversationAndSanitizesErrors(t *testing.T) {
 	defer server.Close()
 	cfg := AISettings{BaseURL: server.URL + "/v1", Model: "grok-4.5", APIKey: "confidential"}
 	b := AIBatch{Author: "IAN", PostContext: &AIPostContext{PostID: "p", Author: "IAN", MemberID: "artist", Body: "root-original", ImageCount: 5}, Entries: []AIEntry{{ID: "one", Author: "IAN", ParentAuthor: "粉丝", ParentBody: "parent-original", Body: "first-reply"}, {ID: "two", Author: "IAN", Body: "second-reply"}}}
-	result, err := SummarizeAI(context.Background(), cfg, b)
+	glossary := hearts2hearts.Glossary{Terms: []hearts2hearts.Term{{Source: "태자님", Target: "太子殿下"}}}
+	result, err := SummarizeAIWithGlossary(context.Background(), cfg, b, glossary)
 	if err != nil || !strings.Contains(result, "【评论 1】\n粉丝：上下文\n  IAN：第一条") || !strings.Contains(result, "【评论 2】\n  IAN：第二条\n\n这段在聊什么：\n完整上下文翻译") {
 		t.Fatal(result, err)
 	}
 	code = 401
-	_, err = SummarizeAI(context.Background(), cfg, b)
+	_, err = SummarizeAIWithGlossary(context.Background(), cfg, b, glossary)
 	if err == nil || strings.Contains(err.Error(), "confidential") {
 		t.Fatal("unsafe API error", err)
+	}
+}
+
+func TestAISettingsSelectSiliconFlowWithoutLosingCustomPool(t *testing.T) {
+	dir := t.TempDir()
+	cfg := AISettings{
+		Enabled: true, Provider: "siliconflow",
+		BaseURL: "https://custom.example.com/v1", Model: "custom-model", APIKey: "custom-key",
+		SiliconFlowModel: "THUDM/GLM-4-9B-0414", SiliconFlowAPIKey: "silicon-key",
+		IdleSeconds: 300,
+	}
+	if err := SaveAISettings(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadAISettings(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := loaded.Active()
+	if active.BaseURL != "https://api.siliconflow.cn/v1" || active.Model != "THUDM/GLM-4-9B-0414" || active.APIKey != "silicon-key" {
+		t.Fatalf("wrong active provider: %+v", active)
+	}
+	loaded.Provider = "custom"
+	active = loaded.Active()
+	if active.BaseURL != "https://custom.example.com/v1" || active.Model != "custom-model" || active.APIKey != "custom-key" {
+		t.Fatalf("custom pool was lost: %+v", active)
 	}
 }
 

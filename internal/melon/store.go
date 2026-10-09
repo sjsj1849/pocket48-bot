@@ -19,16 +19,17 @@ func Read[T any](dir, name string, value *T) error { return weverse.Read(dir, na
 func Write(dir, name string, value any) error      { return weverse.Write(dir, name, value) }
 
 type Event struct {
-	ID       string   `json:"id"`
-	Kind     string   `json:"kind"`
-	Title    string   `json:"title"`
-	Body     string   `json:"body"`
-	URL      string   `json:"url"`
-	Time     int64    `json:"time"`
-	Images   []string `json:"images"`
-	ArtistID string   `json:"artistId"`
-	Author   string   `json:"author,omitempty"`
-	Avatar   string   `json:"avatar,omitempty"`
+	ID          string   `json:"id"`
+	Kind        string   `json:"kind"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	Translation string   `json:"translation,omitempty"`
+	URL         string   `json:"url"`
+	Time        int64    `json:"time"`
+	Images      []string `json:"images"`
+	ArtistID    string   `json:"artistId"`
+	Author      string   `json:"author,omitempty"`
+	Avatar      string   `json:"avatar,omitempty"`
 }
 
 type Artist struct {
@@ -43,6 +44,7 @@ type Subscription struct {
 	ArtistID         string   `json:"artistId"`
 	ArtistName       string   `json:"artistName"`
 	GroupID          int64    `json:"groupId"`
+	TargetIDs        []string `json:"targetIds,omitempty"`
 	Enabled          bool     `json:"enabled"`
 	Releases         bool     `json:"releases"`
 	Magazines        bool     `json:"magazines"`
@@ -54,11 +56,14 @@ type Subscription struct {
 }
 
 type Settings struct {
-	Enabled              bool           `json:"enabled"`
-	PollSeconds          int            `json:"pollSeconds"`
-	MusicWavePollSeconds int            `json:"musicWavePollSeconds"`
-	ProxyURL             string         `json:"proxyURL,omitempty"`
-	Subscriptions        []Subscription `json:"subscriptions"`
+	Enabled                      bool           `json:"enabled"`
+	PollSeconds                  int            `json:"pollSeconds"`
+	MusicWavePollSeconds         int            `json:"musicWavePollSeconds"`
+	MusicWaveTranslate           bool           `json:"musicWaveTranslate"`
+	MusicWaveTranslationProvider string         `json:"musicWaveTranslationProvider,omitempty"`
+	MusicWaveTranslationAPIKey   string         `json:"musicWaveTranslationApiKey,omitempty"`
+	ProxyURL                     string         `json:"proxyURL,omitempty"`
+	Subscriptions                []Subscription `json:"subscriptions"`
 }
 
 type Status struct {
@@ -101,6 +106,16 @@ func ValidateSettings(settings Settings) error {
 	}
 	if settings.MusicWavePollSeconds < 5 || settings.MusicWavePollSeconds > 60 {
 		return fmt.Errorf("Music Wave 检查间隔应为 5–60 秒")
+	}
+	provider := strings.ToLower(strings.TrimSpace(settings.MusicWaveTranslationProvider))
+	if provider != "" && provider != "google" && provider != "deepl" && provider != "siliconflow" {
+		return fmt.Errorf("Music Wave 翻译服务仅支持硅基流动、Google 或 DeepL")
+	}
+	if len(settings.MusicWaveTranslationAPIKey) > 512 {
+		return fmt.Errorf("Music Wave 翻译 API Key 过长")
+	}
+	if settings.MusicWaveTranslate && (provider == "" || strings.TrimSpace(settings.MusicWaveTranslationAPIKey) == "") {
+		return fmt.Errorf("启用 Melon 自动翻译前请配置翻译服务和 API Key")
 	}
 	if settings.ProxyURL != "" {
 		u, err := url.Parse(settings.ProxyURL)
@@ -162,6 +177,13 @@ func (s Subscription) MentionsAll(author string) bool {
 }
 
 func SaveSettings(dir string, settings Settings) error {
+	old, err := LoadSettings(dir)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(settings.MusicWaveTranslationAPIKey) == "" {
+		settings.MusicWaveTranslationAPIKey = old.MusicWaveTranslationAPIKey
+	}
 	if err := ValidateSettings(settings); err != nil {
 		return err
 	}

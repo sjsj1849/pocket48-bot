@@ -15,8 +15,13 @@ import (
 // Weverse settings are separate from config.json so refreshed credentials and
 // monitoring cursors cannot be overwritten by other platform config saves.
 type Subscription struct {
-	ID               string   `json:"id"`
-	GroupID          int64    `json:"groupId"`
+	ID      string `json:"id"`
+	GroupID int64  `json:"groupId"`
+	// TargetIDs holds the explicit delivery targets ("platform:kind:address").
+	// When non-empty it fully replaces the legacy GroupID routing, so a
+	// subscription can fan out to QQ groups, QQ private, Feishu groups and
+	// Feishu private in any combination.
+	TargetIDs        []string `json:"targetIds,omitempty"`
 	CommunityID      int64    `json:"communityId"`
 	CommunityName    string   `json:"communityName"`
 	Slug             string   `json:"slug"`
@@ -50,6 +55,12 @@ type Status struct {
 }
 
 var fileMu sync.Mutex
+
+// MinPollSeconds 是轮询间隔下限，前端、校验与轮询循环共用同一个值，
+// 避免出现「界面允许 5 秒、后端却按 60 秒跑」的静默回落。
+const MinPollSeconds = 3
+const MaxPollSeconds = 3600
+const DefaultPollSeconds = 60
 
 func Dir(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), "storage", "weverse")
@@ -87,13 +98,13 @@ func Write(dir, name string, v any) error {
 	return os.Rename(f.Name(), filepath.Join(dir, name))
 }
 func LoadSettings(dir string) (Settings, error) {
-	s := Settings{PollSeconds: 60, Subscriptions: []Subscription{}}
+	s := Settings{PollSeconds: DefaultPollSeconds, Subscriptions: []Subscription{}}
 	err := Read(dir, "settings.json", &s)
 	return s, err
 }
 func SaveSettings(dir string, s Settings) error {
-	if s.PollSeconds < 30 || s.PollSeconds > 3600 {
-		return fmt.Errorf("检查间隔需为 30–3600 秒")
+	if s.PollSeconds < MinPollSeconds || s.PollSeconds > MaxPollSeconds {
+		return fmt.Errorf("检查间隔需为 %d–%d 秒", MinPollSeconds, MaxPollSeconds)
 	}
 	seen := map[string]bool{}
 	for _, v := range s.Subscriptions {

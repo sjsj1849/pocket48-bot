@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"pocket48-bot/internal/dedupe"
 	"pocket48-bot/internal/napcat"
 	"pocket48-bot/internal/xmonitor"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +17,28 @@ const (
 	xRegularTimelineLimit = 20
 	xDeepTimelineLimit    = 500
 	xUserRefreshInterval  = 6 * time.Hour
+	// 用户缓存上限，防止 state.json 无限增长。
+	xUserCacheLimit = 64
 )
+
+// xUserCacheKeys 仅用于日志，按字典序输出便于排查。
+func xUserCacheKeys(cache map[string]xUserCacheEntry) []string {
+	keys := make([]string, 0, len(cache))
+	for k := range cache {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// xSyncUserCache 把内存缓存回写到 Runtime，供下一次落盘。
+func xSyncUserCache(state *xmonitor.Runtime, cache map[string]xUserCacheEntry) {
+	persisted := make(map[string]xmonitor.UserCacheEntry, len(cache))
+	for k, v := range cache {
+		persisted[k] = xmonitor.UserCacheEntry{User: v.user, ExpiresAt: v.expiresAt}
+	}
+	state.UserCache = xmonitor.PruneUserCache(persisted, xUserCacheLimit)
+}
 
 type xUserCacheEntry struct {
 	user      xmonitor.User
@@ -38,24 +61,8 @@ func xRetryDelay(code string, consecutiveFailures int, regular time.Duration) ti
 	}
 }
 
-func xVideoURL(media xmonitor.Media) string {
-	best := xmonitor.Variant{}
-	for _, v := range media.Variants {
-		if v.URL != "" && v.Bitrate <= 2500000 && v.Bitrate > best.Bitrate {
-			best = v
-		}
-	}
-	if best.URL != "" {
-		return best.URL
-	}
-	for _, v := range media.Variants {
-		if v.URL != "" && (best.URL == "" || v.Bitrate < best.Bitrate) {
-			best = v
-		}
-	}
-	return best.URL
-}
-func xMessageGroups(sub xmonitor.Subscription, e xmonitor.Event) [][]interface{} {
+// configPath 用于跨平台去重索引（videoAlreadySent 需要它），故由调用方传入。
+func xMessageGroups(configPath string, sub xmonitor.Subscription, e xmonitor.Event) [][]interface{} {
 	name := e.Author.Name
 	if name == "" {
 		name = e.Author.Username
@@ -92,16 +99,22 @@ func xMessageGroups(sub xmonitor.Subscription, e xmonitor.Event) [][]interface{}
 	}
 	card := []interface{}{}
 	if sub.AtAll {
-		card = append(card, napcat.AtSegment("all"))
+		// @全体成员 独立成行，避免与正文首行粘连
+		card = append(card, napcat.AtSegment("all"), napcat.TextSegment("\n"))
 	}
 	card = append(card, napcat.TextSegment(strings.Join(lines, "\n")))
+	// ★ 只发图片/照片类媒体的图，**视频的封面不在这里发**
+	//   （2026-10-05 用户要求：文本消息里不要带视频占位）。
+	//
+	// 原来任何非photo/image 的媒体都取 m.Cover 当占位图先发一遍，
+	// 于是「文本+封面」→「再发视频」，视频的封面就出现了两次。
+	// 视频封面已由后面的 VideoSegment(url, m.Cover) 携带，不需要占位。
 	seen := map[string]bool{}
 	for _, m := range media {
-		url := m.URL
 		if m.Kind != "photo" && m.Kind != "image" {
-			url = m.Cover
+			continue
 		}
-		if url != "" && !seen[url] {
+		if url := strings.TrimSpace(m.URL); url != "" && !seen[url] {
 			card = append(card, napcat.TextSegment("\n"), napcat.ImageSegment(url))
 			seen[url] = true
 		}
@@ -115,12 +128,26 @@ func xMessageGroups(sub xmonitor.Subscription, e xmonitor.Event) [][]interface{}
 		card = append(card, napcat.TextSegment("\n\n"+footer))
 	}
 	groups := [][]interface{}{card}
+
+	// ★ 跨平台去重：只跳视频本体，文字与封面照发（2026-10-05 用户口径）。
+	//
+	// X 的时长来自推文 API 的 duration_ms（xmonitor.Media.DurationMS），
+	// **不需要下载**就能判定，所以命中时可以连下载都不发生。
+	skipVideo := xVideoAlreadySent(configPath, e)
+
 	seen = map[string]bool{}
 	for _, m := range media {
-		if url := xVideoURL(m); url != "" && !seen[url] {
-			groups = append(groups, []interface{}{napcat.VideoSegment(url, m.Cover)})
-			seen[url] = true
+		url := xVideoURL(m)
+		if url == "" || seen[url] {
+			continue
 		}
+		seen[url] = true
+		if skipVideo {
+			log.Printf("[X] 跳过视频（%d 秒内有平台已发过同一条）: id=%s",
+				dedupe.MatchWindowMillis/60000, e.ID)
+			continue
+		}
+		groups = append(groups, []interface{}{napcat.VideoSegment(url, m.Cover)})
 	}
 	return groups
 }
@@ -137,9 +164,22 @@ func (b *Bot) runXLoop(ctx context.Context) {
 	}
 	status := xmonitor.Status{StartedAt: time.Now().Format(time.RFC3339), Targets: map[string]string{}}
 	userCache := map[string]xUserCacheEntry{}
+	// 复用上次进程写入的解析结果，避免重启后集中重复查询 UserByScreenName
+	// 而把唯一账号触发 twscrape 自锁限流。
+	for key, entry := range xmonitor.PruneUserCache(state.UserCache, xUserCacheLimit) {
+		userCache[key] = xUserCacheEntry{user: entry.User, expiresAt: entry.ExpiresAt}
+	}
+	if len(userCache) > 0 {
+		log.Printf("[X] 已从 state.json 复用用户缓存 %d 条: %s", len(userCache), strings.Join(xUserCacheKeys(userCache), ","))
+	}
 	consecutiveFailures := 0
 	for {
 		if ctx.Err() != nil {
+			// 正常退出：把最新缓存写回 state.json，下次启动可直接复用。
+			xSyncUserCache(&state, userCache)
+			if xmonitor.Write(dir, "state.json", state) == nil {
+				log.Printf("[X] 用户缓存已落盘 %d 条", len(state.UserCache))
+			}
 			return
 		}
 		cfg, err := xmonitor.LoadSettings(dir)
@@ -218,6 +258,7 @@ func (b *Bot) runXLoop(ctx context.Context) {
 						e = advanceErr
 						if e == nil {
 							state.Subscriptions[sub.ID] = next
+							xSyncUserCache(&state, userCache)
 							e = xmonitor.Write(dir, "state.json", state)
 							if e != nil {
 								state.Subscriptions[sub.ID] = cursor
@@ -227,12 +268,12 @@ func (b *Bot) runXLoop(ctx context.Context) {
 									if ctx.Err() != nil {
 										return
 									}
-									groups := xMessageGroups(sub, event)
+									groups := xMessageGroups(b.cfg.ConfigPath(), sub, event)
 									if strings.EqualFold(b.cfg.MediaDelivery, "local") {
 										b.localizeMessageGroups(groups)
 									}
 									for _, group := range groups {
-										b.napcat.SendGroupMessage(sub.GroupID, group)
+										b.sendToTargetIDs(sub.TargetIDs, group)
 									}
 									status.Forwarded++
 									log.Printf("[X] 新帖子已入推送队列: @%s id=%s group=%s", sub.Username, event.ID, strconv.FormatInt(sub.GroupID, 10))
