@@ -3,6 +3,8 @@ package admin
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"pocket48-bot/internal/instagram"
 	"time"
 )
@@ -16,6 +18,10 @@ func (s *Server) handleInstagram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := instagram.Client{Dir: dir, ProxyURL: cfg.ProxyURL}
+	recovery := map[string]any{"deviceOnline": false, "deviceState": "offline"}
+	if s.instagramRecovery != nil {
+		recovery = s.instagramRecovery.panelState(time.Now())
+	}
 	switch r.URL.Path {
 	case "/api/instagram/settings":
 		if r.Method == http.MethodGet {
@@ -26,7 +32,9 @@ func (s *Server) handleInstagram(w http.ResponseWriter, r *http.Request) {
 			_ = instagram.Read(dir, "session.json", &session)
 			var status instagram.Status
 			_ = instagram.Read(dir, "status.json", &status)
-			writeJSON(w, 200, map[string]any{"settings": cfg, "sessionConfigured": session.Cookies["sessionid"] != "", "sessionUsername": session.Username, "status": status, "requestState": instagramRequestStatus(dir), "browser": instagramBrowserStatus(dir), "feedProbe": instagramProbeStatus(dir)})
+			mobileSession := instagramMobileSessionStatus(dir)
+			mobileConfigured, _ := mobileSession["configured"].(bool)
+			writeJSON(w, 200, map[string]any{"settings": cfg, "sessionConfigured": mobileConfigured || session.Cookies["sessionid"] != "", "sessionUsername": session.Username, "status": status, "requestState": instagramRequestStatus(dir), "mobileSession": mobileSession, "feedProbe": instagramProbeStatus(dir), "recovery": recovery})
 			return
 		}
 		if r.Method != http.MethodPut {
@@ -232,15 +240,28 @@ func instagramRequestStatus(dir string) map[string]any {
 	}
 	return map[string]any{"requestsLastHour": count, "nextRetryAt": retry, "reason": state.Reason}
 }
-func instagramBrowserStatus(dir string) map[string]any {
-	var state struct {
-		Configured bool   `json:"configured"`
-		Pending    bool   `json:"pending"`
-		UpdatedAt  int64  `json:"updatedAt"`
-		Error      string `json:"error"`
+
+// instagramMobileSessionStatus 报告**手机端登录态**的真实状态。
+//
+// 2026-10-09：Instagram 采集已改为复用手机端会话（mobile-session.json），
+// 原先汇报浏览器 Cookie 导入情况的 browserStatus 与实际链路无关，已删除。
+//
+// 这里只读文件是否存在与权限 —— 不解析内容，避免把凭据带进面板响应。
+func instagramMobileSessionStatus(dir string) map[string]any {
+	path := filepath.Join(dir, "mobile-session.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		return map[string]any{"configured": false}
 	}
-	_ = instagram.Read(dir, "browser-status.json", &state)
-	return map[string]any{"configured": state.Configured, "pending": state.Pending, "updatedAt": state.UpdatedAt, "error": state.Error}
+	out := map[string]any{
+		"configured": true,
+		"size":       info.Size(),
+	}
+	// 权限必须0600：文件里是完整鉴权头，被同机其它用户读到即可冒充登录。
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		out["insecurePermissions"] = fmt.Sprintf("%04o", perm)
+	}
+	return out
 }
 
 func instagramProbeStatus(dir string) map[string]any {

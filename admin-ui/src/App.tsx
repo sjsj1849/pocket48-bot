@@ -7,6 +7,7 @@ import { Configuration } from './pages/Configuration'
 import { BrowserSession } from './pages/BrowserSession'
 import { Logs } from './pages/Logs'
 import { Docs } from './pages/Docs'
+import { SignMonitor } from './pages/SignMonitor'
 
 const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: '总览', icon: Activity },
@@ -51,9 +52,29 @@ function Login({ onLogin }: { onLogin: () => void }) {
   )
 }
 
+// 支持 hash 直达，供截图工具打开指定页（面板路由本身是组件 state）。
+// 例：#/signSnapshot?hours=24&date=2026-10-07
+function initialPage(): Page {
+  const h = window.location.hash.replace(/^#\/?/, '').split('?')[0]
+  return h === 'signSnapshot' ? 'signSnapshot' : 'overview'
+}
+
+function snapshotParams(): { initialHours?: number; initialDate?: string; initialAnom?: string } {
+  const q = window.location.hash.split('?')[1] || ''
+  const p = new URLSearchParams(q)
+  const hours = Number(p.get('hours'))
+  const date = p.get('date') || ''
+  const anom = p.get('anom') || ''
+  return {
+    initialHours: Number.isFinite(hours) && hours > 0 ? hours : undefined,
+    initialDate: date || undefined,
+    initialAnom: anom || undefined,
+  }
+}
+
 export function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
-  const [page, setPage] = useState<Page>('overview')
+  const [page, setPage] = useState<Page>(initialPage())
   const [drawer, setDrawer] = useState(false)
 
   const verify = useCallback(async () => {
@@ -84,17 +105,23 @@ export function App() {
   }
 
   function navigate(next: Page) {
-    setPage(next)
+    // ★ 签到看板已并入「配置 → 微博 → 签到监控」，旧入口一律转到配置页。
+    setPage(next === 'signMonitor' ? 'config' : next)
     setDrawer(false)
   }
 
   if (authenticated === null) return <div className="boot-screen"><span /></div>
   if (!authenticated) return <Login onLogin={() => setAuthenticated(true)} />
 
-  const content = page === 'overview' ? <Overview onNavigate={navigate} />
-    : page === 'config' ? <Configuration />
-      : page === 'docs' ? <Docs />
-        : page === 'browser' ? <BrowserSession /> : <Logs />
+  const content = page === 'signSnapshot' ? <SignMonitor embedded {...snapshotParams()} />
+    : page === 'overview' ? <Overview onNavigate={navigate} />
+        : page === 'config' ? <Configuration />
+        : page === 'docs' ? <Docs />
+          // ★「签到监测」已并入「配置 → 微博 → 签到监控」（它本来就属于超话）。
+          //   这里保留旧 page id 的分支：外部事件/旧链接若还在跳 signMonitor，
+          //   直接落到配置页而不是渲染一个空白页。
+          : page === 'signMonitor' ? <Configuration />
+          : page === 'browser' ? <BrowserSession /> : <Logs />
 
   return (
     <div className="app-shell">

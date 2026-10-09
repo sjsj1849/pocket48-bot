@@ -17,6 +17,7 @@ type Response struct {
 	Events            []Event `json:"events"`
 	Username          string  `json:"username"`
 	SessionConfigured bool    `json:"sessionConfigured"`
+	SessionUpdated    bool    `json:"sessionUpdated"`
 }
 type Error struct {
 	Code        string
@@ -53,6 +54,12 @@ func (e *Error) Error() string {
 		return "Instagram 请求受到限流，稍后自动重试"
 	case "invalid_session":
 		return "Instagram 登录态需包含 sessionid 和 csrftoken"
+	case "session_candidate_invalid":
+		return "手机返回的 Instagram 授权会话格式无效"
+	case "session_account_mismatch":
+		return "手机 Instagram 账号与服务器当前账号不一致"
+	case "session_candidate_headers_invalid":
+		return "手机返回的 Instagram 请求头不完整或格式无效"
 	case "insecure_session_permissions":
 		return "Instagram 登录态文件权限需为 0600"
 	default:

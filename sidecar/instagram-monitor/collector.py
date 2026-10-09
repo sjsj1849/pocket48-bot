@@ -1,5 +1,7 @@
 """Read-only Instaloader bridge. Secrets arrive on stdin and stay in private JSON."""
 import argparse
+import base64
+import copy
 import contextlib
 import datetime
 import fcntl
@@ -14,7 +16,7 @@ import time
 import instaloader
 import requests
 from persistent_rate import PersistentLimiter, RateBlocked, SessionBlocked
-from feed_v1 import user_posts_v1, user_reels_graphql, FeedError
+from feed_v1 import MobileClient, user_posts_v1, user_reels_graphql, FeedError
 from browser_transport import browser_transport
 from guest_web import public_profile, public_posts, GuestWebError
 
@@ -22,6 +24,100 @@ from guest_web import public_profile, public_posts, GuestWebError
 class Failure(Exception):
     def __init__(self, code):
         self.code = code
+
+
+MOBILE_BRIDGE_HEADERS = {
+    'authorization', 'user-agent', 'x-ig-app-id', 'x-bloks-version-id',
+    'x-ig-device-id', 'x-ig-android-id', 'x-ig-family-device-id', 'x-mid',
+    'ig-u-rur', 'ig-u-ds-user-id', 'x-ig-user-id', 'x-ig-www-claim',
+    'x-ig-app-locale', 'x-ig-device-locale', 'x-ig-mapped-locale',
+    'x-ig-timezone-offset', 'x-ig-capabilities', 'x-ig-connection-type',
+}
+
+
+def decode_mobile_authorization(value, failure_code='invalid_session'):
+    prefix = 'Bearer IGT:2:'
+    try:
+        if not isinstance(value, str) or not value.startswith(prefix) or len(value) > 4096:
+            raise ValueError()
+        if '\n' in value or '\r' in value:
+            raise ValueError()
+        encoded = value[len(prefix):]
+        encoded += '=' * (-len(encoded) % 4)
+        payload = json.loads(base64.b64decode(encoded, validate=True))
+        user_id = str(payload.get('ds_user_id') or '')
+        session_id = str(payload.get('sessionid') or '')
+        if not user_id.isdigit() or not session_id or len(session_id) > 4096:
+            raise ValueError()
+        return {'ds_user_id': user_id, 'sessionid': session_id}
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise Failure(failure_code) from None
+
+
+def set_case_insensitive(mapping, name, value):
+    existing = next((key for key in mapping if key.lower() == name.lower()), name)
+    mapping[existing] = value
+
+
+def apply_mobile_session(request, directory, mobile_path, proxy, limiter=None):
+    if not mobile_path.exists() or mobile_path.stat().st_mode & 0o077:
+        raise Failure('invalid_session')
+    try:
+        original = json.loads(mobile_path.read_text())
+        old_headers = original['headers']
+        old_authorization = next(
+            value for name, value in old_headers.items() if name.lower() == 'authorization')
+    except (OSError, ValueError, KeyError, StopIteration, TypeError):
+        raise Failure('invalid_session') from None
+
+    authorization = request.get('authorization')
+    old_identity = decode_mobile_authorization(old_authorization)
+    new_identity = decode_mobile_authorization(authorization, 'session_candidate_invalid')
+    if old_identity['ds_user_id'] != new_identity['ds_user_id']:
+        raise Failure('session_account_mismatch')
+
+    supplied = request.get('headers') or {}
+    if not isinstance(supplied, dict) or len(supplied) > 64:
+        raise Failure('session_candidate_headers_invalid')
+    candidate = copy.deepcopy(original)
+    set_case_insensitive(candidate['headers'], 'Authorization', authorization)
+    for name, value in supplied.items():
+        if (not isinstance(name, str) or name.lower() not in MOBILE_BRIDGE_HEADERS
+                or name.lower() == 'authorization' or not isinstance(value, str)
+                or len(name) > 256 or len(value) > 16384 or '\n' in name + value or '\r' in name + value):
+            raise Failure('session_candidate_headers_invalid')
+        set_case_insensitive(candidate['headers'], name, value)
+    # Validate entirely in memory. A failed candidate must never touch the live file.
+    client = MobileClient(candidate, proxy_url=proxy)
+    # Recovery is the one operation that must run *because* the account is in a
+    # cooldown. Gating it would make a dead session unrecoverable: the collector
+    # sleeps, the new token can never be verified, and the backoff keeps growing.
+    previous_exempt = getattr(limiter, 'exempt', False)
+    if limiter is not None:
+        limiter.exempt = True
+    try:
+        result = execute_mobile({'operation': 'session_check'}, client, directory)
+    finally:
+        if limiter is not None:
+            limiter.exempt = previous_exempt
+    validated_identity = decode_mobile_authorization(
+        next(value for name, value in candidate['headers'].items()
+             if name.lower() == 'authorization'))
+    if validated_identity['ds_user_id'] != old_identity['ds_user_id']:
+        raise Failure('session_account_mismatch')
+
+    backup_dir = directory / 'session-backups'
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)
+    backup = backup_dir / f'mobile-session.{int(time.time() * 1000)}.json'
+    write_private(backup, original)
+    write_private(mobile_path, candidate)
+    result['sessionUpdated'] = True
+    # The fresh token answered a real API call, so the account is reachable.
+    # Release the backoff instead of leaving collection asleep until it expires.
+    if limiter is not None:
+        limiter.thaw()
+    return result
 
 
 
@@ -190,6 +286,221 @@ def raw_post_data(item, author, forced_kind=None):
             'time': int(item['taken_at']) * 1000, 'media': media, 'mediaOrderKnown': True}
 
 
+def mobile_author(user):
+    identifier = str(user.get('pk') or user.get('id') or '')
+    handle = username(str(user.get('username') or ''))
+    if not identifier.isdigit():
+        raise Failure('user_unavailable')
+    return {'id': identifier, 'username': handle,
+            'name': user.get('full_name') or handle,
+            'avatar': user.get('profile_pic_url_hd') or user.get('profile_pic_url') or '',
+            'protected': bool(user.get('is_private'))}
+
+
+def remember_mobile_author(directory, name, identifier):
+    """Remember a resolved id so later polls can skip usernameinfo entirely."""
+    path = directory / 'profile-cache.json'
+    try:
+        cached = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        cached = {}
+    if not isinstance(cached, dict) or cached.get(name) == identifier:
+        return
+    cached[name] = identifier
+    try:
+        write_private(path, cached)
+    except OSError:
+        pass
+
+
+def adopt_mobile_author(author, user):
+    """Fill an id-only author from the user object the feed already returned."""
+    if not isinstance(user, dict):
+        return
+    handle = str(user.get('username') or '')
+    if handle:
+        try:
+            author['username'] = username(handle)
+        except Failure:
+            pass
+    if user.get('full_name'):
+        author['name'] = user['full_name']
+    avatar = user.get('profile_pic_url_hd') or user.get('profile_pic_url')
+    if avatar:
+        author['avatar'] = avatar
+    if 'is_private' in user:
+        author['protected'] = bool(user['is_private'])
+
+
+def cached_mobile_author(directory, name):
+    """Build the author from the cached id, spending no request at all.
+
+    Every timeline poll used to call /api/v1/users/<name>/usernameinfo/ only to
+    turn a name into an id it had already cached. That endpoint is the one that
+    answers 429, and each 429 freezes the whole account, so the redundant call
+    was manufacturing the very cooldown that then blocked collection. Display
+    fields are filled in from the feed items themselves (see scan_mobile_items).
+    """
+    try:
+        cached = json.loads((directory / 'profile-cache.json').read_text())
+    except (OSError, ValueError):
+        return None
+    identifier = cached.get(name) if isinstance(cached, dict) else None
+    if not (isinstance(identifier, str) and identifier.isdigit()):
+        return None
+    return {'id': identifier, 'username': name, 'name': name,
+            'avatar': '', 'protected': False}
+
+
+def scan_mobile_items(iterator, author, limit, since, forced=None):
+    events = []
+    old = 0
+    for i, item in enumerate(iterator):
+        if i >= limit:
+            if since and old < 4:
+                raise Failure('scan_incomplete')
+            break
+        owner_user = item.get('user') or {}
+        owner = str(owner_user.get('pk') or '')
+        collaborators = [str(user.get('pk')) for user in item.get('coauthor_producers') or []]
+        if owner and owner != author['id'] and author['id'] not in collaborators:
+            raise Failure('user_unavailable')
+        # A cached author only knows the id; the feed item carries the rest, so
+        # avatar/display name still look right without a usernameinfo call.
+        if owner == author['id']:
+            adopt_mobile_author(author, owner_user)
+        stamp = int(item.get('taken_at') or 0) * 1000
+        if since and stamp < since:
+            old += 1
+            if old >= 4:
+                break
+            continue
+        old = 0
+        events.append(raw_post_data(item, author, forced))
+    return events
+
+
+def mobile_story_data(item, author):
+    prepared = {**item, 'code': item.get('code') or str(item.get('pk') or '')}
+    event = raw_post_data(prepared, author, 'story')
+    event['url'] = f'https://www.instagram.com/stories/{author["username"]}/{event["id"]}/'
+    return event
+
+
+def mobile_post_by_code(client, code, hint_username, directory):
+    """按短码定位一条内容，返回带完整 media 的原始节点。
+
+    ★ 为什么需要这一层（实测 2026-10-09）：
+    Instagram 已下线 media/shortcode/<code>/info/（返回 404 + HTML），
+    而 /p/<code>/ 链接里**没有作者用户名**，数字 media id 也无从得知。
+    于是只剩一条路：先有一个候选作者，再去他的列表里按短码精确匹配。
+
+    候选来源按「代价从低到高」：
+      1. 调用方给的用户名（Story 链接能直接带出来）→ 一次 usernameinfo；
+      2. profile-cache.json 里已知的作者（都是已订阅、已解析过的）→ 无需额外查询。
+
+    每个候选内部都是「命中即停」，所以常见情形只查一个作者。
+    """
+    if not code:
+        raise Failure('user_unavailable')
+    candidates = []
+    if hint_username:
+        candidates.append(str(hint_username))
+    try:
+        cached = json.loads((directory / 'profile-cache.json').read_text())
+        if isinstance(cached, dict):
+            candidates.extend(str(name) for name in cached)
+    except (OSError, ValueError):
+        pass
+    seen = set()
+    for name in candidates:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            user = mobile_author(client.user_info(name))
+            for iterator in (client.user_posts, client.user_clips):
+                for item in iterator(user['id']):
+                    if str(item.get('code') or '') != code:
+                        continue
+                    pk = str(item.get('pk') or '')
+                    if not pk.isdigit():
+                        continue
+                    # 列表项对轮播帖不含顶层 video_versions，必须再取一次详情。
+                    return client.media_info(pk)
+        except FeedError:
+            continue
+    raise Failure('user_unavailable')
+
+
+def execute_mobile(request, client, directory):
+    operation = request.get('operation')
+    if operation == 'session_check':
+        account = mobile_author(client.current_user())
+        return {'username': account['username'], 'sessionConfigured': True}
+    if operation == 'post_detail':
+        # 链接提取用：只取单条，不翻整条时间线。
+        # mediaId 优先（内部调用）；分享链接只有短码，而
+        # media/shortcode/<code>/info/ 已被 Instagram 下线（实测 404），
+        # 所以必须先有一个 user_id，再在该作者的列表里按短码定位。
+        media_id = str(request.get('mediaId') or '')
+        if media_id.isdigit():
+            item = client.media_info(media_id)
+        else:
+            item = mobile_post_by_code(client, str(request.get('code') or ''),
+                                        request.get('username'), directory)
+        # 单条接口偶尔不回 user（私密账号的边界情况），此时用调用方给的
+        # 用户名兜底，否则整条提取会因为「没有作者」而失败。
+        owner = item.get('user') or {}
+        if not owner.get('pk'):
+            fallback = username(request.get('username'))
+            owner = {'pk': media_id or str(item.get('pk') or '0'),
+                     'username': fallback, 'full_name': fallback}
+        author = mobile_author(owner)
+        event = raw_post_data(item, author, request.get('kind'))
+        return {'user': author, 'events': [event], 'feedAPI': 'mobile-v1',
+                'httpBackend': 'requests'}
+    name = username(request.get('query') if operation == 'lookup' else request.get('username'))
+    if operation == 'feed_probe':
+        user_id = str(request.get('userId') or '')
+        if not user_id.isdigit():
+            raise Failure('user_unavailable')
+        author = {'id': user_id, 'username': name, 'name': name,
+                  'avatar': '', 'protected': False}
+        events = scan_mobile_items(client.user_posts(user_id), author,
+                                   min(5, int(request.get('limit', 1))), 0)
+        return {'user': author, 'events': events, 'feedAPI': 'mobile-v1',
+                'httpBackend': 'requests'}
+    if operation == 'lookup':
+        return {'user': mobile_author(client.user_info(name)), 'profileAPI': 'mobile-v1'}
+    if operation != 'timeline':
+        raise Failure('invalid_request')
+    # Prefer the cached id: the usernameinfo call is the request that 429s, and a
+    # 429 freezes the account for the whole backoff window.
+    author = cached_mobile_author(directory, name)
+    if author is None:
+        author = mobile_author(client.user_info(name))
+        remember_mobile_author(directory, name, author['id'])
+    limit = min(max(int(request.get('limit', 100)), 1), 500)
+    since = request.get('since') or {}
+    events = []
+    if request.get('posts', True):
+        events.extend(scan_mobile_items(client.user_posts(author['id']), author, limit,
+                                        max(int(since.get('post', 0)), 0)))
+    if request.get('reels', True):
+        events.extend(scan_mobile_items(client.user_clips(author['id']), author, limit,
+                                        max(int(since.get('reel', 0)), 0), 'reel'))
+    if request.get('stories'):
+        events.extend(mobile_story_data(item, author) for item in client.user_story(author['id']))
+    dedup = {}
+    for event in events:
+        key = ('story' if event['kind'] == 'story' else 'post', event['id'])
+        if key not in dedup or event['kind'] == 'reel':
+            dedup[key] = event
+    return {'user': author, 'events': list(dedup.values()),
+            'profileAPI': 'mobile-v1', 'feedAPI': 'mobile-v1'}
+
+
 def story_data(item, author):
     media = {"kind": "image", "url": item.url}
     if item.is_video:
@@ -224,6 +535,7 @@ def scan_posts(iterator, author, limit, since, forced=None):
 def execute(request, directory):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / "session.json"
+    mobile_path = directory / "mobile-session.json"
     with open(directory / "session.lock", "a") as lock:
         os.chmod(lock.name, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -234,10 +546,33 @@ def execute(request, directory):
             operation = request.get("operation")
             if operation == "session_clear":
                 path.unlink(missing_ok=True)
+                mobile_path.unlink(missing_ok=True)
                 (directory / "pending-2fa.json").unlink(missing_ok=True)
                 (directory / "browser-candidate.json").unlink(missing_ok=True)
                 (directory / "profile-metadata.json").unlink(missing_ok=True)
                 return {"sessionConfigured": False}
+            if operation == 'session_mobile_apply':
+                proxy = request.get('proxyURL') or ''
+                with browser_transport(False):
+                    return apply_mobile_session(request, directory, mobile_path, proxy, limiter)
+            if mobile_path.exists() and operation in ("lookup", "timeline", "feed_probe", "session_check", "post_detail"):
+                if mobile_path.stat().st_mode & 0o077:
+                    raise Failure("insecure_session_permissions")
+                try:
+                    capture = json.loads(mobile_path.read_text())
+                except (OSError, ValueError):
+                    raise Failure('invalid_session') from None
+                proxy = request.get('proxyURL') or ''
+                with browser_transport(False):
+                    client = MobileClient(
+                        capture,
+                        proxy_url=proxy,
+                        on_state_change=lambda state: write_private(mobile_path, state),
+                    )
+                    result = execute_mobile(request, client, directory)
+                if operation == 'timeline':
+                    limiter.success()
+                return result
             loader = instaloader.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
                                            request_timeout=20, rate_controller=limiter.controller, iphone_support=False)
             proxy = request.get("proxyURL")

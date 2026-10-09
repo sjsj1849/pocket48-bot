@@ -1,4 +1,6 @@
 import datetime
+import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +11,69 @@ import collector as c
 
 
 class CollectorTests(unittest.TestCase):
+    @staticmethod
+    def mobile_token(user_id, session_id):
+        payload = json.dumps({'ds_user_id': user_id, 'sessionid': session_id}, separators=(',', ':')).encode()
+        return 'Bearer IGT:2:' + base64.b64encode(payload).decode()
+
+    def mobile_capture(self, token):
+        return {
+            'headers': {
+                'Authorization': token,
+                'User-Agent': 'Instagram test Android',
+                'X-IG-App-ID': '567067343352427',
+                'X-IG-Device-ID': 'device-old',
+            },
+            'cookies': {
+                'rur': 'old-rur',
+            },
+        }
+
+    def test_mobile_candidate_validates_then_atomically_replaces_and_backs_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            old = self.mobile_capture(self.mobile_token('12345678901', 'old-session'))
+            new_token = self.mobile_token('12345678901', 'new-session')
+            c.write_private(directory / 'mobile-session.json', old)
+            with patch.object(c, 'MobileClient') as client_class, patch.object(
+                    c, 'execute_mobile', return_value={'username': 'reader', 'sessionConfigured': True}):
+                client_class.return_value.capture = None
+                result = c.apply_mobile_session(
+                    {'authorization': new_token, 'headers': {'X-IG-Device-ID': 'device-new'}},
+                    directory,
+                    directory / 'mobile-session.json',
+                    '',
+                )
+            stored = json.loads((directory / 'mobile-session.json').read_text())
+            self.assertEqual(stored['headers']['Authorization'], new_token)
+            self.assertEqual(stored['headers']['X-IG-Device-ID'], 'device-new')
+            self.assertEqual(stored['cookies'], old['cookies'])
+            backups = list((directory / 'session-backups').glob('mobile-session.*.json'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(json.loads(backups[0].read_text()), old)
+            self.assertTrue(result['sessionUpdated'])
+            self.assertEqual((directory / 'mobile-session.json').stat().st_mode & 0o777, 0o600)
+
+    def test_mobile_candidate_failure_or_account_mismatch_preserves_existing_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            old = self.mobile_capture(self.mobile_token('12345678901', 'old-session'))
+            path = directory / 'mobile-session.json'
+            c.write_private(path, old)
+            same_account = self.mobile_token('12345678901', 'new-session')
+            with patch.object(c, 'MobileClient'), patch.object(
+                    c, 'execute_mobile', side_effect=c.FeedError('login_required')):
+                with self.assertRaises(c.FeedError):
+                    c.apply_mobile_session({'authorization': same_account, 'headers': {}}, directory, path, '')
+            self.assertEqual(json.loads(path.read_text()), old)
+            self.assertFalse((directory / 'session-backups').exists())
+
+            other_account = self.mobile_token('99999999999', 'other-session')
+            with self.assertRaises(c.Failure) as error:
+                c.apply_mobile_session({'authorization': other_account, 'headers': {}}, directory, path, '')
+            self.assertEqual(error.exception.code, 'session_account_mismatch')
+            self.assertEqual(json.loads(path.read_text()), old)
+
     def test_cached_profile_skips_search_and_checks_identity(self):
         import json
         with tempfile.TemporaryDirectory() as directory:
@@ -178,6 +243,90 @@ class CollectorTests(unittest.TestCase):
                 pending = (Path(directory) / 'pending-2fa.json').read_text()
                 self.assertNotIn('very-secret', pending)
                 self.assertTrue(json.loads(pending)['expires'] > c.time.time())
+
+    def test_timeline_reuses_cached_user_id_without_usernameinfo(self):
+        # The redundant usernameinfo call was what earned the 429s that then
+        # froze the account, so a cached id must be used without any request.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            c.write_private(directory / 'profile-cache.json', {'hearts2hearts': '71826772894'})
+            client = SimpleNamespace()
+            client.user_info = lambda name: self.fail('usernameinfo must not be called when the id is cached')
+            client.user_posts = lambda uid: iter([])
+            client.user_clips = lambda uid: iter([])
+            result = c.execute_mobile(
+                {'operation': 'timeline', 'username': 'hearts2hearts', 'limit': 5,
+                 'posts': True, 'reels': True}, client, directory)
+            self.assertEqual(result['user']['id'], '71826772894')
+            self.assertEqual(result['user']['username'], 'hearts2hearts')
+
+    def test_timeline_falls_back_to_usernameinfo_when_id_unknown_then_caches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            client = SimpleNamespace()
+            client.user_info = lambda name: {'pk': '71826772894', 'username': 'hearts2hearts',
+                                             'full_name': 'Hearts'}
+            client.user_posts = lambda uid: iter([])
+            client.user_clips = lambda uid: iter([])
+            c.execute_mobile({'operation': 'timeline', 'username': 'hearts2hearts',
+                              'limit': 5, 'posts': True, 'reels': True}, client, directory)
+            cached = json.loads((directory / 'profile-cache.json').read_text())
+            self.assertEqual(cached['hearts2hearts'], '71826772894')
+
+    def test_feed_item_fills_display_fields_of_cached_author(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            c.write_private(directory / 'profile-cache.json', {'hearts2hearts': '71826772894'})
+            author = c.cached_mobile_author(directory, 'hearts2hearts')
+            self.assertEqual(author['avatar'], '')
+            item = {'pk': '4000000001', 'code': 'ABC123', 'taken_at': 1700000000, 'media_type': 1,
+                    'user': {'pk': '71826772894', 'username': 'hearts2hearts',
+                             'full_name': 'Hearts', 'profile_pic_url': 'https://cdn/avatar.jpg'},
+                    'image_versions2': {'candidates': [{'url': 'https://cdn/1.jpg', 'width': 1080}]}}
+            events = c.scan_mobile_items(iter([item]), author, 5, 0)
+            self.assertEqual(author['name'], 'Hearts')
+            self.assertEqual(author['avatar'], 'https://cdn/avatar.jpg')
+            self.assertEqual(len(events), 1)
+
+    def test_candidate_apply_is_exempt_from_cooldown_and_thaws(self):
+        # Regression: cooldown used to block the very call that recovers a dead
+        # session, so the backoff could never be cleared from the phone.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            path = directory / 'mobile-session.json'
+            c.write_private(path, self.mobile_capture(self.mobile_token('12345678901', 'old')))
+            limiter = SimpleNamespace(exempt=False, thawed=False)
+            limiter.thaw = lambda: setattr(limiter, 'thawed', True)
+
+            def blocked_without_exempt(*args, **kwargs):
+                if not limiter.exempt:
+                    raise AssertionError('recovery ran while still rate limited')
+                return {'username': 'reader', 'sessionConfigured': True}
+
+            with patch.object(c, 'MobileClient'), patch.object(c, 'execute_mobile', blocked_without_exempt):
+                result = c.apply_mobile_session(
+                    {'authorization': self.mobile_token('12345678901', 'new'), 'headers': {}},
+                    directory, path, '', limiter)
+            self.assertTrue(result['sessionUpdated'])
+            self.assertTrue(limiter.thawed)
+            self.assertFalse(limiter.exempt)
+
+    def test_candidate_apply_restores_exempt_when_validation_raises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            path = directory / 'mobile-session.json'
+            old = self.mobile_capture(self.mobile_token('12345678901', 'old'))
+            c.write_private(path, old)
+            limiter = SimpleNamespace(exempt=False, thawed=False)
+            limiter.thaw = lambda: setattr(limiter, 'thawed', True)
+            with patch.object(c, 'MobileClient'), patch.object(c, 'execute_mobile', side_effect=c.FeedError('x')):
+                with self.assertRaises(c.FeedError):
+                    c.apply_mobile_session(
+                        {'authorization': self.mobile_token('12345678901', 'new'), 'headers': {}},
+                        directory, path, '', limiter)
+            self.assertEqual(json.loads(path.read_text()), old)
+            self.assertFalse(limiter.exempt)
+            self.assertFalse(limiter.thawed)
 
 if __name__ == '__main__':
     unittest.main()

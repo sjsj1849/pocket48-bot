@@ -1,4 +1,6 @@
-export type Page = 'overview' | 'config' | 'docs' | 'browser' | 'logs'
+// signSnapshot：签到监控的「内部快照页」，不出现在导航里。
+// 供 Playwright 截图生成 PNG —— 与面板复用同一组件，视觉完全一致。
+export type Page = 'overview' | 'config' | 'signMonitor' | 'docs' | 'browser' | 'logs' | 'signSnapshot'
 
 export interface ServiceState {
   id: string

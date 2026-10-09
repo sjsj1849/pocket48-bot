@@ -57,6 +57,18 @@ type Subscription struct {
 	Stories   bool     `json:"stories"`
 	AtAll     bool     `json:"atAll"`
 }
+
+// 采集周期边界（秒）。面板输入框与后端校验共用这两个常量，
+// 避免前端写死一套、后端又是另一套（记忆纪律：删导航/加字段前先 grep 所有引用点）。
+const (
+	MinPollSeconds = 60
+	MaxPollSeconds = 3600
+	// DefaultPollSeconds 是未配置时的取值。
+	// 60 秒来自用户 2026-10-09 的明确要求；Instagram 侧真被限流时
+	// 面板会显示冷却时间，到那时再调大即可。
+	DefaultPollSeconds = 60
+)
+
 type Settings struct {
 	Enabled       bool           `json:"enabled"`
 	PollSeconds   int            `json:"pollSeconds"`
@@ -76,7 +88,7 @@ type Status struct {
 }
 
 func LoadSettings(dir string) (Settings, error) {
-	s := Settings{PollSeconds: 300, Subscriptions: []Subscription{}}
+	s := Settings{PollSeconds: DefaultPollSeconds, Subscriptions: []Subscription{}}
 	e := Read(dir, "settings.json", &s)
 	return s, e
 }
@@ -100,7 +112,7 @@ func Username(value string) (string, error) {
 	return strings.ToLower(value), nil
 }
 func ValidateSettings(s Settings) error {
-	if s.PollSeconds < 60 || s.PollSeconds > 3600 {
+	if s.PollSeconds < MinPollSeconds || s.PollSeconds > MaxPollSeconds {
 		return fmt.Errorf("检查间隔应为 60–3600 秒")
 	}
 	if s.ProxyURL != "" {

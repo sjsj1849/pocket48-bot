@@ -91,4 +91,50 @@ class RateTests(unittest.TestCase):
                     limiter.gate()
                     with self.assertRaises(RateBlocked): requests.Session().get('https://www.instagram.com/api/v1/feed/user/42/')
 
+    def test_exempt_recovery_escapes_cooldown_and_thaws_on_success(self):
+        # A dead session must stay recoverable while the account is rate limited,
+        # otherwise the backoff grows until nobody can log in again.
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory);clock=Clock();limiter=clock.limiter(path)
+            self.assertRaises(RateBlocked, limiter.server_limit)
+            self.assertRaises(RateBlocked, limiter.reserve_http)
+            limiter.exempt = True
+            limiter.reserve_http()
+            limiter.thaw()
+            self.assertEqual(clock.limiter(path).gate(), None)
+
+    def test_exempt_recovery_ignores_request_budget(self):
+        # Recovery must not be refused by its own request budget, but the spent
+        # request is still recorded so the next poll sees the real pressure.
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory);clock=Clock()
+            for _ in range(12): clock.limiter(path).reserve_http()
+            self.assertRaises(RateBlocked, clock.limiter(path).reserve_http)
+            limiter = clock.limiter(path); limiter.exempt = True
+            limiter.reserve_http()
+            self.assertEqual(len(clock.limiter(path).state['requests']), 13)
+
+    def test_thaw_clears_backoff_and_streak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory);clock=Clock();limiter=clock.limiter(path)
+            self.assertRaises(RateBlocked, limiter.server_limit)
+            self.assertRaises(RateBlocked, limiter.server_limit)
+            self.assertEqual(limiter.state['failureStreak'], 2)
+            limiter.thaw()
+            fresh=clock.limiter(path)
+            self.assertEqual(fresh.state['blockedUntil'], 0)
+            self.assertEqual(fresh.state['failureStreak'], 0)
+            self.assertEqual(fresh.state['reason'], '')
+            fresh.reserve_http()
+
+    def test_exempt_flag_is_restored_after_recovery(self):
+        # The collector must go straight back to being rate limited once the
+        # one-off recovery call is done.
+        with tempfile.TemporaryDirectory() as directory:
+            limiter=Clock().limiter(Path(directory))
+            self.assertRaises(RateBlocked, limiter.server_limit)
+            limiter.exempt = True
+            limiter.exempt = False
+            with self.assertRaises(RateBlocked): limiter.gate()
+
 if __name__ == '__main__': unittest.main()

@@ -48,6 +48,9 @@ class PersistentLimiter:
         self.state.setdefault('requests', [])
         self.state.setdefault('builtin', {})
         self.state['requests'] = [t for t in self.state['requests'] if t > self.now() - 3600]
+        # Session recovery runs while the account is already rate limited, so it
+        # must be able to spend a request the collector itself would refuse.
+        self.exempt = False
 
     def save(self):
         self.state['updatedAt'] = self.now()
@@ -65,8 +68,20 @@ class PersistentLimiter:
         if self.state.get('sessionBlocked'):
             raise SessionBlocked()
         until = self.state.get('blockedUntil', 0)
-        if until > self.now():
+        if until > self.now() and not self.exempt:
             raise RateBlocked(until, self.state.get('reason', 'rate_limit'))
+
+    def thaw(self):
+        """A recovered session is live proof the account works again.
+
+        Leaving blockedUntil in place would keep the collector asleep for the
+        rest of the backoff window even though the whole point of the recovery
+        was to get the pipeline running again.
+        """
+        self.state['blockedUntil'] = 0
+        self.state['reason'] = ''
+        self.state['failureStreak'] = 0
+        self.save()
 
     def bind_session(self, cookies):
         if not isinstance(cookies, dict):
@@ -91,7 +106,7 @@ class PersistentLimiter:
             recent = [t for t in stamps if t > now - window]
             if len(recent) >= maximum:
                 waits.append(min(recent) + window + 1)
-        if waits:
+        if waits and not self.exempt:
             self.freeze(max(waits), 'request_budget')
         # Keep requests spaced across operations, including browser validation.
         delay = max(0, (stamps[-1] + 2 if stamps else 0) - now)
