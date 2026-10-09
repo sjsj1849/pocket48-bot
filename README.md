@@ -1,27 +1,54 @@
 # Pocket48 Bot
 
-基于 Go 的多平台偶像动态监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot v11），把口袋48、微博、抖音、Weverse、Melon、X、Instagram 等平台的动态转发到不同 QQ 群。
+基于 Go 的多平台偶像动态监控机器人，对接 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot v11），把口袋48、微博、抖音、小红书、B 站、TikTok、Weverse、Melon、X、Instagram 等平台的动态转发到不同 QQ 群或飞书群。
 
 主进程负责采集、去重、订阅路由和消息队列；NIM、浏览器自动化及部分实时协议由本机 sidecar 提供。Web 管理台可维护配置、订阅、登录态、日报和运行日志。
 
-> [!WARNING]
-> **小红书和 Instagram 当前不可用。** 两个平台的限流、登录校验和自动化风控会阻断稳定采集；即使 Cookie 或浏览器页面显示已登录，也不能代表监控链路可用。现有配置页和代码仅保留用于诊断与后续适配，请勿在生产环境启用，也不要依赖其消息通知。
+**当前状态：13 个服务中 12 个健康运行**（Bot、QChat、Live NIM、Gateway、Weibo、Feishu、Douyin、Douyin IM、Weverse、B 站、Melon、TikTok、X）。小红书与 Instagram 的采集与转发链路已实现并可在配置页完整配置，但受平台风控影响，当前**未启用**，详见下文对应章节。
 
 ## 功能
 
-### 管理面板截图
+### 管理面板
 
 开箱后可在浏览器打开管理台（默认本机 `http://127.0.0.1:8787`，密码见部署配置）。
 
-| 总览 | 配置（Bot） |
+| 总览 | 配置 |
 | :---: | :---: |
-| ![总览](docs/screenshots/01-overview.png) | ![配置 Bot](docs/screenshots/02-config-bot.png) |
+| ![总览](docs/screenshots/01-overview.png) | ![配置](docs/screenshots/02-config.png) |
 
-| 抖音订阅 | 小红书订阅 |
+总览页列出全部服务的健康状态、最近活动与资源占用；配置页覆盖
+**Bot / 消息出口 / 口袋48 / 微博 / 抖音 / 小红书 / B 站 / TikTok / Weverse / X / Instagram / Melon**
+共 12 个分组，各平台页可直接搜索、预览和维护订阅，不必只依赖 QQ 命令。
+
+**消息出口**
+
+| QQ | 飞书 |
 | :---: | :---: |
-| ![抖音](docs/screenshots/03-config-douyin.png) | ![小红书](docs/screenshots/04-config-xhs.png) |
+| ![消息出口](docs/screenshots/05-config-outlets.png) | ![消息出口](docs/screenshots/05-config-outlets.png) |
 
-配置页覆盖 **Bot / 口袋48 / 微博 / 抖音 / 小红书 / Weverse / Melon / X / Instagram**；各平台页可直接搜索、预览和维护订阅，不必只依赖 QQ 命令。
+**平台配置**
+
+| 微博 | 抖音 |
+| :---: | :---: |
+| ![微博配置](docs/screenshots/03-config-weibo.png) | ![抖音配置](docs/screenshots/04-config-douyin.png) |
+
+| 小红书 | B 站 |
+| :---: | :---: |
+| ![小红书配置](docs/screenshots/06-config-redbook.png) | ![B站配置](docs/screenshots/10-config-bilibili.png) |
+
+| Weverse | Melon |
+| :---: | :---: |
+| ![Weverse 配置](docs/screenshots/07-config-weverse.png) | ![Melon 配置](docs/screenshots/09-config-melon.png) |
+
+| Instagram | X |
+| :---: | :---: |
+| ![Instagram 配置](docs/screenshots/08-config-instagram.png) | ![内置浏览器会话](docs/screenshots/11-browser.png) |
+
+**其他面板**
+
+| 浏览器会话 | 运行日志 |
+| :---: | :---: |
+| ![浏览器会话](docs/screenshots/11-browser.png) | ![日志](docs/screenshots/12-logs.png) |
 
 
 ### 📱 口袋48 房间监控
@@ -67,18 +94,20 @@
 ### 🍈 Melon 监控
 - 支持 Music Wave 实时聊天、Artist Note、新专辑/MV、杂志/活动和照片/Story
 - 按艺人和 QQ 群独立订阅，可按成员名单控制 `@全体成员`
-- Music Wave 与普通动态使用独立轮询周期，消息按平台时间线排序后入队
+- Music Wave 与普通动态使用独立轮询周期；聊天跨轮询持久化聚合，满 10 条或等待 30 秒后合并发送
+- Music Wave 可独立配置 Google Cloud Translation Basic 或 DeepL，整批逐条附带中文翻译；4 秒内失败自动保留原文发送，不占用 Weverse AI
 - 设置、艺人搜索和只读预览均可在管理台完成；状态与去重游标保存在 `storage/melon/`
 
 ### 𝕏 X 监控
 - X 支持账号搜索、帖子预览、订阅和浏览器登录态维护；独立 worker 持久化限流状态
 - 通过管理台维护，浏览器会话和凭据只保存在 `storage/`，不得提交到 Git
 
-### 📷 Instagram（**当前不可用**）
-- Instagram 配置、登录态同步、订阅和预览代码仍保留，但平台限流与自动化风控使采集链路无法稳定工作
-- 管理台入口仅用于诊断和未来适配；当前请保持关闭，不应把 Cookie 可见或登录成功视为可用
+### 📷 Instagram（功能完整，受平台风控限制默认未启用）
+- Instagram 的配置、登录态同步、订阅、预览与消息转发均已实现，管理台可完整配置
+- **当前未启用**：平台对非官方客户端的风控较强，网页端采集会被限流；移动端 API 需要有效签名与移动端 TLS 指纹，尚未突破
+- 启用前请注意：Cookie 可见或登录成功**不等于**链路可用，请以总览页健康状态与实际投递为准
 
-### 📕 小红书监控（**当前不可用**）
+### 📕 小红书监控（功能完整，受平台风控限制默认未启用）
 - 个人主页新帖（图文/视频）推送，首次只建基线不刷历史
 - **主路径**：页内 `mnsv2 → XYS_` 签名 + 缓存 `X-S-Common` / `x-rap-param` → `user_posted` API（失败**不** goto 用户主页）
 - 登录态：Chromium Profile + `weibo-storage-state.json`（cookie + 小红书 localStorage）；登录成功才 force 写盘，失败扫描不覆盖好会话
@@ -88,8 +117,30 @@
 - 保守开播提醒（主页明确出现直播入口才通知；无弹幕/人数/下播统计）
 - **视频帖**：QQ 侧目前稳定发封面图 + 小红书链接，列表接口**不保证**视频文件本体
 - **浏览器内存**：侧卡默认 `--renderer-process-limit=4`；每 5 分钟 prune 孤儿页并打 `browserDiag`
-- ⚠️ **当前结论**：平台限流和风控导致 `user/me` 常为 guest、`user_posted` 易返回 461，扫码后仍可能被判定游客或账号异常，甚至触发平台违规提醒。**本链路当前不可用，请保持 `XIAOHONGSHU_ENABLED=false`。** 保留代码只用于诊断与后续适配；紧急停扫可 `touch storage/xhs-scan-paused`。
+- ⚠️ **当前结论**：功能链路完整，但平台风控导致 `user/me` 常为 guest、`user_posted` 易返回 461，扫码后仍可能被判定游客或账号异常。**默认保持 `XIAOHONGSHU_ENABLED=false`**，待风控窗口与账号环境稳定后再启用；紧急停扫可 `touch storage/xhs-scan-paused`。
 
+### 📺 B 站监控
+
+- **投稿、图文动态、专栏**推送，支持按 UP 主订阅并分别指定 QQ 群
+- **直播间开播/下播提醒**，基于公开的直播状态端点，无需登录
+- 独立的轮询间隔：动态 180 秒 / 投稿 60 秒 / 直播 60 秒（`pollSeconds` / `videoPollSeconds` / `livePollSeconds`）
+- 首次订阅只建立基线，**不回溯历史投稿**（`BaselineAt` 增量基线）。开启短视频后历史上被过滤的投稿不会一次性涌入
+- 按 `Seconds` 时长判定过滤长视频（`arc/search` 只返回 `"32:37"` 这样的字符串，需自行换算）
+- ⚠️ **端点可用性约束**（代码内实测结论）：投稿列表 / opus 图文流 / 专栏在机房 IP 可访问但**有频率限制**，
+  密集调用会返回 412 风控页或 `code -799`（请求过于频繁），必须低频轮询 + 退避；
+  综合动态流 `feed/space` 与视频详情 `view` 在机房 IP 一律 412，故不使用
+- 需要 `SESSDATA` / `bili_jct` Cookie（`storage/bilibili/settings.json`），请在配置页填入
+
+### 🎶 TikTok 监控
+
+- 按账号订阅，抓取公开作品列表，支持视频与图文
+- 默认 900 秒轮询（`pollSeconds`），支持每账号独立订阅与 QQ 群路由
+- ⚠️ **签名必须由真实浏览器计算**：TikTok 的 `X-Bogus` 签名无法在 Go 里复现
+  （实测 TikTokApi 7.x 的 `user.info()` 直接返回空对象），因此采集走
+  `sidecar/tiktok-monitor/collector.py` 子进程，通过 stdin 传一行 JSON、stdout 读一行 JSON
+- 该 sidecar **必须有独立硬超时**：历史实测数据 7 秒即到手，但收尾阶段可能挂死 143 秒，
+  真实卡点在关闭浏览器而非采集本身
+- 保留作品时长与下载地址，避免后续渲染时二次请求
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
 - 语音消息文件转发
@@ -274,14 +325,14 @@ cd sidecar/weibo-auth
 npm run test:douyin-im
 ```
 
-### 📕 小红书帖子监控（**当前不可用，仅保留诊断代码**）
+### 📕 小红书帖子监控（功能完整，受平台风控限制默认未启用）
 
 > ⚠️ **先看结论（2026-07 实战）**  
-> 小红书对自动化访问的限流和风控很严，本链路**当前不可用**，不能作为日常监控依赖。常见现象包括：
+> 小红书对自动化访问的限流和风控很严，本链路功能虽完整但**默认未启用**，不宜直接作为日常监控依赖。常见现象包括：
 > - 浏览器 Cookie / `web_session` 已落盘，但 `user/me` 仍为 **guest**，`user_posted` 返回 **HTTP 461** 或 notes=0  
 > - 扫码“登上去”后很快失效，或页面刷新后再次要求登录  
 > - 持续轮询可能加重账号/环境异常，甚至触发平台违规提醒  
-> **必须保持 `XIAOHONGSHU_ENABLED=false`。** 配置入口、登录与探针只为排障和未来适配保留；若必须诊断，先 `touch storage/xhs-scan-paused` 停止自动扫描，不要在生产环境开启总开关。
+> **默认保持 `XIAOHONGSHU_ENABLED=false`。** 若要试运行，请先用独立测试账号，并先 `touch storage/xhs-scan-paused` 暂停自动扫描观察一轮，确认不触发风控再放开。
 
 小红书复用微博/抖音的持久化 Chromium，不需要额外 sidecar。**当前主路径**是登录页（explore）上的页内签名后调用 edith `user_posted`，而不是每轮 `goto` 用户主页扒 DOM：
 
@@ -458,7 +509,7 @@ NapCat 的配置文件通常位于 `~/.config/QQ/` 或 NapCat 安装目录下的
 | `NIM_VIEWER_EVENT_ENABLED` | 推送其他小偶像进入/离开直播间事件 |
 | `WEIBO_BROWSER_AUTH_ENABLED` | 启用微博 Web Cookie 浏览器自动维护 |
 | `DOUYIN_ENABLED` | 启用抖音作品与直播监控 |
-| `XIAOHONGSHU_ENABLED` | 小红书诊断链路总开关；当前不可用，必须保持 `false` |
+| `XIAOHONGSHU_ENABLED` | 小红书监控总开关；受平台风控限制，默认 `false` |
 
 Weverse、Melon、X 和 Instagram 的设置不直接塞进 `config.json`：管理台分别写入 `storage/weverse/`、`storage/melon/`、`storage/x/` 和对应平台状态目录。这样浏览器同步的会话、自动刷新的 Token 和运行游标不会被其他配置保存操作覆盖。
 
@@ -489,7 +540,7 @@ bot code <验证码>          # 输入验证码完成登录
 | `BROWSER_PROFILE_DIR` | 共用 Chromium Profile 目录 | `"./storage/weibo-browser-profile"` |
 | `BROWSER_HEADLESS` | 共用浏览器使用无头模式 | `true` |
 | `BROWSER_PROXY_SERVER` | 可选：Chromium 代理（如 `http://127.0.0.1:17890`） | `""` |
-| `XIAOHONGSHU_ENABLED` | 小红书诊断链路；当前不可用，必须保持关闭 | `false` |
+| `XIAOHONGSHU_ENABLED` | 小红书监控总开关；受平台风控限制，默认关闭 | `false` |
 | `XIAOHONGSHU_POLL_SECONDS` | 小红书轮询间隔（秒；配置低于 30 回落 60） | `60` |
 | `XIAOHONGSHU_SUBSCRIPTIONS` | QQ 群→小红书内部用户 ID 订阅 | `{}` |
 | `DOUYIN_POLL_SECONDS` | 作品主页检查间隔（秒，最小 15） | `60` |
@@ -724,7 +775,7 @@ bot weibo cookie check
 
 ### 📕 小红书
 
-> 当前不可用。以下命令仅为诊断和未来适配保留，请勿在生产环境启用监控。
+> 链路完整但受平台风控限制，默认关闭。以下命令在启用总开关后可用。
 
 | 命令 | 说明 |
 | :--- | :--- |
@@ -782,7 +833,7 @@ bot help weibo
 │   ├── napcat/               # OneBot v11 客户端
 │   ├── pocket48/             # 口袋48 API
 │   ├── weverse/              # Weverse 客户端、直播、日报与密码帖
-│   ├── instagram/            # Instagram 诊断代码（当前不可用）
+│   ├── instagram/            # Instagram 采集与转发（默认未启用）
 │   ├── xmonitor/             # X 监控状态与采集器
 │   └── storage/              # 归档
 ├── sidecar/
