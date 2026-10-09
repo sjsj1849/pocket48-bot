@@ -62,3 +62,5 @@ bot48
 /gateway-ui/node_modules/
 /gateway-ui/*.tsbuildinfo
 .bak_logic.go
+
+/tmp/
