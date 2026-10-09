@@ -121,26 +121,51 @@
 
 ### 📺 B 站监控
 
-- **投稿、图文动态、专栏**推送，支持按 UP 主订阅并分别指定 QQ 群
-- **直播间开播/下播提醒**，基于公开的直播状态端点，无需登录
-- 独立的轮询间隔：动态 180 秒 / 投稿 60 秒 / 直播 60 秒（`pollSeconds` / `videoPollSeconds` / `livePollSeconds`）
+- **投稿、图文动态（opus）、专栏（article）**推送，支持按 UP 主订阅并分别指定 QQ 群
+- **直播间开播/下播提醒**，走 `live_user/v1/Master/info` 与 `Room/get_status_info_by_uids`
+- 三个独立轮询间隔：动态 180 秒 / 投稿 60 秒 / 直播 60 秒（`pollSeconds` / `videoPollSeconds` / `livePollSeconds`）
 - 首次订阅只建立基线，**不回溯历史投稿**（`BaselineAt` 增量基线）。开启短视频后历史上被过滤的投稿不会一次性涌入
-- 按 `Seconds` 时长判定过滤长视频（`arc/search` 只返回 `"32:37"` 这样的字符串，需自行换算）
-- ⚠️ **端点可用性约束**（代码内实测结论）：投稿列表 / opus 图文流 / 专栏在机房 IP 可访问但**有频率限制**，
-  密集调用会返回 412 风控页或 `code -799`（请求过于频繁），必须低频轮询 + 退避；
-  综合动态流 `feed/space` 与视频详情 `view` 在机房 IP 一律 412，故不使用
-- 需要 `SESSDATA` / `bili_jct` Cookie（`storage/bilibili/settings.json`），请在配置页填入
+- 长视频过滤靠 `Seconds` 时长判定（`arc/search` 只返回 `"32:37"` 这样的字符串，需自行换算）
+- **纯 HTTP 直连，不依赖登录态、也不需要浏览器 sidecar**（`internal/bilibili/store.go` 顶部注释明确如此）
+- ★ **投稿列表与用户资料必须走 WBI 签名**，否则风控返回 `-352`：
+  - 投稿列表 `x/space/wbi/arc/search` —— 匿名态返回 `-403`，只有 WBI 签名后机房 IP 才可用
+  - 用户资料 `x/space/wbi/acc/info`
+  - `x/space/navnum` 匿名态只能拿到计数，不能代替上述两个
+  - WBI 密钥**每天午夜轮换**，遇到 `-352`（风控校验失败）会强制重取签名重试
+  - `client.go` 里把 `-352` 单独建模为 `RiskControlError`
+- ⚠️ **限流是接口级硬限制**：`api/post/item_list` 连续请求 5-6 次后持续返回 0 字节约 5 分钟，
+  与是否登录无关 ⇒ 轮询间隔压不动，只能顺着它
 
 ### 🎶 TikTok 监控
 
 - 按账号订阅，抓取公开作品列表，支持视频与图文
-- 默认 900 秒轮询（`pollSeconds`），支持每账号独立订阅与 QQ 群路由
-- ⚠️ **签名必须由真实浏览器计算**：TikTok 的 `X-Bogus` 签名无法在 Go 里复现
-  （实测 TikTokApi 7.x 的 `user.info()` 直接返回空对象），因此采集走
-  `sidecar/tiktok-monitor/collector.py` 子进程，通过 stdin 传一行 JSON、stdout 读一行 JSON
-- 该 sidecar **必须有独立硬超时**：历史实测数据 7 秒即到手，但收尾阶段可能挂死 143 秒，
+- 默认 900 秒轮询（`pollSeconds`），每账号可独立订阅与 QQ 群路由
+- ★ **刻意不用登录态，走匿名链路**（2026-10-04 同账号 A/B 实测两轮，代码内 `new_context()` 注释有完整对照表）：
+
+  | 路径 | 登录态 | 匿名 |
+  | :--- | :--- | :--- |
+  | `item_list` 列表 | 限流 0 字节 | ✅ 3 条 |
+  | 作品页 `/video/` | ✅ 有正文 | ✅ 有正文 |
+  | 作品页封面 | ❌ **空** | ✅ CDN 地址 |
+
+  登录态虽然有效（页面显示「已关注」、32 个 cookie vs 匿名 7 个、msToken 172 字符 vs 124），
+  但**两条路径都拿不到更好数据，作品页甚至丢掉封面**（登录态下 rehydration 的 `video.cover` 结构变了）。
+  ⇒ 采集侧不读登录态；面板登录仅用于人工浏览与核对账号，快照落在 `storage/tiktok-browser/session.json`
+- **浏览器只负责算签名，不负责解析**：`X-Bogus` / `msToken` 签名必须由真实浏览器计算，
+  自己复刻必然随版本失效（TikTokApi 7.x 的 `user.info()` 直接返回空对象 → `KeyError: 'id'`），
+  所以用 Playwright 渲染 + 拦截 XHR
+- **必须用 Android Chrome UA + `is_mobile=true`**：桌面 Chrome UA 与 iPhone Safari UA 的
+  `api/post/item_list` 返回 0 字节（不是报错，是空响应），只有移动端 Android UA 返回完整数据
+- **视频必须在浏览器内 fetch**：TikTok CDN 拒绝一切外部客户端（curl 换任何 Referer/UA 都是 403），
+  而页面内 `fetch(url, {credentials:'include'})` 返回 200。根因是客户端指纹校验，不是缺登录态
+- **不需要登录**：全新访客（0 cookie）访问作品页，TikTok 自动下发 4 个匿名 cookie
+  （`msToken` / `ttwid` / `tt_csrf_token` / `tt_chain_token`），下载照样成功
+- 该 sidecar **必须有独立硬超时**：数据 7 秒即到手，但历史实测收尾阶段可能挂死 143 秒，
   真实卡点在关闭浏览器而非采集本身
-- 保留作品时长与下载地址，避免后续渲染时二次请求
+- ⚠️ A/B 实验纪律：**必须让后跑的那组不消耗前组的配额**，否则结论无效
+  （第一版对照「anon 先跑、login 后跑」只隔几秒，login 撞上 anon 自己触发的限流窗口，
+  看起来像「登录态被限流」）
+
 ### 🖼️ 消息转发
 - 图片自动下载并转为 Base64 发送（兼容 NapCat）
 - 语音消息文件转发
