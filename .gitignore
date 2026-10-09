@@ -46,3 +46,19 @@ scripts/llbot_auto_revive.py
 storage/live-liveupdate-dumps/
 
 /sidecar/instagram-monitor/.venv/
+
+# ---- 一次性补丁脚本与备份文件（不入库）----
+tmp_*.py
+tmp_*.out
+*.bak
+*.bak-*
+.bak-*/
+config.json.bak*
+internal/*/*.bak-*
+sidecar/*/*.bak-*
+.sign-alerts.json
+pocket48-*.bak-*
+bot48
+/gateway-ui/node_modules/
+/gateway-ui/*.tsbuildinfo
+.bak_logic.go

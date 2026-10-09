@@ -1,0 +1,2360 @@
+[
+ {
+  "id_str": "1216680126626922502",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "116792542371839",
+   "comment_type": 1,
+   "comment_id_str": "116792542371839",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": {
+    "text": "置顶"
+   },
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1782118817",
+    "pub_time": "6月22日",
+    "pub_action": "与他人联合创作",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV18w7P6uEE9",
+      "aid": "116792542371839",
+      "cover": "http://i0.hdslb.com/bfs/archive/4ee187640d0931531b63e765bbcea2b92ccf45c7.jpg",
+      "jump_url": "//www.bilibili.com/video/BV18w7P6uEE9",
+      "stat": {
+       "danmaku": "1.2万",
+       "play": "123.8万",
+       "vt": ""
+      },
+      "duration_text": "03:21",
+      "title": "Hearts2Hearts《Lemon Tang》MV",
+      "desc": "",
+      "badge": {
+       "icon_url": "",
+       "text": "合作视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 8,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 7742,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 45315,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": {
+    "items": [
+     {
+      "type": 1,
+      "desc": {
+       "text": "好听但是这里是啥意思",
+       "rich_text_nodes": [
+        {
+         "text": "今天可不可以下雨：",
+         "orig_text": "今天可不可以下雨：",
+         "type": "RICH_TEXT_NODE_TYPE_AT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "3546801764305363",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        },
+        {
+         "text": "好听但是这里是啥意思",
+         "orig_text": "好听但是这里是啥意思",
+         "type": "RICH_TEXT_NODE_TYPE_TEXT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        }
+       ],
+       "paragraphs": [],
+       "has_more": false
+      }
+     }
+    ]
+   },
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ },
+ {
+  "id_str": "1255698117835096102",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "117387898653538",
+   "comment_type": 1,
+   "comment_id_str": "117387898653538",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": null,
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1791203401",
+    "pub_time": "2小时前",
+    "pub_action": "投稿了视频",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV1jHH46bExa",
+      "aid": "117387898653538",
+      "cover": "http://i0.hdslb.com/bfs/archive/583f8e0d0d2b81ad6c593f43d10a7103a27f4108.jpg",
+      "jump_url": "//www.bilibili.com/video/BV1jHH46bExa",
+      "stat": {
+       "danmaku": "22",
+       "play": "4652",
+       "vt": ""
+      },
+      "duration_text": "00:19",
+      "title": "【Hearts2Hearts】嘚瑟NIC HEART",
+      "desc": "-",
+      "badge": {
+       "icon_url": "",
+       "text": "投稿视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 0,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 37,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 861,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": null,
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ },
+ {
+  "id_str": "1255682655940247592",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "117385969271997",
+   "comment_type": 1,
+   "comment_id_str": "117385969271997",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": null,
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1791199801",
+    "pub_time": "3小时前",
+    "pub_action": "投稿了视频",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV1SgHW6uELs",
+      "aid": "117385969271997",
+      "cover": "http://i1.hdslb.com/bfs/archive/f7cdc91acac046d0b5f23337cc40e25216d88cf8.jpg",
+      "jump_url": "//www.bilibili.com/video/BV1SgHW6uELs",
+      "stat": {
+       "danmaku": "53",
+       "play": "6811",
+       "vt": ""
+      },
+      "duration_text": "00:30",
+      "title": "【Hearts2Hearts】me every time this part hits",
+      "desc": "-",
+      "badge": {
+       "icon_url": "",
+       "text": "投稿视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 2,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 51,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 1316,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": null,
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ },
+ {
+  "id_str": "1255644035584884791",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "117385935718354",
+   "comment_type": 1,
+   "comment_id_str": "117385935718354",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": null,
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1791190809",
+    "pub_time": "5小时前",
+    "pub_action": "投稿了视频",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV11JHW6AEuT",
+      "aid": "117385935718354",
+      "cover": "http://i1.hdslb.com/bfs/archive/a33548a9b2c21a05befa229e870a1a9a4ee6241c.jpg",
+      "jump_url": "//www.bilibili.com/video/BV11JHW6AEuT",
+      "stat": {
+       "danmaku": "588",
+       "play": "2.3万",
+       "vt": ""
+      },
+      "duration_text": "03:09",
+      "title": "【Hearts2Hearts】都到齐了吧？",
+      "desc": "-",
+      "badge": {
+       "icon_url": "",
+       "text": "投稿视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 35,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 323,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 4158,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": null,
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ },
+ {
+  "id_str": "1255339732886355969",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "117382831934250",
+   "comment_type": 1,
+   "comment_id_str": "117382831934250",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": null,
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1791119958",
+    "pub_time": "昨天 21:19",
+    "pub_action": "投稿了视频",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV1sSH76EEJJ",
+      "aid": "117382831934250",
+      "cover": "http://i2.hdslb.com/bfs/archive/a605fe9e226cc3190d5f31f7147c27a835ec35df.jpg",
+      "jump_url": "//www.bilibili.com/video/BV1sSH76EEJJ",
+      "stat": {
+       "danmaku": "83",
+       "play": "4.8万",
+       "vt": ""
+      },
+      "duration_text": "00:13",
+      "title": "【Hearts2Hearts】姐姐狗狗和妹妹狗狗 @aespa",
+      "desc": "-",
+      "badge": {
+       "icon_url": "",
+       "text": "投稿视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 24,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 181,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 9074,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": {
+    "items": [
+     {
+      "type": 1,
+      "desc": {
+       "text": "爱着两个短发妹",
+       "rich_text_nodes": [
+        {
+         "text": "池一个吧ccccc：",
+         "orig_text": "池一个吧ccccc：",
+         "type": "RICH_TEXT_NODE_TYPE_AT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "525357258",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        },
+        {
+         "text": "爱着两个短发妹",
+         "orig_text": "爱着两个短发妹",
+         "type": "RICH_TEXT_NODE_TYPE_TEXT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        }
+       ],
+       "paragraphs": [],
+       "has_more": false
+      }
+     }
+    ]
+   },
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ },
+ {
+  "id_str": "1255303874209644564",
+  "type": "DYNAMIC_TYPE_AV",
+  "basic": {
+   "rid_str": "117381003217367",
+   "comment_type": 1,
+   "comment_id_str": "117381003217367",
+   "like_icon": {
+    "id": "0",
+    "start_url": "",
+    "action_url": "",
+    "end_url": ""
+   },
+   "in_audit": false,
+   "is_only_fans": false,
+   "editable": false,
+   "open_app_extra": "",
+   "jump_url": "",
+   "aigc": false
+  },
+  "visible": true,
+  "modules": {
+   "module_tag": null,
+   "module_author": {
+    "type": "AUTHOR_TYPE_NORMAL",
+    "avatar": {
+     "container_size": {
+      "width": 1.35,
+      "height": 1.35
+     },
+     "layers": [],
+     "fallback_layers": {
+      "group_id": "",
+      "layers": [
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 2,
+          "axis_x": 0.675,
+          "axis_y": 0.675
+         },
+         "size_spec": {
+          "width": 1,
+          "height": 1
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "AVATAR_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": true,
+         "allow_over_paint": false,
+         "layer_mask": {
+          "general_spec": {
+           "pos_spec": {
+            "coordinate_pos": 2,
+            "axis_x": 0.675,
+            "axis_y": 0.675
+           },
+           "size_spec": {
+            "width": 1,
+            "height": 1
+           },
+           "render_spec": {
+            "opacity": 1
+           }
+          },
+          "mask_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": false,
+             "day": {
+              "argb": "#FF000000"
+             },
+             "night": null
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 1,
+           "placeholder": 6,
+           "remote": {
+            "url": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+            "bfs_style": "widget-layer-avatar"
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.85,
+          "axis_y": 0.85
+         },
+         "size_spec": {
+          "width": 0.35,
+          "height": 0.35
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 5,
+         "res_native_draw": {
+          "draw_src": {
+           "src_type": 3,
+           "placeholder": 0,
+           "draw": {
+            "draw_type": 1,
+            "fill_mode": 1,
+            "color_config": {
+             "is_dark_mode_aware": true,
+             "day": {
+              "argb": "#FFFFFFFF"
+             },
+             "night": {
+              "argb": "#FF17181A"
+             }
+            },
+            "edge_weight": 0
+           }
+          }
+         }
+        }
+       },
+       {
+        "layer_id": "",
+        "visible": true,
+        "general_spec": {
+         "pos_spec": {
+          "coordinate_pos": 1,
+          "axis_x": 0.875,
+          "axis_y": 0.875
+         },
+         "size_spec": {
+          "width": 0.3,
+          "height": 0.3
+         },
+         "render_spec": {
+          "opacity": 1
+         }
+        },
+        "layer_config": {
+         "tags": {
+          "ICON_LAYER": {
+           "config_type": 0
+          }
+         },
+         "is_critical": false,
+         "allow_over_paint": false,
+         "layer_mask": null
+        },
+        "resource": {
+         "res_type": 3,
+         "res_image": {
+          "image_src": {
+           "src_type": 2,
+           "placeholder": 0,
+           "local": 3
+          }
+         }
+        }
+       }
+      ],
+      "group_mask": null,
+      "is_critical_group": true
+     },
+     "mid": "3546824314980440"
+    },
+    "face": "https://i2.hdslb.com/bfs/face/e465a8ecee226950f32a8ffceca0e8254e7b0591.jpg",
+    "face_nft": false,
+    "nft_info": null,
+    "name": "Hearts2Hearts",
+    "name_render": null,
+    "label": "",
+    "mid": 3546824314980440,
+    "jump_url": "//space.bilibili.com/3546824314980440/dynamic",
+    "following": true,
+    "pub_ts": "1791111609",
+    "pub_time": "昨天 19:00",
+    "pub_action": "投稿了视频",
+    "pub_location_text": "",
+    "pendant": {
+     "pid": 0,
+     "name": "",
+     "image": "",
+     "expire": "0",
+     "image_enhance": "",
+     "image_enhance_frame": "",
+     "n_pid": "0"
+    },
+    "vip": {
+     "type": 2,
+     "status": 1,
+     "due_date": "1833379200000",
+     "vip_pay_type": 0,
+     "theme_type": 0,
+     "label": {
+      "path": "http://i0.hdslb.com/bfs/vip/label_annual.png",
+      "text": "年度大会员",
+      "label_theme": "annual_vip",
+      "text_color": "#FFFFFF",
+      "bg_style": 1,
+      "bg_color": "#FB7299",
+      "border_color": "",
+      "use_img_label": true,
+      "img_label_uri_hans": "",
+      "img_label_uri_hant": "",
+      "img_label_uri_hans_static": "http://i0.hdslb.com/bfs/vip/10df1f7f4af1292f773489e36554a05177785143.png",
+      "img_label_uri_hant_static": "https://i0.hdslb.com/bfs/activity-plat/static/20220614/e369244d0b14644f5e1a06431e22a4d5/uckjAv3Npy.png"
+     },
+     "avatar_subscript": 1,
+     "nickname_color": "#FB7299",
+     "role": "3",
+     "avatar_subscript_url": "",
+     "tv_vip_status": 1,
+     "tv_vip_pay_type": 0,
+     "tv_due_date": "1822406400",
+     "avatar_icon": {
+      "icon_type": 3,
+      "icon_resource": {
+       "type": 1,
+       "url": "http://i0.hdslb.com/bfs/vip/dbe23f4ede5c120f11e18630cdd023010bce03b3.png@80w_80h_1c.webp"
+      }
+     }
+    },
+    "official_verify": {
+     "type": 0,
+     "desc": ""
+    },
+    "decorate": null,
+    "decoration_card": null,
+    "is_top": false,
+    "icon_badge": null,
+    "views_text": "",
+    "official": null,
+    "more": null,
+    "decorate_card": null
+   },
+   "module_more": {
+    "rcmd_text": "",
+    "three_point_items": [
+     {
+      "label": "举报",
+      "type": "THREE_POINT_REPORT",
+      "params": {},
+      "modal": null,
+      "jump_url": ""
+     }
+    ]
+   },
+   "module_dispute": null,
+   "module_dynamic": {
+    "topic": null,
+    "desc": null,
+    "major": {
+     "type": "MAJOR_TYPE_ARCHIVE",
+     "none": null,
+     "blocked": null,
+     "archive": {
+      "type": 1,
+      "bvid": "BV1iMHr6eETv",
+      "aid": "117381003217367",
+      "cover": "http://i0.hdslb.com/bfs/archive/5f57e70bdd75cb1f800582f2465600b7058666de.jpg",
+      "jump_url": "//www.bilibili.com/video/BV1iMHr6eETv",
+      "stat": {
+       "danmaku": "2928",
+       "play": "4.5万",
+       "vt": ""
+      },
+      "duration_text": "20:15",
+      "title": "【Hearts2Hearts】现在让大家和IAN的ChatGPT通话ᯓ★｜Hearts2Hearts 2026 TIMA BH2ND",
+      "desc": "",
+      "badge": {
+       "icon_url": "",
+       "text": "投稿视频",
+       "bg_color": "#FB7299",
+       "color": "#FFFFFF"
+      },
+      "enable_vt": 0,
+      "disable_preview": 0,
+      "premiere_online": "",
+      "stat_hidden": 0
+     },
+     "pgc": null,
+     "courses": null,
+     "draw": null,
+     "article": null,
+     "music": null,
+     "common": null,
+     "upower_common": null,
+     "live": null,
+     "live_rcmd": null,
+     "medialist": null,
+     "subscription": null,
+     "ugc_season": null,
+     "subscription_new": null,
+     "opus": null
+    },
+    "additional": null
+   },
+   "module_extend": null,
+   "module_stat": {
+    "forward": {
+     "status": false,
+     "count": 6,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "comment": {
+     "status": false,
+     "count": 184,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "like": {
+     "status": false,
+     "count": 3617,
+     "forbidden": false,
+     "disabled": false,
+     "silent": false,
+     "hidden": false
+    },
+    "coin": null,
+    "favorite": null
+   },
+   "module_interaction": {
+    "items": [
+     {
+      "type": 1,
+      "desc": {
+       "text": "留下一句“jiwoo长大了”然后害羞的跑开…哈[脱单doge]",
+       "rich_text_nodes": [
+        {
+         "text": "Laetus_L：",
+         "orig_text": "Laetus_L：",
+         "type": "RICH_TEXT_NODE_TYPE_AT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "15041930",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        },
+        {
+         "text": "留下一句“jiwoo长大了”然后害羞的跑开…哈",
+         "orig_text": "留下一句“jiwoo长大了”然后害羞的跑开…哈",
+         "type": "RICH_TEXT_NODE_TYPE_TEXT",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "",
+         "emoji": null,
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        },
+        {
+         "text": "[脱单doge]",
+         "orig_text": "[脱单doge]",
+         "type": "RICH_TEXT_NODE_TYPE_EMOJI",
+         "jump_url": "",
+         "icon_url": "",
+         "icon_name": "",
+         "rid": "",
+         "emoji": {
+          "type": "1",
+          "size": 1,
+          "text": "[脱单doge]",
+          "icon_url": "https://i0.hdslb.com/bfs/emote/bf7e00ecab02171f8461ee8cf439c73db9797748.png",
+          "gif_url": "",
+          "webp_url": "",
+          "jump_url": "",
+          "jump_title": "",
+          "package_id": "0",
+          "id": "0"
+         },
+         "goods": null,
+         "style": null,
+         "pics": [],
+         "video": null
+        }
+       ],
+       "paragraphs": [],
+       "has_more": false
+      }
+     }
+    ]
+   },
+   "module_share_info": null,
+   "module_fold": null
+  },
+  "orig": null
+ }
+]
